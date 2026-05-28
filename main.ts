@@ -11,11 +11,11 @@ export default class BrainAtlasPlugin extends Plugin {
 
     this.registerView(BRAIN_ATLAS_VIEW_TYPE, (leaf: WorkspaceLeaf) => new BrainAtlasView(leaf, this));
     this.addCommand({
-      id: "open-brain-atlas",
-      name: "Open Brain Atlas",
+      id: "open-view",
+      name: "Open atlas",
       callback: () => this.activateView()
     });
-    this.addRibbonIcon("brain", "Open Brain Atlas", () => this.activateView());
+    this.addRibbonIcon("brain", "Open atlas", () => this.activateView());
     this.addSettingTab(new BrainAtlasSettingTab(this));
 
     this.registerEvent(this.app.metadataCache.on("resolved", () => this.debouncedRefresh()));
@@ -23,10 +23,6 @@ export default class BrainAtlasPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("create", () => this.debouncedRefresh()));
     this.registerEvent(this.app.vault.on("delete", () => this.debouncedRefresh()));
     this.registerEvent(this.app.vault.on("rename", () => this.debouncedRefresh()));
-  }
-
-  onunload(): void {
-    this.app.workspace.detachLeavesOfType(BRAIN_ATLAS_VIEW_TYPE);
   }
 
   async saveSettings(): Promise<void> {

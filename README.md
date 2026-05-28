@@ -29,7 +29,7 @@ Brain Atlas is not in the official Obsidian community plugin directory yet. Use 
    ```
 
 4. Enable `Brain Atlas` in `Settings -> Community plugins`.
-5. Open the command palette and run `Open Brain Atlas`.
+5. Open the command palette and run `Brain Atlas: Open atlas`.
 
 ### Option 2: Manual Install
 
@@ -46,7 +46,7 @@ Brain Atlas is not in the official Obsidian community plugin directory yet. Use 
 3. Put the three downloaded files in that folder.
 4. Reload Obsidian.
 5. Enable `Brain Atlas` in `Settings -> Community plugins`.
-6. Open the command palette and run `Open Brain Atlas`.
+6. Open the command palette and run `Brain Atlas: Open atlas`.
 
 ### Option 3: Build from Source
 
@@ -62,7 +62,7 @@ Then reload Obsidian and enable the plugin.
 
 ## Usage
 
-Run `Open Brain Atlas` from the command palette or click the brain ribbon icon.
+Run `Brain Atlas: Open atlas` from the command palette or click the brain ribbon icon.
 
 Controls:
 

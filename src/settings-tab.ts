@@ -16,7 +16,9 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Brain Atlas" });
+    new Setting(containerEl)
+      .setName("Brain Atlas")
+      .setHeading();
 
     new Setting(containerEl)
       .setName("Theme palette")
@@ -66,10 +68,12 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         .setValue(this.plugin.settings.showLegendChip)
         .onChange((value) => this.update({ showLegendChip: value })));
 
-    containerEl.createEl("h3", { text: "Visible regions" });
+    new Setting(containerEl)
+      .setName("Visible regions")
+      .setHeading();
     for (const lobe of LOBES) {
       new Setting(containerEl)
-        .setName(LOBE_CENTERS[lobe].label)
+        .setName(formatLobeLabel(LOBE_CENTERS[lobe].label))
         .setDesc("Dim or restore this brain region in the atlas.")
         .addToggle((toggle) => toggle
           .setValue(this.plugin.settings.enabledLobes[lobe])
@@ -103,4 +107,8 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
     await this.plugin.saveSettings();
     this.plugin.refreshActiveBrainViews();
   }
+}
+
+function formatLobeLabel(label: string): string {
+  return label.charAt(0) + label.slice(1).toLowerCase();
 }
