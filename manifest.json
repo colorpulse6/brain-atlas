@@ -1,0 +1,10 @@
+{
+  "id": "brain-atlas",
+  "name": "Brain Atlas",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Render your vault as an animated 3D anatomical brain.",
+  "author": "colorpulse6",
+  "authorUrl": "https://github.com/colorpulse6",
+  "isDesktopOnly": false
+}
