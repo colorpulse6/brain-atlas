@@ -1,5 +1,8 @@
 node_modules
 main.js
+.playwright-cli/
+demo/brain-atlas-demo.js
+assets/brain-atlas-spin-frames/
 *.map
 dist
 .DS_Store
