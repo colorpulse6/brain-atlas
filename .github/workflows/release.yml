@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify tag matches manifest
+        run: |
+          node -e "const fs = require('fs'); const manifest = JSON.parse(fs.readFileSync('manifest.json', 'utf8')); if (manifest.version !== process.env.GITHUB_REF_NAME) { console.error(`Tag ${process.env.GITHUB_REF_NAME} does not match manifest version ${manifest.version}`); process.exit(1); }"
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css \
+            --title "Brain Atlas $GITHUB_REF_NAME" \
+            --notes "Brain Atlas $GITHUB_REF_NAME release assets are built by GitHub Actions and include artifact attestations."
+
+      - name: Attest release assets
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            ${{ github.workspace }}/main.js
+            ${{ github.workspace }}/manifest.json
+            ${{ github.workspace }}/styles.css

@@ -494,11 +494,11 @@ export class BrainRenderer {
     ctx.moveTo(projected.sx + 2.8, projected.sy - 2.8);
     ctx.lineTo(leadX - 4, leadY + 6);
     ctx.stroke();
-    ctx.font = "600 11px 'JetBrains Mono', ui-monospace, monospace";
+    ctx.font = "600 11px 'JetBrains Mono', monospace";
     ctx.textAlign = "left";
     ctx.fillStyle = hexA(color, alpha);
     ctx.fillText(label, leadX, leadY);
-    ctx.font = "9px 'JetBrains Mono', ui-monospace, monospace";
+    ctx.font = "9px 'JetBrains Mono', monospace";
     ctx.fillStyle = `rgba(200,215,235,${0.55 * alpha})`;
     ctx.fillText(subtitle, leadX, leadY + 12);
   }
@@ -521,7 +521,7 @@ export class BrainRenderer {
     graph: BrainGraph,
     lobeMul: (lobe?: LobeName) => number
   ): void {
-    ctx.font = "10px 'JetBrains Mono', ui-monospace, monospace";
+    ctx.font = "10px 'JetBrains Mono', monospace";
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     const labels = new Set(graph.nodes.filter((node) => node.hub).map((node) => node.id));
@@ -568,7 +568,7 @@ export class BrainRenderer {
       ctx.lineTo(projected.sx, projected.sy);
       ctx.stroke();
       ctx.fillStyle = hexA(graph.activePalette.hud, 0.5 + front * 0.4);
-      ctx.font = "8px 'JetBrains Mono', ui-monospace, monospace";
+      ctx.font = "8px 'JetBrains Mono', monospace";
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
       ctx.fillText(axis.name, projected.sx + 3, projected.sy);

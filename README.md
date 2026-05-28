@@ -97,7 +97,7 @@ Default lobe mapping:
 
 ## Privacy
 
-Brain Atlas reads Obsidian's local vault metadata and renders it in a local canvas view. It does not make network requests, upload vault contents, or require an account.
+Brain Atlas reads Obsidian's local vault metadata and renders it in a local canvas view. It enumerates Markdown files in the vault with Obsidian's vault API, then uses each note's path, basename, frontmatter, tags, links, and embeds from Obsidian's metadata cache to build the graph. It does not read full note contents, make network requests, upload vault data, or require an account.
 
 Because note names and paths appear visually in the graph when labels are enabled, use the `Labels` toggle before screensharing if your vault contains private note titles.
 

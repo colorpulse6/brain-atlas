@@ -1,6 +1,6 @@
 {
   "name": "brain-atlas",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Render an Obsidian vault as an animated 3D anatomical brain.",
   "main": "main.js",
   "scripts": {
@@ -26,7 +26,6 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.11.30",
-    "builtin-modules": "^3.3.0",
     "esbuild": "^0.21.5",
     "obsidian": "^1.5.12",
     "typescript": "^5.4.5"

@@ -9,7 +9,7 @@
   position: relative;
   background: #0c0b0e;
   color: #e8e6e0;
-  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-interface);
   user-select: none;
 }
 
@@ -44,7 +44,7 @@
   align-items: center;
   gap: 10px;
   color: rgba(220, 232, 255, 0.85);
-  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-monospace);
   font-size: 10px;
   letter-spacing: 1.4px;
 }
@@ -65,7 +65,7 @@
   top: 12px;
   right: 14px;
   color: rgba(180, 200, 220, 0.45);
-  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-monospace);
   font-size: 10px;
   letter-spacing: 1px;
 }
@@ -81,7 +81,7 @@
   align-items: flex-end;
   gap: 6px;
   pointer-events: auto;
-  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-monospace);
 }
 
 .brain-atlas-control-group {
@@ -128,7 +128,7 @@
   background: rgba(0, 0, 0, 0.18);
   backdrop-filter: blur(4px);
   pointer-events: auto;
-  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-monospace);
 }
 
 .brain-atlas-legend.is-hidden {
@@ -227,7 +227,7 @@
 .brain-atlas-focus-meta {
   margin-top: 4px;
   color: rgba(200, 215, 235, 0.62);
-  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-monospace);
   font-size: 10px;
 }
 
