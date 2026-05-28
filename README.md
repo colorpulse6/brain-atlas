@@ -2,6 +2,8 @@
 
 Brain Atlas is an Obsidian plugin that renders your vault as an animated 3D anatomical brain. Notes become nodes, links become neural pathways, and note types are grouped into brain regions.
 
+![Brain Atlas vault graph rendered as a 3D anatomical brain](assets/brain-atlas-screenshot.jpg)
+
 ## Features
 
 - Animated 3D brain view inside Obsidian.
