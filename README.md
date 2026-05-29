@@ -20,22 +20,18 @@ The animated preview below uses synthetic demo vault data.
 
 ## Install
 
-Brain Atlas is not in the official Obsidian community plugin directory yet. Use BRAT or manual installation.
+Brain Atlas is available in Obsidian's community plugin directory:
 
-### Option 1: Install with BRAT
+```text
+https://community.obsidian.md/plugins/brain-atlas
+```
 
-1. Install the BRAT plugin from Obsidian's community plugins.
-2. Open the command palette and run `BRAT: Add a beta plugin for testing`.
-3. Enter:
+1. Open `Settings -> Community plugins`.
+2. Search for `Brain Atlas`.
+3. Install and enable the plugin.
+4. Run **Brain Atlas: Open atlas** from the command palette.
 
-   ```text
-   https://github.com/colorpulse6/brain-atlas
-   ```
-
-4. Enable `Brain Atlas` in `Settings -> Community plugins`.
-5. Open the command palette and run `Brain Atlas: Open atlas`.
-
-### Option 2: Manual Install
+### Manual Install
 
 1. Download these files from the latest repo version or release:
    - `manifest.json`
@@ -52,7 +48,7 @@ Brain Atlas is not in the official Obsidian community plugin directory yet. Use 
 5. Enable `Brain Atlas` in `Settings -> Community plugins`.
 6. Open the command palette and run `Brain Atlas: Open atlas`.
 
-### Option 3: Build from Source
+### Build from Source
 
 ```bash
 npm install
