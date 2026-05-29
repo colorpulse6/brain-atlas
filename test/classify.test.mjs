@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyNote, normalizeKind } from "../src/classify.ts";
+import { classifyNote, classifyNoteDetailed, normalizeKind } from "../src/classify.ts";
 import { DEFAULT_SETTINGS } from "../src/settings.ts";
 
 function file(path) {
@@ -35,4 +35,33 @@ test("kind synonyms normalize to canonical renderer kinds", () => {
   assert.equal(normalizeKind("daily"), "dailyNote");
   assert.equal(normalizeKind("thread"), "workThread");
   assert.equal(normalizeKind("org"), "organization");
+});
+
+test("uncategorized notes use the configured default kind", () => {
+  const classification = classifyNoteDetailed(
+    file("Notes/Loose thought.md"),
+    {},
+    { ...DEFAULT_SETTINGS, defaultKind: "project" }
+  );
+
+  assert.deepEqual(classification, { kind: "project", source: "default" });
+});
+
+test("custom tag and folder mappings classify notes", () => {
+  assert.equal(
+    classifyNote(
+      file("Areas/Health.md"),
+      { tags: ["#area"] },
+      { ...DEFAULT_SETTINGS, tagKindMap: { area: "project" } }
+    ),
+    "project"
+  );
+  assert.equal(
+    classifyNote(
+      file("References/Book.md"),
+      {},
+      { ...DEFAULT_SETTINGS, folderKindMap: { References: "source" } }
+    ),
+    "source"
+  );
 });

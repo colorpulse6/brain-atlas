@@ -25,6 +25,8 @@ export type LobeName =
   | "cerebellum"
   | "stem";
 
+export type ClassificationSource = "frontmatter" | "tag" | "folder" | "filename" | "linkBehavior" | "default";
+
 export interface BrainNode {
   id: string;
   name: string;
@@ -36,6 +38,7 @@ export interface BrainNode {
   degree: number;
   color: string;
   path: string;
+  classificationSource: ClassificationSource;
   _3dLobe?: Vec3;
   _lobeName?: LobeName;
 }

@@ -2,7 +2,7 @@ import type { App, CachedMetadata, TFile } from "obsidian";
 import { classifyNoteDetailed, type CacheLike, type FileLike } from "./classify.ts";
 import { KIND_LABEL, PALETTES, CHAOS } from "./palette.ts";
 import { assignLobePositions } from "./shape.ts";
-import type { BrainAtlasSettings } from "./settings.ts";
+import type { BrainAtlasSettings, PinnedNodePosition } from "./settings.ts";
 import type { BrainEdge, BrainGraph, BrainNode, NodeKind } from "./types.ts";
 
 export interface NoteInput {
@@ -17,8 +17,11 @@ export interface LinkLike {
   link: string;
 }
 
-interface DraftNode extends BrainNode {
-  classificationSource: string;
+type DraftNode = BrainNode;
+
+interface KindInference {
+  kind: NodeKind;
+  source: BrainNode["classificationSource"];
 }
 
 export function buildGraphFromFiles(notes: NoteInput[], settings: BrainAtlasSettings): BrainGraph {
@@ -43,7 +46,8 @@ export function buildGraphFromFiles(notes: NoteInput[], settings: BrainAtlasSett
   let nodes: DraftNode[] = notes.map((note) => {
     const classification = classifyNoteDetailed(note.file, note.cache, settings);
     const linkedDegree = degree[note.file.path] ?? 0;
-    const kind = applyLinkBehaviorFallback(classification.kind, classification.source, linkedDegree, note.file, edges);
+    const inference = applyLinkBehaviorFallback(classification, linkedDegree, note.file, edges, settings);
+    const kind = inference.kind;
     return {
       id: note.file.path,
       path: note.file.path,
@@ -55,7 +59,7 @@ export function buildGraphFromFiles(notes: NoteInput[], settings: BrainAtlasSett
       hub: false,
       degree: linkedDegree,
       color: palette.kinds[kind] ?? palette.kinds.unknown,
-      classificationSource: classification.source
+      classificationSource: inference.source
     };
   });
 
@@ -73,6 +77,7 @@ export function buildGraphFromFiles(notes: NoteInput[], settings: BrainAtlasSett
   }));
   nodes = markHubs(nodes, settings.hubThresholdPercent);
   assignLobePositions(nodes);
+  applyPinnedNodePositions(nodes, settings.pinnedNodePositions);
 
   const idx = Object.fromEntries(nodes.map((node) => [node.id, node]));
   const adj = adjacency(nodes, edges);
@@ -162,19 +167,19 @@ function degreeByPath(edges: BrainEdge[]): Record<string, number> {
 }
 
 function applyLinkBehaviorFallback(
-  kind: NodeKind,
-  source: string,
+  classification: { kind: NodeKind; source: BrainNode["classificationSource"] },
   degree: number,
   file: FileLike,
-  edges: BrainEdge[]
-): NodeKind {
-  if (source !== "fallback") return kind;
+  edges: BrainEdge[],
+  settings: BrainAtlasSettings
+): KindInference {
+  if (!settings.inferKindsFromLinks || classification.source !== "default") return classification;
   const inDegree = edges.filter((edge) => edge.b === file.path).length;
   const outDegree = edges.filter((edge) => edge.a === file.path).length;
-  if (inDegree >= 8 && outDegree <= 2) return "index";
-  if (outDegree >= 10 && inDegree <= 2) return "source";
-  if (degree >= 12 && /index|home|map/i.test(file.basename)) return "index";
-  return kind;
+  if (inDegree >= 8 && outDegree <= 2) return { kind: "index", source: "linkBehavior" };
+  if (outDegree >= 10 && inDegree <= 2) return { kind: "source", source: "linkBehavior" };
+  if (degree >= 12 && /index|home|map/i.test(file.basename)) return { kind: "index", source: "linkBehavior" };
+  return classification;
 }
 
 function markHubs<T extends BrainNode>(nodes: T[], thresholdPercent: number): T[] {
@@ -214,4 +219,12 @@ function adjacency(nodes: BrainNode[], edges: BrainEdge[]): Record<string, strin
     adj[edge.b]?.push(edge.a);
   }
   return adj;
+}
+
+function applyPinnedNodePositions(nodes: BrainNode[], positions: Record<string, PinnedNodePosition>): void {
+  for (const node of nodes) {
+    const pinned = positions[node.id];
+    if (!pinned) continue;
+    node._3dLobe = { ...pinned };
+  }
 }

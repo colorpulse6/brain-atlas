@@ -13,7 +13,7 @@ export interface CacheLike {
 
 export interface Classification {
   kind: NodeKind;
-  source: "frontmatter" | "tag" | "folder" | "filename" | "fallback";
+  source: "frontmatter" | "tag" | "folder" | "filename" | "linkBehavior" | "default";
 }
 
 const KIND_SYNONYMS: Record<string, NodeKind> = {
@@ -70,7 +70,7 @@ export function classifyNoteDetailed(
   const filenameKind = kindFromFilename(file.basename, settings);
   if (filenameKind) return { kind: filenameKind, source: "filename" };
 
-  return { kind: "concept", source: "fallback" };
+  return { kind: settings.defaultKind, source: "default" };
 }
 
 function normalizedTags(cache: CacheLike | null | undefined): string[] {

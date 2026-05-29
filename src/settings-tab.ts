@@ -1,9 +1,11 @@
 import { PluginSettingTab, Setting } from "obsidian";
 import type BrainAtlasPlugin from "../main.ts";
+import { normalizeKind } from "./classify.ts";
 import { LOBES, setLobeEnabled } from "./lobe-visibility.ts";
 import { PALETTES } from "./palette.ts";
 import type { BrainAtlasSettings, PaletteName } from "./settings.ts";
 import { LOBE_CENTERS } from "./shape.ts";
+import { CANONICAL_KINDS, type NodeKind } from "./types.ts";
 
 export class BrainAtlasSettingTab extends PluginSettingTab {
   plugin: BrainAtlasPlugin;
@@ -69,6 +71,13 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         .onChange((value) => this.update({ showLegendChip: value })));
 
     new Setting(containerEl)
+      .setName("Pinned positions")
+      .setDesc(`${Object.keys(this.plugin.settings.pinnedNodePositions).length} nodes pinned by dragging.`)
+      .addButton((button) => button
+        .setButtonText("Reset")
+        .onClick(() => this.update({ pinnedNodePositions: {} })));
+
+    new Setting(containerEl)
       .setName("Visible regions")
       .setHeading();
     for (const lobe of LOBES) {
@@ -93,6 +102,27 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         .onChange((value) => this.update({ clickAction: value as BrainAtlasSettings["clickAction"] })));
 
     new Setting(containerEl)
+      .setName("Categorization")
+      .setHeading();
+
+    new Setting(containerEl)
+      .setName("Default category")
+      .setDesc("Category used when no frontmatter, tag, folder, filename, or link rule matches.")
+      .addDropdown((dropdown) => {
+        for (const kind of CANONICAL_KINDS) dropdown.addOption(kind, formatKindLabel(kind));
+        dropdown
+          .setValue(this.plugin.settings.defaultKind)
+          .onChange((value) => this.update({ defaultKind: value as NodeKind }));
+      });
+
+    new Setting(containerEl)
+      .setName("Infer categories from links")
+      .setDesc("Let uncategorized high-link notes become index or source notes when link structure strongly suggests it.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.inferKindsFromLinks)
+        .onChange((value) => this.update({ inferKindsFromLinks: value })));
+
+    new Setting(containerEl)
       .setName("Frontmatter kind keys")
       .setDesc("Comma-separated frontmatter fields checked for kind/type/category.")
       .addText((text) => text
@@ -100,6 +130,28 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         .onChange((value) => this.update({
           frontmatterKindKeys: value.split(",").map((item) => item.trim()).filter(Boolean)
         })));
+
+    new Setting(containerEl)
+      .setName("Tag mappings")
+      .setDesc("One per line: tag=category. Tags do not need #.")
+      .addTextArea((text) => {
+        text.setValue(kindMapToText(this.plugin.settings.tagKindMap));
+        text.inputEl.rows = 8;
+        text.inputEl.addEventListener("blur", () => this.update({
+          tagKindMap: parseKindMapText(text.getValue(), true)
+        }));
+      });
+
+    new Setting(containerEl)
+      .setName("Folder mappings")
+      .setDesc("One per line: folder=category. Folder names are matched against any path ancestor.")
+      .addTextArea((text) => {
+        text.setValue(kindMapToText(this.plugin.settings.folderKindMap));
+        text.inputEl.rows = 8;
+        text.inputEl.addEventListener("blur", () => this.update({
+          folderKindMap: parseKindMapText(text.getValue(), false)
+        }));
+      });
   }
 
   private async update(patch: Partial<BrainAtlasSettings>): Promise<void> {
@@ -111,4 +163,35 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
 
 function formatLobeLabel(label: string): string {
   return label.charAt(0) + label.slice(1).toLowerCase();
+}
+
+function formatKindLabel(kind: NodeKind): string {
+  switch (kind) {
+    case "dailyNote":
+      return "Daily note";
+    case "workThread":
+      return "Work thread";
+    default:
+      return kind.charAt(0).toUpperCase() + kind.slice(1);
+  }
+}
+
+function kindMapToText(map: Record<string, NodeKind>): string {
+  return Object.entries(map)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, kind]) => `${key}=${kind}`)
+    .join("\n");
+}
+
+function parseKindMapText(value: string, lowercaseKeys: boolean): Record<string, NodeKind> {
+  const map: Record<string, NodeKind> = {};
+  for (const entry of value.split(/[\n,]+/)) {
+    const [rawKey, rawKind] = entry.split("=");
+    if (!rawKey || !rawKind) continue;
+    const key = rawKey.replace(/^#/, "").trim();
+    const kind = normalizeKind(rawKind);
+    if (!key || !kind) continue;
+    map[lowercaseKeys ? key.toLowerCase() : key] = kind;
+  }
+  return map;
 }

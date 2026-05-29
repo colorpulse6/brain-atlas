@@ -1,9 +1,10 @@
 import { App, ItemView, TFile, WorkspaceLeaf } from "obsidian";
 import { buildGraph } from "./adapter.ts";
 import { LOBES, setAllLobes, setLobeEnabled } from "./lobe-visibility.ts";
+import { displayNodeName, displayNodePath } from "./node-display.ts";
 import { BrainRenderer } from "./renderer.ts";
 import { LOBE_CENTERS } from "./shape.ts";
-import type { BrainAtlasSettings } from "./settings.ts";
+import type { BrainAtlasSettings, PinnedNodePosition } from "./settings.ts";
 import type { BrainGraph, BrainNode, LobeName } from "./types.ts";
 
 export const BRAIN_ATLAS_VIEW_TYPE = "brain-atlas";
@@ -24,11 +25,16 @@ export class BrainAtlasView extends ItemView {
   private legendEl: HTMLDivElement | null = null;
   private tooltipEl: HTMLDivElement | null = null;
   private focusEl: HTMLDivElement | null = null;
+  private infoEl: HTMLDivElement | null = null;
   private emptyEl: HTMLDivElement | null = null;
+  private infoButton: HTMLButtonElement | null = null;
   private labelButton: HTMLButtonElement | null = null;
   private allButton: HTMLButtonElement | null = null;
   private noneButton: HTMLButtonElement | null = null;
   private lobeButtons: Partial<Record<LobeName, HTMLButtonElement>> = {};
+  private showInfo = false;
+  private pendingOpenNodeId: string | null = null;
+  private pendingOpenAt = 0;
 
   constructor(leaf: WorkspaceLeaf, plugin: BrainAtlasPluginHost) {
     super(leaf);
@@ -56,6 +62,7 @@ export class BrainAtlasView extends ItemView {
     this.createHud(root);
     this.createControls(root);
     this.legendEl = root.createDiv({ cls: "brain-atlas-legend" });
+    this.infoEl = root.createDiv({ cls: "brain-atlas-info-panel" });
     this.tooltipEl = root.createDiv({ cls: "brain-atlas-tooltip" });
     this.focusEl = root.createDiv({ cls: "brain-atlas-focus-card" });
     this.emptyEl = root.createDiv({ cls: "brain-atlas-empty" });
@@ -67,6 +74,7 @@ export class BrainAtlasView extends ItemView {
       idleAutoRotate: this.plugin.settings.idleAutoRotate,
       showLobeLabels: this.plugin.settings.showLobeLabels,
       enabledLobes: this.plugin.settings.enabledLobes,
+      onPinNode: (node, position) => this.pinNode(node, position),
       onChange: this.syncOverlays
     });
   }
@@ -83,6 +91,7 @@ export class BrainAtlasView extends ItemView {
         idleAutoRotate: this.plugin.settings.idleAutoRotate,
         showLobeLabels: this.plugin.settings.showLobeLabels,
         enabledLobes: this.plugin.settings.enabledLobes,
+        onPinNode: (node, position) => this.pinNode(node, position),
         onChange: this.syncOverlays
       });
     }
@@ -98,6 +107,7 @@ export class BrainAtlasView extends ItemView {
       idleAutoRotate: this.plugin.settings.idleAutoRotate,
       showLobeLabels: this.plugin.settings.showLobeLabels,
       enabledLobes: this.plugin.settings.enabledLobes,
+      onPinNode: (node, position) => this.pinNode(node, position),
       onChange: this.syncOverlays
     });
     this.syncOverlays();
@@ -111,12 +121,13 @@ export class BrainAtlasView extends ItemView {
     hud.createSpan({ text: " 6 regions" });
 
     const help = root.createDiv({ cls: "brain-atlas-help" });
-    help.setText("DRAG - rotate   -   SCROLL - zoom");
+    help.setText("DRAG NODE - pin   -   DRAG EMPTY - rotate   -   SCROLL - zoom");
   }
 
   private createControls(root: HTMLElement): void {
     this.controlsEl = root.createDiv({ cls: "brain-atlas-controls" });
     const primary = this.controlsEl.createDiv({ cls: "brain-atlas-control-group" });
+    this.infoButton = this.createControlButton(primary, "Info", () => this.toggleInfo());
     this.labelButton = this.createControlButton(primary, "Labels", () => this.toggleLabels());
     this.allButton = this.createControlButton(primary, "All", () => this.setAllRegions(true));
     this.noneButton = this.createControlButton(primary, "None", () => this.setAllRegions(false));
@@ -144,6 +155,7 @@ export class BrainAtlasView extends ItemView {
     if (!graph) return;
     this.syncControls();
     this.syncLegend(graph);
+    this.syncInfoPanel();
     this.syncTooltip();
     this.syncFocusCard();
     this.emptyEl?.toggleClass("is-visible", graph.nodes.length === 0);
@@ -151,6 +163,8 @@ export class BrainAtlasView extends ItemView {
 
   private syncControls(): void {
     const enabled = this.plugin.settings.enabledLobes;
+    this.infoButton?.toggleClass("is-active", this.showInfo);
+    this.infoButton?.setAttr("aria-pressed", String(this.showInfo));
     this.labelButton?.toggleClass("is-active", this.plugin.settings.showLobeLabels);
     this.labelButton?.setAttr("aria-pressed", String(this.plugin.settings.showLobeLabels));
     const enabledCount = LOBES.filter((lobe) => enabled[lobe]).length;
@@ -195,8 +209,10 @@ export class BrainAtlasView extends ItemView {
     this.tooltipEl.toggleClass("is-visible", !!node);
     if (!node) return;
     this.tooltipEl.empty();
-    this.tooltipEl.createDiv({ cls: "brain-atlas-tooltip-title", text: node.name });
-    this.tooltipEl.createDiv({ cls: "brain-atlas-tooltip-sub", text: `${node.kindLabel} - degree ${node.degree}` });
+    this.tooltipEl.createDiv({ cls: "brain-atlas-tooltip-title", text: displayNodeName(node) });
+    this.tooltipEl.createDiv({ cls: "brain-atlas-tooltip-sub", text: `${node.kindLabel} - ${node.degree} links` });
+    this.tooltipEl.createDiv({ cls: "brain-atlas-tooltip-source", text: `classified by ${formatClassificationSource(node.classificationSource)}` });
+    this.tooltipEl.createDiv({ cls: "brain-atlas-tooltip-path", text: displayNodePath(node) });
   }
 
   private syncFocusCard(): void {
@@ -205,18 +221,65 @@ export class BrainAtlasView extends ItemView {
     this.focusEl.toggleClass("is-visible", !!node);
     if (!node) return;
     this.focusEl.empty();
-    this.focusEl.createDiv({ cls: "brain-atlas-focus-meta", text: `${node.kindLabel} - ${node.status.toUpperCase()}` });
-    this.focusEl.createDiv({ cls: "brain-atlas-focus-title", text: node.name });
-    this.focusEl.createDiv({ cls: "brain-atlas-focus-sub", text: `${node.degree} links` });
+    this.focusEl.createDiv({
+      cls: "brain-atlas-focus-meta",
+      text: `${node.kindLabel} - ${formatClassificationSource(node.classificationSource)} - ${node.status.toUpperCase()}`
+    });
+    this.focusEl.createDiv({ cls: "brain-atlas-focus-title", text: displayNodeName(node) });
+    this.focusEl.createDiv({ cls: "brain-atlas-focus-sub", text: `${node.degree} links - ${displayNodePath(node)}` });
+    if (this.isCoarsePointer()) {
+      this.focusEl.createDiv({ cls: "brain-atlas-focus-hint", text: "Tap again to open" });
+    }
+  }
+
+  private syncInfoPanel(): void {
+    if (!this.infoEl) return;
+    this.infoEl.toggleClass("is-visible", this.showInfo);
+    if (!this.showInfo) {
+      this.infoEl.empty();
+      return;
+    }
+
+    this.infoEl.empty();
+    this.infoEl.createDiv({ cls: "brain-atlas-info-title", text: "What am I seeing?" });
+    this.infoEl.createDiv({
+      cls: "brain-atlas-info-copy",
+      text: "Dots are Markdown notes. Lines are wikilinks and embeds resolved from Obsidian metadata."
+    });
+    this.infoEl.createDiv({
+      cls: "brain-atlas-info-copy",
+      text: "Regions come from frontmatter, tags, folders, daily-note names, then your default category and optional link behavior."
+    });
+    this.infoEl.createDiv({
+      cls: "brain-atlas-info-copy",
+      text: "Region buttons isolate lobes. Labels toggles note and region text."
+    });
   }
 
   private onCanvasClick = (event: MouseEvent): void => {
     if (!this.canvas) return;
+    if (this.renderer.consumeSuppressedClick()) return;
     const rect = this.canvas.getBoundingClientRect();
     const hit = this.renderer.hitTest(event.clientX - rect.left, event.clientY - rect.top);
     if (!hit) return;
+    if (this.shouldPreviewBeforeOpen(hit)) return;
+    this.pendingOpenNodeId = null;
     this.openNode(hit);
   };
+
+  private shouldPreviewBeforeOpen(node: BrainNode): boolean {
+    if (!this.isCoarsePointer()) return false;
+    const now = performance.now();
+    const isSecondTap = this.pendingOpenNodeId === node.id && now - this.pendingOpenAt < 1800;
+    this.pendingOpenNodeId = node.id;
+    this.pendingOpenAt = now;
+    this.syncFocusCard();
+    return !isSecondTap;
+  }
+
+  private isCoarsePointer(): boolean {
+    return window.matchMedia?.("(pointer: coarse)").matches ?? false;
+  }
 
   private openNode(node: BrainNode): void {
     const file = this.plugin.app.vault.getAbstractFileByPath(node.id);
@@ -224,11 +287,27 @@ export class BrainAtlasView extends ItemView {
     this.plugin.app.workspace.getLeaf(this.plugin.settings.clickAction === "new-pane").openFile(file);
   }
 
+  private pinNode(node: BrainNode, position: PinnedNodePosition): void {
+    this.plugin.settings = {
+      ...this.plugin.settings,
+      pinnedNodePositions: {
+        ...this.plugin.settings.pinnedNodePositions,
+        [node.id]: position
+      }
+    };
+    void this.plugin.saveSettings();
+  }
+
   private toggleLabels(): void {
     this.plugin.settings.showLobeLabels = !this.plugin.settings.showLobeLabels;
     this.renderer.setOptions({ showLobeLabels: this.plugin.settings.showLobeLabels });
     this.syncOverlays();
     void this.persistViewSettings();
+  }
+
+  private toggleInfo(): void {
+    this.showInfo = !this.showInfo;
+    this.syncOverlays();
   }
 
   private toggleLobe(lobe: LobeName): void {
@@ -316,5 +395,22 @@ function shortLobeLabel(lobe: LobeName): string {
       return "CER";
     case "stem":
       return "STM";
+  }
+}
+
+function formatClassificationSource(source: BrainNode["classificationSource"]): string {
+  switch (source) {
+    case "frontmatter":
+      return "frontmatter";
+    case "tag":
+      return "tag";
+    case "folder":
+      return "folder";
+    case "filename":
+      return "filename";
+    case "linkBehavior":
+      return "link behavior";
+    case "default":
+      return "default category";
   }
 }

@@ -1,0 +1,44 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { DEFAULT_SETTINGS, normalizeSettings } from "../src/settings.ts";
+
+test("normalizeSettings preserves valid 3d pinned positions and drops invalid ones", () => {
+  const settings = normalizeSettings({
+    ...DEFAULT_SETTINGS,
+    pinnedNodePositions: {
+      "Projects/A.md": { x: 0.25, y: 0.5, z: -0.3 },
+      "Concepts/Clamp.md": { x: -10, y: 10, z: 20 },
+      "Bad/Number.md": { x: Number.NaN, y: 0.4, z: 0.1 },
+      "Bad/Shape.md": "nope"
+    }
+  });
+
+  assert.deepEqual(settings.pinnedNodePositions, {
+    "Projects/A.md": { x: 0.25, y: 0.5, z: -0.3 },
+    "Concepts/Clamp.md": { x: -1.15, y: 0.98, z: 1.3 }
+  });
+});
+
+test("normalizeSettings validates editable categorization settings", () => {
+  const settings = normalizeSettings({
+    ...DEFAULT_SETTINGS,
+    defaultKind: "person",
+    inferKindsFromLinks: false,
+    tagKindMap: {
+      Area: "project",
+      broken: "not-a-kind"
+    },
+    folderKindMap: {
+      References: "source",
+      BadFolder: "nope"
+    }
+  });
+
+  assert.equal(settings.defaultKind, "person");
+  assert.equal(settings.inferKindsFromLinks, false);
+  assert.equal(settings.tagKindMap.area, "project");
+  assert.equal(settings.tagKindMap.broken, undefined);
+  assert.equal(settings.folderKindMap.References, "source");
+  assert.equal(settings.folderKindMap.BadFolder, undefined);
+});

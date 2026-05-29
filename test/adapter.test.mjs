@@ -42,3 +42,34 @@ test("buildGraphFromFiles caps nodes by keeping highest-degree notes", () => {
   );
   assert.equal(graph.edges.length, 1);
 });
+
+test("buildGraphFromFiles applies persisted pinned node positions", () => {
+  const graph = buildGraphFromFiles(
+    [
+      note("Projects/Brain Atlas.md", { links: [{ link: "Ada" }] }),
+      note("People/Ada.md", {})
+    ],
+    {
+      ...DEFAULT_SETTINGS,
+      pinnedNodePositions: {
+        "Projects/Brain Atlas.md": { x: 0.12, y: 0.34, z: -0.56 }
+      }
+    }
+  );
+
+  assert.deepEqual(graph.idx["Projects/Brain Atlas.md"]._3dLobe, { x: 0.12, y: 0.34, z: -0.56 });
+});
+
+test("buildGraphFromFiles can disable link-behavior category inference", () => {
+  const graph = buildGraphFromFiles(
+    [
+      note("Notes/Hub.md", {
+        links: Array.from({ length: 12 }, (_, index) => ({ link: `Target ${index}` }))
+      }),
+      ...Array.from({ length: 12 }, (_, index) => note(`Notes/Target ${index}.md`, {}))
+    ],
+    { ...DEFAULT_SETTINGS, inferKindsFromLinks: false, defaultKind: "concept" }
+  );
+
+  assert.equal(graph.idx["Notes/Hub.md"].kind, "concept");
+});

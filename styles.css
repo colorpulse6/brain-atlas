@@ -3,6 +3,9 @@
   width: 100%;
   height: 100%;
   overflow: hidden;
+  contain: strict;
+  isolation: isolate;
+  overscroll-behavior: contain;
 }
 
 .brain-atlas-root {
@@ -29,6 +32,7 @@
 .brain-atlas-hud,
 .brain-atlas-help,
 .brain-atlas-legend,
+.brain-atlas-info-panel,
 .brain-atlas-tooltip,
 .brain-atlas-focus-card,
 .brain-atlas-empty {
@@ -199,6 +203,37 @@
   font-variant-numeric: tabular-nums;
 }
 
+.brain-atlas-info-panel {
+  top: 92px;
+  right: 14px;
+  display: none;
+  max-width: 330px;
+  padding: 10px 12px;
+  border: 1px solid rgba(232, 230, 224, 0.16);
+  border-radius: 8px;
+  background: rgba(8, 12, 20, 0.82);
+  backdrop-filter: blur(10px);
+  pointer-events: auto;
+  font-family: var(--font-interface);
+}
+
+.brain-atlas-info-panel.is-visible {
+  display: block;
+}
+
+.brain-atlas-info-title {
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.brain-atlas-info-copy {
+  margin-top: 7px;
+  color: rgba(210, 220, 236, 0.68);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .brain-atlas-tooltip {
   right: 14px;
   bottom: 14px;
@@ -223,12 +258,24 @@
 }
 
 .brain-atlas-tooltip-sub,
+.brain-atlas-tooltip-source,
+.brain-atlas-tooltip-path,
 .brain-atlas-focus-sub,
+.brain-atlas-focus-hint,
 .brain-atlas-focus-meta {
   margin-top: 4px;
   color: rgba(200, 215, 235, 0.62);
   font-family: var(--font-monospace);
   font-size: 10px;
+}
+
+.brain-atlas-tooltip-path,
+.brain-atlas-focus-sub {
+  overflow-wrap: anywhere;
+}
+
+.brain-atlas-tooltip-source {
+  color: rgba(201, 184, 150, 0.74);
 }
 
 .brain-atlas-focus-card {
@@ -253,6 +300,10 @@
   letter-spacing: 1.6px;
 }
 
+.brain-atlas-focus-hint {
+  color: rgba(122, 255, 193, 0.72);
+}
+
 .brain-atlas-empty {
   top: 50%;
   left: 50%;
@@ -267,4 +318,82 @@
 
 .brain-atlas-empty.is-visible {
   display: block;
+}
+
+@media only screen and (max-width: 700px) {
+  .brain-atlas-hud {
+    top: 9px;
+    left: 10px;
+    right: 10px;
+    gap: 6px;
+    font-size: 9px;
+    letter-spacing: 1px;
+  }
+
+  .brain-atlas-help {
+    display: none;
+  }
+
+  .brain-atlas-controls {
+    top: 32px;
+    right: 10px;
+    left: 10px;
+    max-width: none;
+    align-items: flex-start;
+  }
+
+  .brain-atlas-control-group {
+    justify-content: flex-start;
+  }
+
+  .brain-atlas-control-button {
+    min-width: 38px;
+    min-height: 32px;
+    padding: 7px 9px;
+    font-size: 9px;
+  }
+
+  .brain-atlas-info-panel {
+    top: 108px;
+    right: 10px;
+    left: 10px;
+    max-width: none;
+  }
+
+  .brain-atlas-legend {
+    top: auto;
+    right: 10px;
+    bottom: 10px;
+    left: 10px;
+    max-height: 32vh;
+    overflow-y: auto;
+  }
+
+  .brain-atlas-legend-row {
+    min-width: 0;
+  }
+
+  .brain-atlas-legend-copy {
+    min-width: 0;
+  }
+
+  .brain-atlas-tooltip {
+    right: 10px;
+    bottom: 10px;
+    left: 10px;
+    min-width: 0;
+  }
+
+  .brain-atlas-focus-card {
+    right: 10px;
+    bottom: 10px;
+    left: 10px;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .brain-atlas-tooltip-title,
+  .brain-atlas-focus-title {
+    font-size: 13px;
+  }
 }
