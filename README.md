@@ -13,9 +13,11 @@ The animated preview below uses synthetic demo vault data.
 - Animated 3D brain view inside Obsidian.
 - Vault-native graph data from `app.metadataCache`; no separate app or export step.
 - Region mapping for projects, people, concepts, sources, daily notes, indexes, and related note kinds.
+- Editable categorization settings for frontmatter keys, tag mappings, folder mappings, link inference, and the default category.
 - Region toggles for dimming or restoring anatomical lobes.
 - Label toggle for hiding all canvas labels.
 - Click a node to open the backing note.
+- Drag a node to pin its position in the atlas.
 - Local-only rendering. Brain Atlas does not send vault data to a server.
 
 ## Install
@@ -66,7 +68,8 @@ Run `Brain Atlas: Open atlas` from the command palette or click the brain ribbon
 
 Controls:
 
-- Drag to rotate.
+- Drag empty space to rotate.
+- Drag a node to pin it in place.
 - Scroll to zoom.
 - Right-click to reset the camera.
 - `Labels` toggles all canvas labels.
@@ -82,7 +85,16 @@ Brain Atlas assigns each note to a lobe using this order:
 2. Tags such as `#project`, `#person`, `#source`, `#daily`, or `#index`.
 3. Folder names such as `Projects`, `People`, `Sources`, `Daily`, `Concepts`, or `Index`.
 4. Date-like filenames for daily notes.
-5. Fallback to `concept`.
+5. Link behavior inference, when enabled.
+6. Fallback to the configured default category.
+
+You can edit the mapping in `Settings -> Brain Atlas -> Categorization`:
+
+- `Default category` controls where unmatched notes go.
+- `Infer categories from links` lets heavily connected unmatched notes use graph behavior as a hint.
+- `Frontmatter fields` controls which frontmatter keys are checked for kind values.
+- `Tag mappings` accepts one `tag=category` pair per line. Tags do not need `#`.
+- `Folder mappings` accepts one `folder=category` pair per line. Folder names can match any path ancestor.
 
 Default lobe mapping:
 
@@ -110,6 +122,38 @@ npm run build
 ```
 
 During development, you can copy `manifest.json`, `main.js`, and `styles.css` into a vault plugin folder after each build.
+
+### Release
+
+Release assets are built and attested by GitHub Actions. Do not upload locally built `main.js` or `styles.css` for public releases unless you are intentionally replacing the automated provenance flow.
+
+1. Update the version in `manifest.json`, `package.json`, `package-lock.json`, and `versions.json`.
+2. Run:
+
+   ```bash
+   npm test
+   npm run build
+   ```
+
+3. Commit and push the version bump.
+4. Create and push a semver tag that matches `manifest.json`, for example:
+
+   ```bash
+   git tag 0.1.4
+   git push origin 0.1.4
+   ```
+
+5. The `Release` workflow creates or updates the GitHub release, uploads `manifest.json`, `main.js`, and `styles.css`, and generates artifact attestations for those assets.
+
+For an existing release that needs assets rebuilt or re-attested, run the `Release` workflow manually with the `version` input set to the release tag, for example `0.1.3`.
+
+To verify release asset provenance locally:
+
+```bash
+gh attestation verify main.js -R colorpulse6/brain-atlas
+gh attestation verify manifest.json -R colorpulse6/brain-atlas
+gh attestation verify styles.css -R colorpulse6/brain-atlas
+```
 
 ### Demo Capture
 
