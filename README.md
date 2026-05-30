@@ -14,6 +14,7 @@ The animated preview below uses synthetic demo vault data.
 - Vault-native graph data from `app.metadataCache`; no separate app or export step.
 - Region mapping for projects, people, concepts, sources, daily notes, indexes, and related note kinds.
 - Editable categorization settings for frontmatter keys, tag mappings, folder mappings, link inference, and the default category.
+- Region override settings for placing specific notes, frontmatter values, or tags in specific anatomical regions.
 - Region toggles for dimming or restoring anatomical lobes.
 - Label toggle for hiding all canvas labels.
 - Click a node to open the backing note.
@@ -88,6 +89,13 @@ Brain Atlas assigns each note to a lobe using this order:
 5. Link behavior inference, when enabled.
 6. Fallback to the configured default category.
 
+After a note is categorized, optional region overrides can place it in a specific anatomical region without changing its category or color. Region override precedence is:
+
+1. Exact note path mappings, such as `Projects/Big Idea.md=frontal`.
+2. Frontmatter region fields, such as `brain_region: temporal`.
+3. Tag region mappings, such as `client=temporal`.
+4. The default category-to-lobe mapping below.
+
 You can edit the mapping in `Settings -> Brain Atlas -> Categorization`:
 
 - `Default category` controls where unmatched notes go.
@@ -95,6 +103,13 @@ You can edit the mapping in `Settings -> Brain Atlas -> Categorization`:
 - `Frontmatter fields` controls which frontmatter keys are checked for kind values.
 - `Tag mappings` accepts one `tag=category` pair per line. Tags do not need `#`.
 - `Folder mappings` accepts one `folder=category` pair per line. Folder names can match any path ancestor.
+
+You can edit anatomical placement in `Settings -> Brain Atlas -> Region overrides`:
+
+- `Frontmatter region keys` controls which frontmatter fields are checked for region names.
+- `Tag region mappings` accepts one `tag=region` pair per line. Tags do not need `#`.
+- `Note region mappings` accepts one `note/path.md=region` pair per line.
+- Supported regions are `frontal`, `parietal`, `temporal`, `occipital`, `cerebellum`, and `stem`.
 
 Default lobe mapping:
 

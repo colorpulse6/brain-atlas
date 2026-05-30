@@ -1,5 +1,5 @@
 import type { App, CachedMetadata, TFile } from "obsidian";
-import { classifyNoteDetailed, type CacheLike, type FileLike } from "./classify.ts";
+import { classifyNoteDetailed, resolveLobeOverride, type CacheLike, type FileLike } from "./classify.ts";
 import { KIND_LABEL, PALETTES, CHAOS } from "./palette.ts";
 import { assignLobePositions } from "./shape.ts";
 import type { BrainAtlasSettings, PinnedNodePosition } from "./settings.ts";
@@ -45,6 +45,7 @@ export function buildGraphFromFiles(notes: NoteInput[], settings: BrainAtlasSett
   const palette = PALETTES[settings.palette] ?? PALETTES.graphite;
   let nodes: DraftNode[] = notes.map((note) => {
     const classification = classifyNoteDetailed(note.file, note.cache, settings);
+    const lobeOverride = resolveLobeOverride(note.file, note.cache, settings);
     const linkedDegree = degree[note.file.path] ?? 0;
     const inference = applyLinkBehaviorFallback(classification, linkedDegree, note.file, edges, settings);
     const kind = inference.kind;
@@ -59,7 +60,9 @@ export function buildGraphFromFiles(notes: NoteInput[], settings: BrainAtlasSett
       hub: false,
       degree: linkedDegree,
       color: palette.kinds[kind] ?? palette.kinds.unknown,
-      classificationSource: inference.source
+      classificationSource: inference.source,
+      lobeOverrideSource: lobeOverride?.source,
+      _lobeName: lobeOverride?.lobe
     };
   });
 

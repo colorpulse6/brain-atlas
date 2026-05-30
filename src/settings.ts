@@ -1,5 +1,5 @@
-import { CANONICAL_KINDS, type NodeKind } from "./types.ts";
-import { allLobesEnabled, normalizeLobeVisibility, type LobeVisibility } from "./lobe-visibility.ts";
+import { CANONICAL_KINDS, type LobeName, type NodeKind } from "./types.ts";
+import { allLobesEnabled, LOBES, normalizeLobeVisibility, type LobeVisibility } from "./lobe-visibility.ts";
 
 export type ClickAction = "current" | "new-pane" | "hover-preview";
 export type PaletteName = "graphite" | "ink" | "magma" | "bio" | "acid" | "aurora";
@@ -15,6 +15,9 @@ export interface BrainAtlasSettings {
   frontmatterKindKeys: string[];
   tagKindMap: Record<string, NodeKind>;
   folderKindMap: Record<string, NodeKind>;
+  frontmatterRegionKeys: string[];
+  tagRegionMap: Record<string, LobeName>;
+  noteRegionMap: Record<string, LobeName>;
   treatDateFilesAsDaily: boolean;
   honorDailyNotesFormat: boolean;
   dailyNoteDateFormat: string;
@@ -34,6 +37,7 @@ export interface BrainAtlasSettings {
 export const DEFAULT_SETTINGS: BrainAtlasSettings = {
   palette: "graphite",
   frontmatterKindKeys: ["kind", "type", "category"],
+  frontmatterRegionKeys: ["brain_region", "brainRegion", "lobe", "region"],
   tagKindMap: {
     project: "project",
     person: "person",
@@ -60,6 +64,8 @@ export const DEFAULT_SETTINGS: BrainAtlasSettings = {
     Index: "index",
     Home: "index"
   },
+  tagRegionMap: {},
+  noteRegionMap: {},
   treatDateFilesAsDaily: true,
   honorDailyNotesFormat: true,
   dailyNoteDateFormat: "YYYY-MM-DD",
@@ -81,8 +87,11 @@ export function normalizeSettings(input: Partial<BrainAtlasSettings> | null | un
     ...DEFAULT_SETTINGS,
     ...(input ?? {}),
     frontmatterKindKeys: input?.frontmatterKindKeys ?? DEFAULT_SETTINGS.frontmatterKindKeys,
+    frontmatterRegionKeys: input?.frontmatterRegionKeys ?? DEFAULT_SETTINGS.frontmatterRegionKeys,
     tagKindMap: normalizeKindMap(input?.tagKindMap, DEFAULT_SETTINGS.tagKindMap, true),
     folderKindMap: normalizeKindMap(input?.folderKindMap, DEFAULT_SETTINGS.folderKindMap, false),
+    tagRegionMap: normalizeLobeMap(input?.tagRegionMap, DEFAULT_SETTINGS.tagRegionMap, true),
+    noteRegionMap: normalizeLobeMap(input?.noteRegionMap, DEFAULT_SETTINGS.noteRegionMap, false),
     enabledLobes: normalizeLobeVisibility(input?.enabledLobes),
     pinnedNodePositions: normalizePinnedNodePositions(input?.pinnedNodePositions),
     defaultKind: normalizeKindValue(input?.defaultKind) ?? DEFAULT_SETTINGS.defaultKind,
@@ -132,6 +141,22 @@ function normalizeKindMap(
   return out;
 }
 
+function normalizeLobeMap(
+  input: unknown,
+  defaults: Record<string, LobeName>,
+  lowercaseKeys: boolean
+): Record<string, LobeName> {
+  const out: Record<string, LobeName> = { ...defaults };
+  if (!input || typeof input !== "object" || Array.isArray(input)) return out;
+  for (const [rawKey, rawLobe] of Object.entries(input)) {
+    const key = normalizeMapKey(rawKey, lowercaseKeys);
+    const lobe = normalizeLobeValue(rawLobe);
+    if (!key || !lobe) continue;
+    out[key] = lobe;
+  }
+  return out;
+}
+
 function normalizeMapKey(value: string, lowercase: boolean): string {
   const trimmed = value.replace(/^#/, "").trim();
   return lowercase ? trimmed.toLowerCase() : trimmed;
@@ -142,6 +167,13 @@ function normalizeKindValue(value: unknown): NodeKind | null {
   const normalized = value.trim().replace(/[-_\s]/g, "").toLowerCase();
   const direct = CANONICAL_KINDS.find((kind) => kind.toLowerCase() === normalized);
   return direct ?? KIND_SYNONYMS[normalized] ?? null;
+}
+
+export function normalizeLobeValue(value: unknown): LobeName | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().replace(/[-_\s]/g, "").toLowerCase();
+  if (normalized === "brainstem") return "stem";
+  return LOBES.find((lobe) => lobe.toLowerCase() === normalized) ?? null;
 }
 
 const KIND_SYNONYMS: Record<string, NodeKind> = {

@@ -147,7 +147,7 @@ export function assignLobePositions(nodes: BrainNode[]): void {
     const r2 = ((h >>> 16) & 0xffff) / 0xffff;
     const r3 = ((Math.imul(h, 31) >>> 0) & 0xffff) / 0xffff;
 
-    const lobe = KIND_TO_LOBE[node.kind] ?? "parietal";
+    const lobe = node._lobeName ?? KIND_TO_LOBE[node.kind] ?? "parietal";
     const center = LOBE_CENTERS[lobe];
     const u = r1 * Math.PI * 2;
     const v = Math.acos(2 * r2 - 1);

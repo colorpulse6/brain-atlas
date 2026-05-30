@@ -42,3 +42,24 @@ test("normalizeSettings validates editable categorization settings", () => {
   assert.equal(settings.folderKindMap.References, "source");
   assert.equal(settings.folderKindMap.BadFolder, undefined);
 });
+
+test("normalizeSettings validates editable region override settings", () => {
+  const settings = normalizeSettings({
+    ...DEFAULT_SETTINGS,
+    frontmatterRegionKeys: ["brain_region", "lobe"],
+    tagRegionMap: {
+      Focus: "frontal",
+      broken: "not-a-region"
+    },
+    noteRegionMap: {
+      "Concepts/A.md": "temporal",
+      "Bad/Region.md": "nope"
+    }
+  });
+
+  assert.deepEqual(settings.frontmatterRegionKeys, ["brain_region", "lobe"]);
+  assert.equal(settings.tagRegionMap.focus, "frontal");
+  assert.equal(settings.tagRegionMap.broken, undefined);
+  assert.equal(settings.noteRegionMap["Concepts/A.md"], "temporal");
+  assert.equal(settings.noteRegionMap["Bad/Region.md"], undefined);
+});

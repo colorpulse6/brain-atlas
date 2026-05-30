@@ -1,5 +1,5 @@
-import { CANONICAL_KINDS, type NodeKind } from "./types.ts";
-import type { BrainAtlasSettings } from "./settings.ts";
+import { CANONICAL_KINDS, type LobeName, type LobeOverrideSource, type NodeKind } from "./types.ts";
+import { normalizeLobeValue, type BrainAtlasSettings } from "./settings.ts";
 
 export interface FileLike {
   path: string;
@@ -14,6 +14,11 @@ export interface CacheLike {
 export interface Classification {
   kind: NodeKind;
   source: "frontmatter" | "tag" | "folder" | "filename" | "linkBehavior" | "default";
+}
+
+export interface LobeOverride {
+  lobe: LobeName;
+  source: LobeOverrideSource;
 }
 
 const KIND_SYNONYMS: Record<string, NodeKind> = {
@@ -71,6 +76,28 @@ export function classifyNoteDetailed(
   if (filenameKind) return { kind: filenameKind, source: "filename" };
 
   return { kind: settings.defaultKind, source: "default" };
+}
+
+export function resolveLobeOverride(
+  file: FileLike,
+  cache: CacheLike | null | undefined,
+  settings: BrainAtlasSettings
+): LobeOverride | null {
+  const noteMapped = settings.noteRegionMap[file.path];
+  if (noteMapped) return { lobe: noteMapped, source: "note" };
+
+  const frontmatter = cache?.frontmatter ?? {};
+  for (const key of settings.frontmatterRegionKeys) {
+    const lobe = normalizeLobeValue(frontmatter[key]);
+    if (lobe) return { lobe, source: "frontmatter" };
+  }
+
+  for (const rawTag of normalizedTags(cache)) {
+    const mapped = settings.tagRegionMap[rawTag];
+    if (mapped) return { lobe: mapped, source: "tag" };
+  }
+
+  return null;
 }
 
 function normalizedTags(cache: CacheLike | null | undefined): string[] {

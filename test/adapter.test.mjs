@@ -73,3 +73,34 @@ test("buildGraphFromFiles can disable link-behavior category inference", () => {
 
   assert.equal(graph.idx["Notes/Hub.md"].kind, "concept");
 });
+
+test("buildGraphFromFiles applies note, frontmatter, and tag region overrides", () => {
+  const graph = buildGraphFromFiles(
+    [
+      note("Concepts/Exact.md", {
+        frontmatter: { brain_region: "occipital" },
+        tags: ["#focus"]
+      }),
+      note("Concepts/Frontmatter.md", {
+        frontmatter: { brain_region: "temporal" },
+        tags: ["#focus"]
+      }),
+      note("Concepts/Tagged.md", {
+        tags: ["#focus"]
+      })
+    ],
+    {
+      ...DEFAULT_SETTINGS,
+      tagRegionMap: { focus: "frontal" },
+      noteRegionMap: { "Concepts/Exact.md": "stem" }
+    }
+  );
+
+  assert.equal(graph.idx["Concepts/Exact.md"].kind, "concept");
+  assert.equal(graph.idx["Concepts/Exact.md"]._lobeName, "stem");
+  assert.equal(graph.idx["Concepts/Exact.md"].lobeOverrideSource, "note");
+  assert.equal(graph.idx["Concepts/Frontmatter.md"]._lobeName, "temporal");
+  assert.equal(graph.idx["Concepts/Frontmatter.md"].lobeOverrideSource, "frontmatter");
+  assert.equal(graph.idx["Concepts/Tagged.md"]._lobeName, "frontal");
+  assert.equal(graph.idx["Concepts/Tagged.md"].lobeOverrideSource, "tag");
+});

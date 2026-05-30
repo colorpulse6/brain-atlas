@@ -46,6 +46,13 @@ test("view surfaces classification source and categorization settings", () => {
   assert.match(settingsTabSource, /Default category/);
   assert.match(settingsTabSource, /Tag mappings/);
   assert.match(settingsTabSource, /Folder mappings/);
+  assert.match(settingsTabSource, /Region overrides/);
+  assert.match(settingsTabSource, /Tag region mappings/);
+  assert.match(settingsTabSource, /Note region mappings/);
+  assert.match(settingsTabSource, /brain_region, lobe, region/);
+  assert.match(settingsTabSource, /client=temporal/);
+  assert.match(settingsTabSource, /Projects\/Big Idea\.md=frontal/);
+  assert.match(settingsTabSource, /Valid regions: frontal, parietal, temporal, occipital, cerebellum, stem/);
 });
 
 test("plugin view is contained and stops scroll events from leaking into Obsidian chrome", () => {

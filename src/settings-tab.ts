@@ -3,9 +3,9 @@ import type BrainAtlasPlugin from "../main.ts";
 import { normalizeKind } from "./classify.ts";
 import { LOBES, setLobeEnabled } from "./lobe-visibility.ts";
 import { PALETTES } from "./palette.ts";
-import type { BrainAtlasSettings, PaletteName } from "./settings.ts";
+import { normalizeLobeValue, type BrainAtlasSettings, type PaletteName } from "./settings.ts";
 import { LOBE_CENTERS } from "./shape.ts";
-import { CANONICAL_KINDS, type NodeKind } from "./types.ts";
+import { CANONICAL_KINDS, type LobeName, type NodeKind } from "./types.ts";
 
 export class BrainAtlasSettingTab extends PluginSettingTab {
   plugin: BrainAtlasPlugin;
@@ -152,6 +152,46 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
           folderKindMap: parseKindMapText(text.getValue(), false)
         }));
       });
+
+    new Setting(containerEl)
+      .setName("Region overrides")
+      .setHeading();
+
+    new Setting(containerEl)
+      .setName("Frontmatter region keys")
+      .setDesc("Comma-separated frontmatter field names. Example: brain_region, lobe, region. Valid regions: frontal, parietal, temporal, occipital, cerebellum, stem.")
+      .addText((text) => {
+        text.inputEl.placeholder = "brain_region, lobe, region";
+        text
+          .setValue(this.plugin.settings.frontmatterRegionKeys.join(", "))
+          .onChange((value) => this.update({
+            frontmatterRegionKeys: value.split(",").map((item) => item.trim()).filter(Boolean)
+          }));
+      });
+
+    new Setting(containerEl)
+      .setName("Tag region mappings")
+      .setDesc("One per line: tag=region. Omit # from tags. Example: client=temporal. Valid regions: frontal, parietal, temporal, occipital, cerebellum, stem.")
+      .addTextArea((text) => {
+        text.setValue(lobeMapToText(this.plugin.settings.tagRegionMap));
+        text.inputEl.rows = 6;
+        text.inputEl.placeholder = "client=temporal\nresearch=occipital\nroadmap=frontal";
+        text.inputEl.addEventListener("blur", () => this.update({
+          tagRegionMap: parseLobeMapText(text.getValue(), true)
+        }));
+      });
+
+    new Setting(containerEl)
+      .setName("Note region mappings")
+      .setDesc("One per line: note/path.md=region. Use the exact vault path. Example: Projects/Big Idea.md=frontal. Valid regions: frontal, parietal, temporal, occipital, cerebellum, stem.")
+      .addTextArea((text) => {
+        text.setValue(lobeMapToText(this.plugin.settings.noteRegionMap));
+        text.inputEl.rows = 6;
+        text.inputEl.placeholder = "Projects/Big Idea.md=frontal\nPeople/Ada.md=temporal";
+        text.inputEl.addEventListener("blur", () => this.update({
+          noteRegionMap: parseLobeMapText(text.getValue(), false)
+        }));
+      });
   }
 
   private async update(patch: Partial<BrainAtlasSettings>): Promise<void> {
@@ -183,6 +223,13 @@ function kindMapToText(map: Record<string, NodeKind>): string {
     .join("\n");
 }
 
+function lobeMapToText(map: Record<string, LobeName>): string {
+  return Object.entries(map)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, lobe]) => `${key}=${lobe}`)
+    .join("\n");
+}
+
 function parseKindMapText(value: string, lowercaseKeys: boolean): Record<string, NodeKind> {
   const map: Record<string, NodeKind> = {};
   for (const entry of value.split(/[\n,]+/)) {
@@ -192,6 +239,19 @@ function parseKindMapText(value: string, lowercaseKeys: boolean): Record<string,
     const kind = normalizeKind(rawKind);
     if (!key || !kind) continue;
     map[lowercaseKeys ? key.toLowerCase() : key] = kind;
+  }
+  return map;
+}
+
+function parseLobeMapText(value: string, lowercaseKeys: boolean): Record<string, LobeName> {
+  const map: Record<string, LobeName> = {};
+  for (const entry of value.split(/[\n,]+/)) {
+    const [rawKey, rawLobe] = entry.split("=");
+    if (!rawKey || !rawLobe) continue;
+    const key = rawKey.replace(/^#/, "").trim();
+    const lobe = normalizeLobeValue(rawLobe);
+    if (!key || !lobe) continue;
+    map[lowercaseKeys ? key.toLowerCase() : key] = lobe;
   }
   return map;
 }
