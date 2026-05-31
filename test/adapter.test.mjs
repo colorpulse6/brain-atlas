@@ -104,3 +104,45 @@ test("buildGraphFromFiles applies note, frontmatter, and tag region overrides", 
   assert.equal(graph.idx["Concepts/Tagged.md"]._lobeName, "frontal");
   assert.equal(graph.idx["Concepts/Tagged.md"].lobeOverrideSource, "tag");
 });
+
+test("buildGraphFromFiles applies frontmatter value and folder region overrides", () => {
+  const graph = buildGraphFromFiles(
+    [
+      note("Wiki/Retention.md", {
+        frontmatter: { type: "wiki" }
+      }),
+      note("Channels/Youtube/Script.md", {})
+    ],
+    {
+      ...DEFAULT_SETTINGS,
+      frontmatterKindValueMap: {
+        "type:wiki": "source"
+      },
+      frontmatterRegionValueMap: {
+        "type:wiki": "occipital"
+      },
+      folderRegionMap: {
+        Channels: "frontal"
+      }
+    }
+  );
+
+  assert.equal(graph.idx["Wiki/Retention.md"].kind, "source");
+  assert.equal(graph.idx["Wiki/Retention.md"]._lobeName, "occipital");
+  assert.equal(graph.idx["Wiki/Retention.md"].lobeOverrideSource, "frontmatter");
+  assert.equal(graph.idx["Channels/Youtube/Script.md"].kind, "concept");
+  assert.equal(graph.idx["Channels/Youtube/Script.md"]._lobeName, "frontal");
+  assert.equal(graph.idx["Channels/Youtube/Script.md"].lobeOverrideSource, "folder");
+});
+
+test("buildGraphFromFiles limits hubs to the configured top percentage when degrees tie", () => {
+  const notes = [];
+  for (let index = 0; index < 20; index += 2) {
+    notes.push(note(`Notes/Node ${index}.md`, { links: [{ link: `Node ${index + 1}` }] }));
+    notes.push(note(`Notes/Node ${index + 1}.md`, {}));
+  }
+
+  const graph = buildGraphFromFiles(notes, { ...DEFAULT_SETTINGS, hubThresholdPercent: 10 });
+
+  assert.equal(graph.nodes.filter((node) => node.hub).length, 2);
+});

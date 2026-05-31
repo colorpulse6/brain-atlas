@@ -1,7 +1,7 @@
 import { assignLobePositions, Brain3D, KIND_TO_LOBE, LOBE_CENTERS, type SurfacePoint } from "./shape.ts";
 import { allLobesEnabled, lobeVisibilityMultiplier, type LobeVisibility } from "./lobe-visibility.ts";
 import { displayNodeName } from "./node-display.ts";
-import { clampPinnedNodePosition, type PinnedNodePosition } from "./settings.ts";
+import { clampPinnedNodePosition, type PerformancePreset, type PinnedNodePosition } from "./settings.ts";
 import type { BrainEdge, BrainGraph, BrainNode, LobeName, ProjectedPoint, Vec3 } from "./types.ts";
 
 interface SignalParticle {
@@ -55,6 +55,7 @@ export interface BrainRendererOptions {
   idleAutoRotate: boolean;
   showLobeLabels: boolean;
   enabledLobes: LobeVisibility;
+  performancePreset: PerformancePreset;
   onChange?: () => void;
   onPinNode?: (node: BrainNode, position: PinnedNodePosition) => void;
 }
@@ -79,13 +80,24 @@ const LOBE_DESCRIPTIONS: Record<LobeName, { sub: string; role: string }> = {
 
 const MIN_ZOOM = 0.55;
 const MAX_ZOOM = 6;
+const PERFORMANCE_FRAME_DELAYS: Record<PerformancePreset, number> = {
+  smooth: 0,
+  balanced: 1000 / 30,
+  batterySaver: 1000 / 20
+};
 
 export class BrainRenderer {
   private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
   private getGraph: (() => BrainGraph) | null = null;
-  private options: BrainRendererOptions = { idleAutoRotate: true, showLobeLabels: true, enabledLobes: allLobesEnabled() };
+  private options: BrainRendererOptions = {
+    idleAutoRotate: true,
+    showLobeLabels: true,
+    enabledLobes: allLobesEnabled(),
+    performancePreset: "smooth"
+  };
   private raf: number | null = null;
+  private frameTimeout: number | null = null;
   private resizeObserver: ResizeObserver | null = null;
   private rot = { x: -0.15, y: 0.55 };
   private zoom = 1;
@@ -128,12 +140,14 @@ export class BrainRenderer {
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(canvas);
     this.resize();
-    this.raf = requestAnimationFrame(this.draw);
+    this.scheduleNextFrame(0);
   }
 
   stop(): void {
     if (this.raf != null) cancelAnimationFrame(this.raf);
     this.raf = null;
+    if (this.frameTimeout != null) window.clearTimeout(this.frameTimeout);
+    this.frameTimeout = null;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     if (this.canvas) {
@@ -153,10 +167,12 @@ export class BrainRenderer {
 
   setOptions(options: Partial<BrainRendererOptions>): void {
     this.options = { ...this.options, ...options };
+    this.requestImmediateFrame();
   }
 
   setHighlightLobe(lobe: LobeName | null): void {
     this.highlightLobe = lobe;
+    this.requestImmediateFrame();
   }
 
   getHoveredNode(): BrainNode | null {
@@ -209,6 +225,7 @@ export class BrainRenderer {
   }
 
   private draw = (now: number): void => {
+    this.raf = null;
     const canvas = this.canvas;
     const ctx = this.ctx;
     const graph = this.getGraph?.();
@@ -286,8 +303,36 @@ export class BrainRenderer {
     if (this.options.showLobeLabels) this.drawNodeLabels(ctx, nodeProjs, graph, lobeMul);
     this.drawCompass(ctx, graph);
 
-    this.raf = requestAnimationFrame(this.draw);
+    this.scheduleNextFrame(this.nextFrameDelay(now));
   };
+
+  private nextFrameDelay(now: number): number {
+    if (this.options.performancePreset === "smooth") return 0;
+    if (this.drag || now - this.lastUserAt < 700) return 0;
+    return PERFORMANCE_FRAME_DELAYS[this.options.performancePreset] ?? 0;
+  }
+
+  private scheduleNextFrame(delay: number): void {
+    if (!this.canvas || this.raf != null || this.frameTimeout != null) return;
+    if (delay <= 0) {
+      this.raf = requestAnimationFrame(this.draw);
+      return;
+    }
+    this.frameTimeout = window.setTimeout(() => {
+      this.frameTimeout = null;
+      if (!this.canvas) return;
+      this.raf = requestAnimationFrame(this.draw);
+    }, delay);
+  }
+
+  private requestImmediateFrame(): void {
+    if (!this.canvas) return;
+    if (this.frameTimeout != null) {
+      window.clearTimeout(this.frameTimeout);
+      this.frameTimeout = null;
+    }
+    if (this.raf == null) this.raf = requestAnimationFrame(this.draw);
+  }
 
   private drawLobeHaze(
     ctx: CanvasRenderingContext2D,
@@ -546,7 +591,7 @@ export class BrainRenderer {
     ctx.fillStyle = hexA(color, alpha);
     ctx.fillText(label, leadX, leadY);
     ctx.font = "9px 'JetBrains Mono', monospace";
-    ctx.fillStyle = `rgba(200,215,235,${0.55 * alpha})`;
+    ctx.fillStyle = hexA(color, 0.62 * alpha);
     ctx.fillText(subtitle, leadX, leadY + 12);
   }
 
@@ -571,11 +616,12 @@ export class BrainRenderer {
     ctx.font = "10px 'JetBrains Mono', monospace";
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    const labels = new Set(graph.nodes.filter((node) => node.hub).map((node) => node.id));
+    const labels = new Set(this.automaticLabelIds(graph, nodeProjs));
     if (this.hoverId) labels.add(this.hoverId);
     if (this.focusId) {
       labels.add(this.focusId);
-      for (const id of graph.adj[this.focusId] ?? []) labels.add(id);
+      const focusNeighborLabelLimit = Math.max(8, Math.min(30, Math.round(8 * this.zoom)));
+      for (const id of (graph.adj[this.focusId] ?? []).slice(0, focusNeighborLabelLimit)) labels.add(id);
     }
     for (const projected of nodeProjs) {
       if (!labels.has(projected.node.id)) continue;
@@ -590,6 +636,24 @@ export class BrainRenderer {
       ctx.fillStyle = projected.node.id === this.focusId ? `rgba(255,255,255,${alpha})` : hexA(projected.node.color, 0.95 * alpha);
       ctx.fillText(label, projected.sx, projected.sy + radius + 5);
     }
+  }
+
+  private automaticLabelIds(graph: BrainGraph, nodeProjs: ProjectedNode[]): Set<string> {
+    const maxAutomaticLabels = this.maxAutomaticLabels(graph.nodes.length);
+    return new Set(
+      nodeProjs
+        .filter((projected) => projected.node.hub && projected.z <= 0.45)
+        .sort((a, b) => b.node.degree - a.node.degree || a.node.id.localeCompare(b.node.id))
+        .slice(0, maxAutomaticLabels)
+        .map((projected) => projected.node.id)
+    );
+  }
+
+  private maxAutomaticLabels(totalNodes: number): number {
+    const viewportCap = Math.max(6, Math.floor(this.width / 80));
+    const zoomCap = this.zoom >= 3 ? 34 : this.zoom >= 2 ? 24 : 14;
+    const densityCap = totalNodes > 1000 ? 10 : totalNodes > 500 ? 14 : zoomCap;
+    return Math.min(viewportCap, zoomCap, densityCap);
   }
 
   private drawCompass(ctx: CanvasRenderingContext2D, graph: BrainGraph): void {
@@ -681,6 +745,7 @@ export class BrainRenderer {
     }
     this.lastUserAt = performance.now();
     this.canvas.setPointerCapture(event.pointerId);
+    this.requestImmediateFrame();
   };
 
   private onPointerMove = (event: PointerEvent): void => {
@@ -705,6 +770,7 @@ export class BrainRenderer {
         this.rot.x = Math.max(-1.4, Math.min(1.4, this.drag.rotX + dy));
       }
       this.lastUserAt = performance.now();
+      this.requestImmediateFrame();
       return;
     }
 
@@ -713,6 +779,7 @@ export class BrainRenderer {
     if ((hit?.id ?? null) !== this.hoverId) {
       this.hoverId = hit?.id ?? null;
       this.options.onChange?.();
+      this.requestImmediateFrame();
     }
   };
 
@@ -732,6 +799,7 @@ export class BrainRenderer {
       if (node) this.options.onPinNode?.(node, activeDrag.latestPosition);
       this.suppressClickUntil = performance.now() + 600;
       this.options.onChange?.();
+      this.requestImmediateFrame();
       return;
     }
     if (activeDrag.moved) {
@@ -742,6 +810,7 @@ export class BrainRenderer {
     const hit = this.hitTest(point.x, point.y);
     this.focusId = hit?.id ?? null;
     this.options.onChange?.();
+    this.requestImmediateFrame();
   };
 
   private onPointerLeave = (): void => {
@@ -749,6 +818,7 @@ export class BrainRenderer {
     if (this.hoverId) {
       this.hoverId = null;
       this.options.onChange?.();
+      this.requestImmediateFrame();
     }
   };
 
@@ -758,6 +828,7 @@ export class BrainRenderer {
     this.zoom *= 1 - event.deltaY * 0.0012;
     this.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, this.zoom));
     this.lastUserAt = performance.now();
+    this.requestImmediateFrame();
   };
 
   private onContextMenu = (event: MouseEvent): void => {
@@ -766,6 +837,7 @@ export class BrainRenderer {
     this.rot = { x: -0.15, y: 0.55 };
     this.zoom = 1;
     this.lastUserAt = performance.now();
+    this.requestImmediateFrame();
   };
 
   private localPoint(event: MouseEvent | PointerEvent): { x: number; y: number } {
@@ -825,6 +897,7 @@ export class BrainRenderer {
     this.canvas.width = Math.floor(this.width * this.dpr);
     this.canvas.height = Math.floor(this.height * this.dpr);
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    this.requestImmediateFrame();
   }
 
   private ensureLobePositions(nodes: BrainNode[]): void {

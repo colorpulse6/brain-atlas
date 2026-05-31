@@ -2,7 +2,10 @@ import { CANONICAL_KINDS, type LobeName, type NodeKind } from "./types.ts";
 import { allLobesEnabled, LOBES, normalizeLobeVisibility, type LobeVisibility } from "./lobe-visibility.ts";
 
 export type ClickAction = "current" | "new-pane" | "hover-preview";
-export type PaletteName = "graphite" | "ink" | "magma" | "bio" | "acid" | "aurora";
+export const PALETTE_NAMES = ["graphite", "ink", "magma", "bio", "acid", "aurora", "daylight"] as const;
+export type PaletteName = (typeof PALETTE_NAMES)[number];
+export const PERFORMANCE_PRESETS = ["smooth", "balanced", "batterySaver"] as const;
+export type PerformancePreset = (typeof PERFORMANCE_PRESETS)[number];
 
 export interface PinnedNodePosition {
   x: number;
@@ -12,11 +15,15 @@ export interface PinnedNodePosition {
 
 export interface BrainAtlasSettings {
   palette: PaletteName;
+  performancePreset: PerformancePreset;
   frontmatterKindKeys: string[];
+  frontmatterKindValueMap: Record<string, NodeKind>;
   tagKindMap: Record<string, NodeKind>;
   folderKindMap: Record<string, NodeKind>;
   frontmatterRegionKeys: string[];
+  frontmatterRegionValueMap: Record<string, LobeName>;
   tagRegionMap: Record<string, LobeName>;
+  folderRegionMap: Record<string, LobeName>;
   noteRegionMap: Record<string, LobeName>;
   treatDateFilesAsDaily: boolean;
   honorDailyNotesFormat: boolean;
@@ -36,7 +43,9 @@ export interface BrainAtlasSettings {
 
 export const DEFAULT_SETTINGS: BrainAtlasSettings = {
   palette: "graphite",
+  performancePreset: "smooth",
   frontmatterKindKeys: ["kind", "type", "category"],
+  frontmatterKindValueMap: {},
   frontmatterRegionKeys: ["brain_region", "brainRegion", "lobe", "region"],
   tagKindMap: {
     project: "project",
@@ -64,7 +73,9 @@ export const DEFAULT_SETTINGS: BrainAtlasSettings = {
     Index: "index",
     Home: "index"
   },
+  frontmatterRegionValueMap: {},
   tagRegionMap: {},
+  folderRegionMap: {},
   noteRegionMap: {},
   treatDateFilesAsDaily: true,
   honorDailyNotesFormat: true,
@@ -88,15 +99,49 @@ export function normalizeSettings(input: Partial<BrainAtlasSettings> | null | un
     ...(input ?? {}),
     frontmatterKindKeys: input?.frontmatterKindKeys ?? DEFAULT_SETTINGS.frontmatterKindKeys,
     frontmatterRegionKeys: input?.frontmatterRegionKeys ?? DEFAULT_SETTINGS.frontmatterRegionKeys,
+    frontmatterKindValueMap: normalizeFrontmatterKindValueMap(input?.frontmatterKindValueMap, DEFAULT_SETTINGS.frontmatterKindValueMap),
     tagKindMap: normalizeKindMap(input?.tagKindMap, DEFAULT_SETTINGS.tagKindMap, true),
     folderKindMap: normalizeKindMap(input?.folderKindMap, DEFAULT_SETTINGS.folderKindMap, false),
+    frontmatterRegionValueMap: normalizeFrontmatterLobeValueMap(
+      input?.frontmatterRegionValueMap,
+      DEFAULT_SETTINGS.frontmatterRegionValueMap
+    ),
     tagRegionMap: normalizeLobeMap(input?.tagRegionMap, DEFAULT_SETTINGS.tagRegionMap, true),
+    folderRegionMap: normalizeLobeMap(input?.folderRegionMap, DEFAULT_SETTINGS.folderRegionMap, false),
     noteRegionMap: normalizeLobeMap(input?.noteRegionMap, DEFAULT_SETTINGS.noteRegionMap, false),
+    palette: normalizePaletteName(input?.palette) ?? DEFAULT_SETTINGS.palette,
+    performancePreset: normalizePerformancePreset(input?.performancePreset) ?? DEFAULT_SETTINGS.performancePreset,
     enabledLobes: normalizeLobeVisibility(input?.enabledLobes),
     pinnedNodePositions: normalizePinnedNodePositions(input?.pinnedNodePositions),
     defaultKind: normalizeKindValue(input?.defaultKind) ?? DEFAULT_SETTINGS.defaultKind,
     inferKindsFromLinks: input?.inferKindsFromLinks ?? DEFAULT_SETTINGS.inferKindsFromLinks
   };
+}
+
+export function normalizeFrontmatterValueKey(value: string): string | null {
+  const separator = value.indexOf(":");
+  if (separator < 0) return null;
+  const field = value.slice(0, separator).trim().toLowerCase();
+  const rawValue = value.slice(separator + 1);
+  const normalizedValue = normalizeFrontmatterScalar(rawValue);
+  if (!field || !normalizedValue) return null;
+  return `${field}:${normalizedValue}`;
+}
+
+export function frontmatterValueKeys(field: string, value: unknown): string[] {
+  const normalizedField = field.trim().toLowerCase();
+  if (!normalizedField) return [];
+  return frontmatterValues(value).map((item) => `${normalizedField}:${item}`);
+}
+
+function normalizePaletteName(value: unknown): PaletteName | null {
+  if (typeof value !== "string") return null;
+  return (PALETTE_NAMES as readonly string[]).includes(value) ? value as PaletteName : null;
+}
+
+function normalizePerformancePreset(value: unknown): PerformancePreset | null {
+  if (typeof value !== "string") return null;
+  return (PERFORMANCE_PRESETS as readonly string[]).includes(value) ? value as PerformancePreset : null;
 }
 
 export function normalizePinnedNodePositions(input: unknown): Record<string, PinnedNodePosition> {
@@ -141,6 +186,36 @@ function normalizeKindMap(
   return out;
 }
 
+function normalizeFrontmatterKindValueMap(
+  input: unknown,
+  defaults: Record<string, NodeKind>
+): Record<string, NodeKind> {
+  const out: Record<string, NodeKind> = { ...defaults };
+  if (!input || typeof input !== "object" || Array.isArray(input)) return out;
+  for (const [rawKey, rawKind] of Object.entries(input)) {
+    const key = normalizeFrontmatterValueKey(rawKey);
+    const kind = normalizeKindValue(rawKind);
+    if (!key || !kind) continue;
+    out[key] = kind;
+  }
+  return out;
+}
+
+function normalizeFrontmatterLobeValueMap(
+  input: unknown,
+  defaults: Record<string, LobeName>
+): Record<string, LobeName> {
+  const out: Record<string, LobeName> = { ...defaults };
+  if (!input || typeof input !== "object" || Array.isArray(input)) return out;
+  for (const [rawKey, rawLobe] of Object.entries(input)) {
+    const key = normalizeFrontmatterValueKey(rawKey);
+    const lobe = normalizeLobeValue(rawLobe);
+    if (!key || !lobe) continue;
+    out[key] = lobe;
+  }
+  return out;
+}
+
 function normalizeLobeMap(
   input: unknown,
   defaults: Record<string, LobeName>,
@@ -160,6 +235,18 @@ function normalizeLobeMap(
 function normalizeMapKey(value: string, lowercase: boolean): string {
   const trimmed = value.replace(/^#/, "").trim();
   return lowercase ? trimmed.toLowerCase() : trimmed;
+}
+
+function frontmatterValues(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(frontmatterValues);
+  const normalized = normalizeFrontmatterScalar(value);
+  return normalized ? [normalized] : [];
+}
+
+function normalizeFrontmatterScalar(value: unknown): string | null {
+  if (value == null) return null;
+  const normalized = String(value).replace(/^#/, "").trim().toLowerCase();
+  return normalized || null;
 }
 
 function normalizeKindValue(value: unknown): NodeKind | null {

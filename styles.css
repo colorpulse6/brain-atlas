@@ -320,6 +320,99 @@
   display: block;
 }
 
+.brain-atlas-settings-report {
+  margin: 8px 0 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  line-height: 1.45;
+}
+
+.brain-atlas-settings-report p {
+  margin: 0 0 8px;
+}
+
+.brain-atlas-settings-report h4 {
+  margin: 10px 0 6px;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+}
+
+.brain-atlas-settings-report ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.brain-atlas-root.is-light-palette {
+  background: #f7f4ec;
+  color: #22303a;
+}
+
+.brain-atlas-root.is-light-palette .brain-atlas-hud {
+  color: rgba(34, 48, 58, 0.86);
+}
+
+.brain-atlas-root.is-light-palette .brain-atlas-muted,
+.brain-atlas-root.is-light-palette .brain-atlas-help {
+  color: rgba(42, 58, 70, 0.52);
+}
+
+.brain-atlas-root.is-light-palette .brain-atlas-control-button {
+  border-color: rgba(50, 62, 72, 0.22);
+  background: rgba(255, 255, 255, 0.54);
+  color: rgba(34, 48, 58, 0.7);
+}
+
+.brain-atlas-root.is-light-palette .brain-atlas-control-button:hover,
+.brain-atlas-root.is-light-palette .brain-atlas-control-button.is-active {
+  border-color: rgba(138, 95, 24, 0.48);
+  background: rgba(138, 95, 24, 0.12);
+  color: rgba(22, 31, 38, 0.94);
+}
+
+.brain-atlas-root.is-light-palette .brain-atlas-legend,
+.brain-atlas-root.is-light-palette .brain-atlas-info-panel,
+.brain-atlas-root.is-light-palette .brain-atlas-tooltip,
+.brain-atlas-root.is-light-palette .brain-atlas-focus-card {
+  border-color: rgba(50, 62, 72, 0.14);
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.brain-atlas-root.is-light-palette .brain-atlas-legend-title,
+.brain-atlas-root.is-light-palette .brain-atlas-legend-sub,
+.brain-atlas-root.is-light-palette .brain-atlas-legend-count,
+.brain-atlas-root.is-light-palette .brain-atlas-tooltip-sub,
+.brain-atlas-root.is-light-palette .brain-atlas-tooltip-source,
+.brain-atlas-root.is-light-palette .brain-atlas-tooltip-path,
+.brain-atlas-root.is-light-palette .brain-atlas-focus-sub,
+.brain-atlas-root.is-light-palette .brain-atlas-focus-hint,
+.brain-atlas-root.is-light-palette .brain-atlas-focus-meta,
+.brain-atlas-root.is-light-palette .brain-atlas-info-copy {
+  color: rgba(42, 58, 70, 0.66);
+}
+
+.brain-atlas-root.is-light-palette .brain-atlas-legend-row {
+  color: rgba(34, 48, 58, 0.72);
+}
+
+.brain-atlas-root.is-light-palette .brain-atlas-legend-row:hover {
+  background: rgba(34, 48, 58, 0.07);
+  color: #16202a;
+}
+
+.brain-atlas-root.is-light-palette .brain-atlas-info-title,
+.brain-atlas-root.is-light-palette .brain-atlas-tooltip-title,
+.brain-atlas-root.is-light-palette .brain-atlas-focus-title {
+  color: #16202a;
+}
+
+.brain-atlas-root.is-light-palette .brain-atlas-empty {
+  color: rgba(34, 48, 58, 0.72);
+}
+
 @media only screen and (max-width: 700px) {
   .brain-atlas-hud {
     top: 9px;

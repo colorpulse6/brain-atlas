@@ -1,9 +1,16 @@
 import { PluginSettingTab, Setting } from "obsidian";
 import type BrainAtlasPlugin from "../main.ts";
 import { normalizeKind } from "./classify.ts";
+import { buildClassificationReport } from "./diagnostics.ts";
 import { LOBES, setLobeEnabled } from "./lobe-visibility.ts";
 import { PALETTES } from "./palette.ts";
-import { normalizeLobeValue, type BrainAtlasSettings, type PaletteName } from "./settings.ts";
+import {
+  normalizeFrontmatterValueKey,
+  normalizeLobeValue,
+  type BrainAtlasSettings,
+  type PaletteName,
+  type PerformancePreset
+} from "./settings.ts";
 import { LOBE_CENTERS } from "./shape.ts";
 import { CANONICAL_KINDS, type LobeName, type NodeKind } from "./types.ts";
 
@@ -30,6 +37,16 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         dropdown.setValue(this.plugin.settings.palette);
         dropdown.onChange((value) => this.update({ palette: value as PaletteName }));
       });
+
+    new Setting(containerEl)
+      .setName("Performance preset")
+      .setDesc("Smooth keeps the current animation rate. Balanced and Battery saver reduce idle frame rate for lower CPU use.")
+      .addDropdown((dropdown) => dropdown
+        .addOption("smooth", "Smooth (current)")
+        .addOption("balanced", "Balanced")
+        .addOption("batterySaver", "Battery saver")
+        .setValue(this.plugin.settings.performancePreset)
+        .onChange((value) => this.update({ performancePreset: value as PerformancePreset })));
 
     new Setting(containerEl)
       .setName("Node cap")
@@ -132,6 +149,18 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         })));
 
     new Setting(containerEl)
+      .setName("Frontmatter value mappings")
+      .setDesc("One per line: field:value=category. Example: type:wiki=source.")
+      .addTextArea((text) => {
+        text.setValue(kindMapToText(this.plugin.settings.frontmatterKindValueMap));
+        text.inputEl.rows = 6;
+        text.inputEl.placeholder = "type:wiki=source\ntype:person=person\nclass:meeting=workThread";
+        text.inputEl.addEventListener("blur", () => this.update({
+          frontmatterKindValueMap: parseFrontmatterKindValueMapText(text.getValue())
+        }));
+      });
+
+    new Setting(containerEl)
       .setName("Tag mappings")
       .setDesc("One per line: tag=category. Tags do not need #.")
       .addTextArea((text) => {
@@ -153,6 +182,8 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         }));
       });
 
+    this.renderClassificationReport(containerEl);
+
     new Setting(containerEl)
       .setName("Region overrides")
       .setHeading();
@@ -170,6 +201,18 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
+      .setName("Frontmatter region value mappings")
+      .setDesc("One per line: field:value=region. Example: type:wiki=occipital.")
+      .addTextArea((text) => {
+        text.setValue(lobeMapToText(this.plugin.settings.frontmatterRegionValueMap));
+        text.inputEl.rows = 6;
+        text.inputEl.placeholder = "type:wiki=occipital\ntype:person=temporal";
+        text.inputEl.addEventListener("blur", () => this.update({
+          frontmatterRegionValueMap: parseFrontmatterLobeValueMapText(text.getValue())
+        }));
+      });
+
+    new Setting(containerEl)
       .setName("Tag region mappings")
       .setDesc("One per line: tag=region. Omit # from tags. Example: client=temporal. Valid regions: frontal, parietal, temporal, occipital, cerebellum, stem.")
       .addTextArea((text) => {
@@ -178,6 +221,18 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         text.inputEl.placeholder = "client=temporal\nresearch=occipital\nroadmap=frontal";
         text.inputEl.addEventListener("blur", () => this.update({
           tagRegionMap: parseLobeMapText(text.getValue(), true)
+        }));
+      });
+
+    new Setting(containerEl)
+      .setName("Folder region mappings")
+      .setDesc("One per line: folder=region. Folder names are matched against any path ancestor.")
+      .addTextArea((text) => {
+        text.setValue(lobeMapToText(this.plugin.settings.folderRegionMap));
+        text.inputEl.rows = 6;
+        text.inputEl.placeholder = "Channels=frontal\nWiki=occipital\nInbox=stem";
+        text.inputEl.addEventListener("blur", () => this.update({
+          folderRegionMap: parseLobeMapText(text.getValue(), false)
         }));
       });
 
@@ -198,6 +253,38 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
     this.plugin.settings = { ...this.plugin.settings, ...patch };
     await this.plugin.saveSettings();
     this.plugin.refreshActiveBrainViews();
+  }
+
+  private renderClassificationReport(containerEl: HTMLElement): void {
+    new Setting(containerEl)
+      .setName("Classification report")
+      .setHeading();
+
+    const report = buildClassificationReport(this.plugin.app, this.plugin.settings);
+    const reportEl = containerEl.createDiv({ cls: "brain-atlas-settings-report" });
+    reportEl.createEl("p", { text: `${report.totalNotes} Markdown notes analyzed from local metadata.` });
+
+    const regionLines = LOBES
+      .map((lobe) => `${formatLobeLabel(LOBE_CENTERS[lobe].label)}: ${report.regionCounts[lobe]}`)
+      .join(" - ");
+    reportEl.createEl("p", { text: `Regions: ${regionLines}` });
+
+    reportEl.createEl("p", {
+      text: `Sources: frontmatter ${report.sourceCounts.frontmatter}, tags ${report.sourceCounts.tag}, folders ${report.sourceCounts.folder}, filenames ${report.sourceCounts.filename}, link behavior ${report.sourceCounts.linkBehavior}, default ${report.sourceCounts.default}.`
+    });
+
+    reportEl.createEl("h4", { text: "Unmapped frontmatter values" });
+    if (!report.unmappedFrontmatterValues.length) {
+      reportEl.createEl("p", { text: "No unmapped frontmatter values found." });
+      return;
+    }
+
+    const list = reportEl.createEl("ul");
+    for (const item of report.unmappedFrontmatterValues.slice(0, 8)) {
+      list.createEl("li", {
+        text: `${item.key} - ${item.count} notes. Try ${item.suggestedKindMapping} or ${item.suggestedRegionMapping}.`
+      });
+    }
   }
 }
 
@@ -243,6 +330,32 @@ function parseKindMapText(value: string, lowercaseKeys: boolean): Record<string,
   return map;
 }
 
+function parseFrontmatterKindValueMapText(value: string): Record<string, NodeKind> {
+  const map: Record<string, NodeKind> = {};
+  for (const entry of value.split(/\n+/)) {
+    const [rawKey, rawKind] = splitMappingEntry(entry);
+    if (!rawKey || !rawKind) continue;
+    const key = normalizeFrontmatterValueKey(rawKey);
+    const kind = normalizeKind(rawKind);
+    if (!key || !kind) continue;
+    map[key] = kind;
+  }
+  return map;
+}
+
+function parseFrontmatterLobeValueMapText(value: string): Record<string, LobeName> {
+  const map: Record<string, LobeName> = {};
+  for (const entry of value.split(/\n+/)) {
+    const [rawKey, rawLobe] = splitMappingEntry(entry);
+    if (!rawKey || !rawLobe) continue;
+    const key = normalizeFrontmatterValueKey(rawKey);
+    const lobe = normalizeLobeValue(rawLobe);
+    if (!key || !lobe) continue;
+    map[key] = lobe;
+  }
+  return map;
+}
+
 function parseLobeMapText(value: string, lowercaseKeys: boolean): Record<string, LobeName> {
   const map: Record<string, LobeName> = {};
   for (const entry of value.split(/[\n,]+/)) {
@@ -254,4 +367,10 @@ function parseLobeMapText(value: string, lowercaseKeys: boolean): Record<string,
     map[lowercaseKeys ? key.toLowerCase() : key] = lobe;
   }
   return map;
+}
+
+function splitMappingEntry(entry: string): [string | null, string | null] {
+  const separator = entry.lastIndexOf("=");
+  if (separator < 0) return [null, null];
+  return [entry.slice(0, separator).trim(), entry.slice(separator + 1).trim()];
 }

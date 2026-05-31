@@ -65,3 +65,33 @@ test("custom tag and folder mappings classify notes", () => {
     "source"
   );
 });
+
+test("frontmatter value mappings classify arbitrary vault taxonomies", () => {
+  const classification = classifyNoteDetailed(
+    file("Wiki/Retention.md"),
+    { frontmatter: { type: "wiki" } },
+    {
+      ...DEFAULT_SETTINGS,
+      frontmatterKindValueMap: {
+        "type:wiki": "source"
+      }
+    }
+  );
+
+  assert.deepEqual(classification, { kind: "source", source: "frontmatter" });
+});
+
+test("frontmatter value mappings override direct canonical values", () => {
+  const classification = classifyNoteDetailed(
+    file("Entities/Acme.md"),
+    { frontmatter: { type: "person" } },
+    {
+      ...DEFAULT_SETTINGS,
+      frontmatterKindValueMap: {
+        "type:person": "organization"
+      }
+    }
+  );
+
+  assert.deepEqual(classification, { kind: "organization", source: "frontmatter" });
+});

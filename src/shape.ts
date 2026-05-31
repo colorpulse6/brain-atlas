@@ -149,9 +149,10 @@ export function assignLobePositions(nodes: BrainNode[]): void {
 
     const lobe = node._lobeName ?? KIND_TO_LOBE[node.kind] ?? "parietal";
     const center = LOBE_CENTERS[lobe];
+    const cluster = clusterPoint(node, lobe, center.r);
     const u = r1 * Math.PI * 2;
     const v = Math.acos(2 * r2 - 1);
-    const radius = center.r * (node.hub ? 0.35 : 0.55 + r3 * 0.45);
+    const radius = center.r * (node.hub ? 0.08 : 0.08 + r3 * 0.13);
     const dx = radius * Math.sin(v) * Math.cos(u);
     const dy = radius * Math.sin(v) * Math.sin(u);
     const dz = radius * Math.cos(v);
@@ -159,12 +160,34 @@ export function assignLobePositions(nodes: BrainNode[]): void {
     if (center.mirror && r1 > 0.5) cx = -cx;
 
     node._3dLobe = {
-      x: cx + dx,
-      y: center.c.y + dy,
-      z: center.c.z + dz
+      x: cx + cluster.x + dx,
+      y: center.c.y + cluster.y + dy,
+      z: center.c.z + cluster.z + dz
     };
     node._lobeName = lobe;
   }
+}
+
+function clusterPoint(node: BrainNode, lobe: LobeName, lobeRadius: number): Vec3 {
+  const key = `${lobe}:${topFolder(node.path) ?? node.kind}`;
+  const h = stableHash(key);
+  const r1 = (h & 0xffff) / 0xffff;
+  const r2 = ((h >>> 16) & 0xffff) / 0xffff;
+  const r3 = ((Math.imul(h, 17) >>> 0) & 0xffff) / 0xffff;
+  const u = r1 * Math.PI * 2;
+  const v = Math.acos(2 * r2 - 1);
+  const radius = lobeRadius * (0.18 + r3 * 0.24);
+  return {
+    x: radius * Math.sin(v) * Math.cos(u),
+    y: radius * Math.sin(v) * Math.sin(u),
+    z: radius * Math.cos(v)
+  };
+}
+
+function topFolder(path: string): string | null {
+  const index = path.indexOf("/");
+  if (index <= 0) return null;
+  return path.slice(0, index).toLowerCase();
 }
 
 function stableHash(value: string): number {

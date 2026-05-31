@@ -187,11 +187,17 @@ function applyLinkBehaviorFallback(
 
 function markHubs<T extends BrainNode>(nodes: T[], thresholdPercent: number): T[] {
   if (!nodes.length) return nodes;
-  const sortedDegrees = nodes.map((node) => node.degree).sort((a, b) => b - a);
-  const percentileIndex = Math.max(0, Math.ceil(nodes.length * (thresholdPercent / 100)) - 1);
-  const percentileDegree = sortedDegrees[percentileIndex] ?? 0;
-  const threshold = Math.min(12, Math.max(1, percentileDegree));
-  return nodes.map((node) => ({ ...node, hub: node.degree >= threshold }));
+  const percent = Math.max(0, Math.min(100, thresholdPercent));
+  if (percent === 0) return nodes.map((node) => ({ ...node, hub: false }));
+  const hubLimit = Math.max(1, Math.ceil(nodes.length * (percent / 100)));
+  const hubIds = new Set(
+    [...nodes]
+      .filter((node) => node.degree > 0)
+      .sort((a, b) => b.degree - a.degree || a.id.localeCompare(b.id))
+      .slice(0, hubLimit)
+      .map((node) => node.id)
+  );
+  return nodes.map((node) => ({ ...node, hub: hubIds.has(node.id) }));
 }
 
 function capNodes<T extends BrainNode>(nodes: T[], cap: number): T[] {

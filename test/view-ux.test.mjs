@@ -60,3 +60,21 @@ test("plugin view is contained and stops scroll events from leaking into Obsidia
   assert.match(stylesSource, /overscroll-behavior:\s*contain/);
   assert.match(rendererSource, /event\.stopPropagation\(\)/);
 });
+
+test("settings expose light mode and opt-in performance presets", () => {
+  assert.match(settingsTabSource, /Performance preset/);
+  assert.match(settingsTabSource, /Smooth \(current\)/);
+  assert.match(settingsTabSource, /Battery saver/);
+  assert.match(viewSource, /performancePreset/);
+  assert.match(stylesSource, /is-light-palette/);
+});
+
+test("settings expose frontmatter value mappings and a classification report", () => {
+  assert.match(settingsTabSource, /Frontmatter value mappings/);
+  assert.match(settingsTabSource, /type:wiki=source/);
+  assert.match(settingsTabSource, /Frontmatter region value mappings/);
+  assert.match(settingsTabSource, /type:wiki=occipital/);
+  assert.match(settingsTabSource, /Folder region mappings/);
+  assert.match(settingsTabSource, /Classification report/);
+  assert.match(settingsTabSource, /Unmapped frontmatter values/);
+});

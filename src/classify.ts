@@ -1,5 +1,5 @@
 import { CANONICAL_KINDS, type LobeName, type LobeOverrideSource, type NodeKind } from "./types.ts";
-import { normalizeLobeValue, type BrainAtlasSettings } from "./settings.ts";
+import { frontmatterValueKeys, normalizeLobeValue, type BrainAtlasSettings } from "./settings.ts";
 
 export interface FileLike {
   path: string;
@@ -57,6 +57,9 @@ export function classifyNoteDetailed(
   settings: BrainAtlasSettings
 ): Classification {
   const frontmatter = cache?.frontmatter ?? {};
+  const mappedFrontmatterKind = matchFrontmatterValueMap(frontmatter, settings.frontmatterKindValueMap);
+  if (mappedFrontmatterKind) return { kind: mappedFrontmatterKind, source: "frontmatter" };
+
   for (const key of settings.frontmatterKindKeys) {
     const kind = normalizeKind(frontmatter[key]);
     if (kind) return { kind, source: "frontmatter" };
@@ -87,6 +90,9 @@ export function resolveLobeOverride(
   if (noteMapped) return { lobe: noteMapped, source: "note" };
 
   const frontmatter = cache?.frontmatter ?? {};
+  const mappedFrontmatterLobe = matchFrontmatterValueMap(frontmatter, settings.frontmatterRegionValueMap);
+  if (mappedFrontmatterLobe) return { lobe: mappedFrontmatterLobe, source: "frontmatter" };
+
   for (const key of settings.frontmatterRegionKeys) {
     const lobe = normalizeLobeValue(frontmatter[key]);
     if (lobe) return { lobe, source: "frontmatter" };
@@ -97,6 +103,24 @@ export function resolveLobeOverride(
     if (mapped) return { lobe: mapped, source: "tag" };
   }
 
+  for (const folder of folderAncestors(file.path)) {
+    const mapped = settings.folderRegionMap[folder] ?? settings.folderRegionMap[folder.toLowerCase()];
+    if (mapped) return { lobe: mapped, source: "folder" };
+  }
+
+  return null;
+}
+
+function matchFrontmatterValueMap<T>(
+  frontmatter: Record<string, unknown>,
+  map: Record<string, T>
+): T | null {
+  for (const [field, value] of Object.entries(frontmatter)) {
+    for (const key of frontmatterValueKeys(field, value)) {
+      const mapped = map[key];
+      if (mapped) return mapped;
+    }
+  }
   return null;
 }
 

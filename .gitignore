@@ -5,6 +5,7 @@ demo/brain-atlas-demo.js
 assets/brain-atlas-spin-frames/
 *.map
 dist
+test-vaults/
 .DS_Store
 .env
 .env.*

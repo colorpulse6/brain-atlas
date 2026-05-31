@@ -1,12 +1,13 @@
 {
   "name": "brain-atlas",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Render an Obsidian vault as an animated 3D anatomical brain.",
   "main": "main.js",
   "scripts": {
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "demo:build": "node scripts/build-demo.mjs",
     "dev": "node esbuild.config.mjs",
+    "test-vaults:seed": "node scripts/seed-test-vaults.mjs",
     "test": "node --no-warnings --test test/*.test.mjs"
   },
   "keywords": [

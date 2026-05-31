@@ -20,6 +20,7 @@ export class BrainAtlasView extends ItemView {
   private plugin: BrainAtlasPluginHost;
   private renderer = new BrainRenderer();
   private graph: BrainGraph | null = null;
+  private rootEl: HTMLDivElement | null = null;
   private canvas: HTMLCanvasElement | null = null;
   private controlsEl: HTMLDivElement | null = null;
   private legendEl: HTMLDivElement | null = null;
@@ -58,6 +59,8 @@ export class BrainAtlasView extends ItemView {
     this.contentEl.addClass("brain-atlas-view");
 
     const root = this.contentEl.createDiv({ cls: "brain-atlas-root" });
+    this.rootEl = root;
+    this.syncPaletteClass();
     this.canvas = root.createEl("canvas", { cls: "brain-atlas-canvas" });
     this.createHud(root);
     this.createControls(root);
@@ -74,6 +77,7 @@ export class BrainAtlasView extends ItemView {
       idleAutoRotate: this.plugin.settings.idleAutoRotate,
       showLobeLabels: this.plugin.settings.showLobeLabels,
       enabledLobes: this.plugin.settings.enabledLobes,
+      performancePreset: this.plugin.settings.performancePreset,
       onPinNode: (node, position) => this.pinNode(node, position),
       onChange: this.syncOverlays
     });
@@ -82,6 +86,7 @@ export class BrainAtlasView extends ItemView {
   async onClose(): Promise<void> {
     this.canvas?.removeEventListener("click", this.onCanvasClick);
     this.renderer.stop();
+    this.rootEl = null;
     this.graph = null;
   }
 
@@ -91,6 +96,7 @@ export class BrainAtlasView extends ItemView {
         idleAutoRotate: this.plugin.settings.idleAutoRotate,
         showLobeLabels: this.plugin.settings.showLobeLabels,
         enabledLobes: this.plugin.settings.enabledLobes,
+        performancePreset: this.plugin.settings.performancePreset,
         onPinNode: (node, position) => this.pinNode(node, position),
         onChange: this.syncOverlays
       });
@@ -103,10 +109,12 @@ export class BrainAtlasView extends ItemView {
 
   rebuild(): void {
     this.graph = buildGraph(this.plugin.app, this.plugin.settings);
+    this.syncPaletteClass();
     this.renderer.setOptions({
       idleAutoRotate: this.plugin.settings.idleAutoRotate,
       showLobeLabels: this.plugin.settings.showLobeLabels,
       enabledLobes: this.plugin.settings.enabledLobes,
+      performancePreset: this.plugin.settings.performancePreset,
       onPinNode: (node, position) => this.pinNode(node, position),
       onChange: this.syncOverlays
     });
@@ -160,6 +168,10 @@ export class BrainAtlasView extends ItemView {
     this.syncFocusCard();
     this.emptyEl?.toggleClass("is-visible", graph.nodes.length === 0);
   };
+
+  private syncPaletteClass(): void {
+    this.rootEl?.toggleClass("is-light-palette", this.plugin.settings.palette === "daylight");
+  }
 
   private syncControls(): void {
     const enabled = this.plugin.settings.enabledLobes;

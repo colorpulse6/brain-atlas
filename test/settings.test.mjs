@@ -63,3 +63,54 @@ test("normalizeSettings validates editable region override settings", () => {
   assert.equal(settings.noteRegionMap["Concepts/A.md"], "temporal");
   assert.equal(settings.noteRegionMap["Bad/Region.md"], undefined);
 });
+
+test("normalizeSettings validates palette and performance settings", () => {
+  const settings = normalizeSettings({
+    ...DEFAULT_SETTINGS,
+    palette: "daylight",
+    performancePreset: "batterySaver"
+  });
+
+  assert.equal(settings.palette, "daylight");
+  assert.equal(settings.performancePreset, "batterySaver");
+
+  const fallback = normalizeSettings({
+    ...DEFAULT_SETTINGS,
+    palette: "not-a-palette",
+    performancePreset: "turbo"
+  });
+
+  assert.equal(fallback.palette, "graphite");
+  assert.equal(fallback.performancePreset, "smooth");
+});
+
+test("normalizeSettings validates frontmatter value and folder region mappings", () => {
+  const settings = normalizeSettings({
+    ...DEFAULT_SETTINGS,
+    frontmatterKindValueMap: {
+      "Type: Wiki": "source",
+      "class:meeting": "workThread",
+      "broken": "not-a-kind"
+    },
+    frontmatterRegionValueMap: {
+      "type:person": "temporal",
+      "type:wiki": "occipital",
+      "bad": "not-a-region"
+    },
+    folderRegionMap: {
+      Wiki: "occipital",
+      Channels: "frontal",
+      BadFolder: "nope"
+    }
+  });
+
+  assert.equal(settings.frontmatterKindValueMap["type:wiki"], "source");
+  assert.equal(settings.frontmatterKindValueMap["class:meeting"], "workThread");
+  assert.equal(settings.frontmatterKindValueMap.broken, undefined);
+  assert.equal(settings.frontmatterRegionValueMap["type:person"], "temporal");
+  assert.equal(settings.frontmatterRegionValueMap["type:wiki"], "occipital");
+  assert.equal(settings.frontmatterRegionValueMap.bad, undefined);
+  assert.equal(settings.folderRegionMap.Wiki, "occipital");
+  assert.equal(settings.folderRegionMap.Channels, "frontal");
+  assert.equal(settings.folderRegionMap.BadFolder, undefined);
+});

@@ -144,6 +144,30 @@ export const PALETTES: Record<string, BrainPalette> = {
       index: "#cfe9ff",
       unknown: "#9aa9bd"
     }
+  },
+  daylight: {
+    label: "DAYLIGHT",
+    bg: "#f7f4ec",
+    bgFar: "#e7dfd2",
+    fg: "#22303a",
+    hud: "#536a7a",
+    chroma: 0.5,
+    kinds: {
+      person: "#385b6f",
+      project: "#8a5f18",
+      concept: "#52704f",
+      decision: "#9a6a22",
+      question: "#a14f42",
+      tool: "#536979",
+      workThread: "#7c5c76",
+      dailyNote: "#9a6a22",
+      source: "#456c9a",
+      repo: "#6c5f8f",
+      incident: "#a44242",
+      organization: "#6f7435",
+      index: "#4f6670",
+      unknown: "#7a746c"
+    }
   }
 };
 

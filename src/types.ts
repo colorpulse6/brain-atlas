@@ -26,7 +26,7 @@ export type LobeName =
   | "stem";
 
 export type ClassificationSource = "frontmatter" | "tag" | "folder" | "filename" | "linkBehavior" | "default";
-export type LobeOverrideSource = "note" | "frontmatter" | "tag";
+export type LobeOverrideSource = "note" | "frontmatter" | "tag" | "folder";
 
 export interface BrainNode {
   id: string;
