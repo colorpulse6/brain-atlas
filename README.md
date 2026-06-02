@@ -249,6 +249,12 @@ This creates ignored vault folders in `test-vaults/brain-atlas/` and installs th
 
 Open any generated folder as an Obsidian vault, then run `Brain Atlas: Open atlas`.
 
+## Author
+
+Built by [Nichalas Barnes](https://nichalasbarnes.com/), a software engineer and composer. More work at [nichalasbarnes.com/projects](https://nichalasbarnes.com/projects/).
+
+You might also like [Cerebro Mycelium](https://github.com/colorpulse6/cerebro-mycelium), which renders your vault as a 2D living fungal network.
+
 ## License
 
 MIT
