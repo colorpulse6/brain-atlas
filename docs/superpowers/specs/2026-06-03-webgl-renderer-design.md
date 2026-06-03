@@ -44,7 +44,7 @@ is therefore explicitly disallowed (see Fidelity Strategy).
 - No change to privacy/network posture. WebGL runs entirely on the user's own GPU. No server,
   no account, no dependency. "Local-only rendering" stays true verbatim.
 - No changes to `adapter.ts`, `classify.ts`, `palette.ts`, `shape.ts` math, or the settings
-  schema beyond the already-in-flight Mobile preset work.
+  schema beyond the already-in-flight Mobile preset work and the new `rendererMode` override.
 - Not removing the Canvas2D renderer — it remains the fallback (see below).
 
 ## Architecture
@@ -83,6 +83,12 @@ Both renderers share everything that is not "how pixels get drawn." Extract from
 
 Each renderer implements only `drawScene()` (the per-frame draw) and buffer/state management.
 The base keeps `view.ts` interaction wiring unchanged in behavior.
+
+**Determinism seams (for fidelity testing).** Both renderers must support rendering one
+reproducible frame: an injectable clock (`draw(now)` already takes time), a `deterministic`
+flag that disables idle auto-rotate and signal spawning (signals use `Math.random()`), and an
+explicit `setView({rot, zoom, dpr})` so a harness can fix camera + DPR. With these, the same
+inputs produce byte-stable geometry, which is what the A/B pixel-diff (below) relies on.
 
 ### WebGL path — two stacked canvases
 
@@ -313,8 +319,12 @@ are preserved by literal reuse and must not be re-derived. The compass overlay m
 
 ## WebGL2 Unavailable, Mobile, and Context Loss
 
-- **Selection:** mobile runtime → Canvas2D; desktop with WebGL2 → WebGL2; desktop without
-  WebGL2 → Canvas2D.
+- **Selection:** a `rendererMode` setting (`auto` | `webgl2` | `canvas2d`, default `auto`)
+  gates the choice. In `auto`: mobile runtime → Canvas2D; desktop with WebGL2 → WebGL2; desktop
+  without WebGL2 → Canvas2D. `webgl2`/`canvas2d` force the path (still falling back to Canvas2D
+  if a forced WebGL2 context can't be created). This is both a user escape hatch (force Canvas2D
+  if WebGL misbehaves) and the mechanism for A/B testing the two renderers in real Obsidian. It
+  adds one dropdown to the settings tab and one field to the settings schema + normalization.
 - **No throw:** failure to obtain a context routes to the Canvas2D renderer (or, if that also
   fails, the existing empty-state overlay DOM — `brain-atlas-empty` / `is-visible`), never an
   uncaught error through `onOpen`.
@@ -329,9 +339,14 @@ are preserved by literal reuse and must not be re-derived. The compass overlay m
    uncommitted in `renderer.ts`, `settings.ts`, `settings-tab.ts`, `view.ts`, `README.md`,
    tests). Locks the mobile contract and the fallback target.
 2. **Extract `render-core.ts`** from `renderer.ts` (interaction, scheduling, hit-test, signals,
-   options); keep Canvas2D behavior identical; tests green.
-3. **Implement the WebGL2 renderer** + two-canvas wiring + renderer selection in `view.ts`.
-4. **Verify** side-by-side against the Canvas2D reference; ship.
+   options) + add the determinism seams; keep Canvas2D behavior identical; tests green.
+3. **Stand up the A/B pixel-diff harness early** against the Canvas2D reference alone (it should
+   diff the reference against itself at ~0 difference), plus the `install-local` script. This
+   gives a working fidelity gate *before* the WebGL renderer exists, so WebGL is built against a
+   live target.
+4. **Implement the WebGL2 renderer** + `rendererMode` setting + two-canvas wiring + renderer
+   selection in `view.ts`, iterating until the A/B gate passes across the matrix.
+5. **Verify** in real Obsidian (toggle `rendererMode`) and via the manual checklist; ship.
 
 ## Testing
 
@@ -359,10 +374,32 @@ jsdom has no WebGL or real canvas. Strategy:
 
   New `src/gl/*.ts` pure modules import fine under Node type-stripping; keep all
   `WebGL2RenderingContext` usage behind functions, never module-level instantiation.
-- **Manual verification checklist** in the PR: side-by-side WebGL vs Canvas2D across palettes
-  (incl. `daylight`), focus + hover, hub nodes, signals, lobe toggles + highlight, zoom
-  extremes, node drag (incl. hub), idle auto-rotate, and a device/webview where
-  `getContext("webgl2")` returns null — confirming no visible difference and clean fallback.
+- **Automated A/B pixel-diff gate (CI).** Pure-function tests verify math, not pixels — so add a
+  Playwright harness (dev-only `devDependency`, never shipped in `main.js`, policy-compliant) that
+  runs in headless Chromium (WebGL2 available via SwiftShader). For a fixed synthetic graph and a
+  matrix of conditions, it renders **one deterministic frame** through both paths and compares
+  them **A/B on the same machine** (not against stored golden images, which drift across GPUs):
+  - Render the Canvas2D reference into its canvas; render the WebGL path (geometry canvas +
+    overlay canvas) and composite the overlay onto a readback of the geometry canvas.
+  - Diff the two composited images with `pixelmatch` at a tuned tolerance + max-different-pixels
+    budget. Tolerance is set to ignore last-mile AA (sub-pixel coverage on tiny circles/thin
+    lines) while still catching the bugs that matter: wrong brightness (e.g. the premultiply
+    bug), a missing/extra pass, wrong palette/lobe color, wrong geometry/curve, dropped status
+    dimming.
+  - Matrix: each palette (incl. `daylight`), a few camera angles, focus + hover states, lobe
+    highlight, and a hub-heavy graph. Each case asserts diff ratio < threshold.
+  - Wire into `.github/workflows/ci.yml` as a gate (cache the Playwright browser). This protects
+    `main` (branch protection requires CI) and runs before any release tag.
+- **Local Obsidian verification.** Add an `npm run install-local` script (build → copy
+  `manifest.json`, `main.js`, `styles.css` into a configured `<vault>/.obsidian/plugins/brain-atlas/`
+  per the workspace install convention; vault path via env var, not committed). The
+  `rendererMode` setting (Auto/WebGL2/Canvas2D) lets you toggle paths inside real Obsidian on your
+  own GPU and eyeball them against each other. Document the loop (toggle, disable/enable plugin or
+  reload to pick up a new `main.js`) in the PR.
+- **Manual checklist** (belt-and-suspenders, in the PR): the matrix above plus node drag (incl.
+  hub), idle auto-rotate, zoom extremes, and a device/webview where `getContext("webgl2")`
+  returns null — confirming no visible difference and clean fallback. The automated gate covers
+  the static-frame cases; the manual pass covers motion and interaction.
 
 ## Risks
 
@@ -382,8 +419,12 @@ jsdom has no WebGL or real canvas. Strategy:
 - Desktop CPU usage while idle-rotating at default caps drops substantially (GPU does projection
   + rasterization; CPU updates uniforms and issues draws).
 - No per-frame color-string allocation in the WebGL geometry pipeline.
-- Output is visually indistinguishable from the Canvas2D reference across the manual checklist,
-  including the quantized stair-step alpha and mid-edge color switch.
+- Output is visually indistinguishable from the Canvas2D reference: the CI A/B pixel-diff gate
+  passes across the palette/angle/state matrix (within the tuned tolerance), and the manual +
+  real-Obsidian checks show no visible difference, including the quantized stair-step alpha and
+  mid-edge color switch.
+- The A/B harness, `install-local` script, and `rendererMode` setting exist and the gate runs in
+  CI (protecting `main`).
 - Mobile and no-WebGL2 devices keep working via the Canvas2D fallback; clean recovery from
   context loss; no thrown errors.
 - `npm test` and `npm run build` pass; bundle gains only hand-rolled WebGL code (no deps).
