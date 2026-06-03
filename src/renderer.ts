@@ -56,6 +56,7 @@ export interface BrainRendererOptions {
   showLobeLabels: boolean;
   enabledLobes: LobeVisibility;
   performancePreset: PerformancePreset;
+  mobileMode: boolean;
   onChange?: () => void;
   onPinNode?: (node: BrainNode, position: PinnedNodePosition) => void;
 }
@@ -83,7 +84,8 @@ const MAX_ZOOM = 6;
 const PERFORMANCE_FRAME_DELAYS: Record<PerformancePreset, number> = {
   smooth: 0,
   balanced: 1000 / 30,
-  batterySaver: 1000 / 20
+  batterySaver: 1000 / 20,
+  mobile: 1000 / 15
 };
 
 export class BrainRenderer {
@@ -94,7 +96,8 @@ export class BrainRenderer {
     idleAutoRotate: true,
     showLobeLabels: true,
     enabledLobes: allLobesEnabled(),
-    performancePreset: "smooth"
+    performancePreset: "smooth",
+    mobileMode: false
   };
   private raf: number | null = null;
   private frameTimeout: number | null = null;
@@ -167,6 +170,9 @@ export class BrainRenderer {
 
   setOptions(options: Partial<BrainRendererOptions>): void {
     this.options = { ...this.options, ...options };
+    if (this.canvas && this.ctx && ("performancePreset" in options || "mobileMode" in options)) {
+      this.resize();
+    }
     this.requestImmediateFrame();
   }
 
@@ -307,9 +313,15 @@ export class BrainRenderer {
   };
 
   private nextFrameDelay(now: number): number {
-    if (this.options.performancePreset === "smooth") return 0;
+    const preset = this.effectivePerformancePreset();
+    if (preset === "smooth") return 0;
     if (this.drag || now - this.lastUserAt < 700) return 0;
-    return PERFORMANCE_FRAME_DELAYS[this.options.performancePreset] ?? 0;
+    return PERFORMANCE_FRAME_DELAYS[preset] ?? 0;
+  }
+
+  private effectivePerformancePreset(): PerformancePreset {
+    if (this.options.mobileMode && this.options.performancePreset === "smooth") return "mobile";
+    return this.options.performancePreset;
   }
 
   private scheduleNextFrame(delay: number): void {
@@ -620,7 +632,9 @@ export class BrainRenderer {
     if (this.hoverId) labels.add(this.hoverId);
     if (this.focusId) {
       labels.add(this.focusId);
-      const focusNeighborLabelLimit = Math.max(8, Math.min(30, Math.round(8 * this.zoom)));
+      const focusNeighborLabelLimit = this.effectivePerformancePreset() === "mobile"
+        ? Math.max(3, Math.min(8, Math.round(4 * this.zoom)))
+        : Math.max(8, Math.min(30, Math.round(8 * this.zoom)));
       for (const id of (graph.adj[this.focusId] ?? []).slice(0, focusNeighborLabelLimit)) labels.add(id);
     }
     for (const projected of nodeProjs) {
@@ -650,6 +664,11 @@ export class BrainRenderer {
   }
 
   private maxAutomaticLabels(totalNodes: number): number {
+    if (this.effectivePerformancePreset() === "mobile") {
+      const viewportCap = Math.max(2, Math.floor(this.width / 120));
+      const densityCap = totalNodes > 500 ? 3 : 6;
+      return Math.min(viewportCap, densityCap);
+    }
     const viewportCap = Math.max(6, Math.floor(this.width / 80));
     const zoomCap = this.zoom >= 3 ? 34 : this.zoom >= 2 ? 24 : 14;
     const densityCap = totalNodes > 1000 ? 10 : totalNodes > 500 ? 14 : zoomCap;
@@ -893,11 +912,15 @@ export class BrainRenderer {
     const rect = this.canvas.getBoundingClientRect();
     this.width = Math.max(1, rect.width);
     this.height = Math.max(1, rect.height);
-    this.dpr = Math.min(2, window.devicePixelRatio || 1);
+    this.dpr = Math.min(this.maxDevicePixelRatio(), window.devicePixelRatio || 1);
     this.canvas.width = Math.floor(this.width * this.dpr);
     this.canvas.height = Math.floor(this.height * this.dpr);
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     this.requestImmediateFrame();
+  }
+
+  private maxDevicePixelRatio(): number {
+    return this.effectivePerformancePreset() === "mobile" ? 1 : 2;
   }
 
   private ensureLobePositions(nodes: BrainNode[]): void {

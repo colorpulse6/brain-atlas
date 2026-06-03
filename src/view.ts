@@ -1,4 +1,4 @@
-import { App, ItemView, TFile, WorkspaceLeaf } from "obsidian";
+import { App, ItemView, Platform, TFile, WorkspaceLeaf } from "obsidian";
 import { buildGraph } from "./adapter.ts";
 import { LOBES, setAllLobes, setLobeEnabled } from "./lobe-visibility.ts";
 import { displayNodeName, displayNodePath } from "./node-display.ts";
@@ -78,6 +78,7 @@ export class BrainAtlasView extends ItemView {
       showLobeLabels: this.plugin.settings.showLobeLabels,
       enabledLobes: this.plugin.settings.enabledLobes,
       performancePreset: this.plugin.settings.performancePreset,
+      mobileMode: this.isMobileRuntime(),
       onPinNode: (node, position) => this.pinNode(node, position),
       onChange: this.syncOverlays
     });
@@ -97,6 +98,7 @@ export class BrainAtlasView extends ItemView {
         showLobeLabels: this.plugin.settings.showLobeLabels,
         enabledLobes: this.plugin.settings.enabledLobes,
         performancePreset: this.plugin.settings.performancePreset,
+        mobileMode: this.isMobileRuntime(),
         onPinNode: (node, position) => this.pinNode(node, position),
         onChange: this.syncOverlays
       });
@@ -115,10 +117,20 @@ export class BrainAtlasView extends ItemView {
       showLobeLabels: this.plugin.settings.showLobeLabels,
       enabledLobes: this.plugin.settings.enabledLobes,
       performancePreset: this.plugin.settings.performancePreset,
+      mobileMode: this.isMobileRuntime(),
       onPinNode: (node, position) => this.pinNode(node, position),
       onChange: this.syncOverlays
     });
     this.syncOverlays();
+  }
+
+  private isMobileRuntime(): boolean {
+    if (Platform.isMobile) return true;
+    if (typeof window === "undefined") return false;
+    return window.innerWidth <= 700 || (
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(pointer: coarse)").matches
+    );
   }
 
   private createHud(root: HTMLElement): void {

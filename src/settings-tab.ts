@@ -40,9 +40,10 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Performance preset")
-      .setDesc("Smooth keeps the current animation rate. Balanced and Battery saver reduce idle frame rate for lower CPU use.")
+      .setDesc("Smooth keeps the current desktop animation rate. Mobile, Balanced, and Battery saver reduce idle frame rate for lower CPU use.")
       .addDropdown((dropdown) => dropdown
         .addOption("smooth", "Smooth (current)")
+        .addOption("mobile", "Mobile")
         .addOption("balanced", "Balanced")
         .addOption("batterySaver", "Battery saver")
         .setValue(this.plugin.settings.performancePreset)

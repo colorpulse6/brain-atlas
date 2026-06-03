@@ -4,7 +4,7 @@ import { allLobesEnabled, LOBES, normalizeLobeVisibility, type LobeVisibility } 
 export type ClickAction = "current" | "new-pane" | "hover-preview";
 export const PALETTE_NAMES = ["graphite", "ink", "magma", "bio", "acid", "aurora", "daylight"] as const;
 export type PaletteName = (typeof PALETTE_NAMES)[number];
-export const PERFORMANCE_PRESETS = ["smooth", "balanced", "batterySaver"] as const;
+export const PERFORMANCE_PRESETS = ["smooth", "balanced", "batterySaver", "mobile"] as const;
 export type PerformancePreset = (typeof PERFORMANCE_PRESETS)[number];
 
 export interface PinnedNodePosition {

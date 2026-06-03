@@ -4,6 +4,8 @@
 
 Brain Atlas is an Obsidian plugin that renders your vault as an animated 3D anatomical brain. Notes become nodes, links become neural pathways, and note types are grouped into brain regions.
 
+Brain Atlas is designed primarily for desktop Obsidian. Mobile support is experimental and depends heavily on vault size, device GPU, and Obsidian's mobile canvas performance. On phones and tablets, use the `Mobile` preset to cap rendering load, reduce label density, and keep touch interaction more predictable.
+
 The animated preview below uses synthetic demo vault data.
 
 ![Brain Atlas rotating as an animated 3D anatomical brain](assets/brain-atlas-spin.gif)
@@ -32,7 +34,7 @@ This release focuses on making Brain Atlas work with real vault taxonomies inste
 - Region toggles for dimming or restoring anatomical lobes.
 - Label toggle and density guardrails for hiding labels or preventing dense label piles.
 - Light `Daylight` palette for users who prefer a brighter workspace.
-- Optional performance presets for reducing idle animation frame rate on machines that run hot.
+- Optional performance presets, including a `Mobile preset`, for reducing idle animation frame rate on machines that run hot or small touch devices.
 - Click a node to open the backing note.
 - Drag a node to pin its position in the atlas.
 - Local-only rendering. Brain Atlas does not send vault data to a server.
@@ -97,7 +99,7 @@ Controls:
 Settings:
 
 - `Theme palette` includes the light `DAYLIGHT` palette.
-- `Performance preset` defaults to `Smooth (current)`. `Balanced` and `Battery saver` keep interactions responsive while reducing idle redraw rate.
+- `Performance preset` defaults to `Smooth (current)` on desktop. `Mobile`, `Balanced`, and `Battery saver` keep interactions responsive while reducing idle redraw rate.
 - `Classification report` explains how notes were grouped and suggests mappings for unknown frontmatter values.
 - `Frontmatter value mappings` let existing vault metadata drive categories without renaming fields or values.
 - `Folder region mappings` help folder-heavy vaults spread notes across anatomical regions.

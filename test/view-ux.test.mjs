@@ -64,9 +64,20 @@ test("plugin view is contained and stops scroll events from leaking into Obsidia
 test("settings expose light mode and opt-in performance presets", () => {
   assert.match(settingsTabSource, /Performance preset/);
   assert.match(settingsTabSource, /Smooth \(current\)/);
+  assert.match(settingsTabSource, /Mobile/);
   assert.match(settingsTabSource, /Battery saver/);
+  assert.match(viewSource, /Platform/);
+  assert.match(viewSource, /mobileMode/);
   assert.match(viewSource, /performancePreset/);
   assert.match(stylesSource, /is-light-palette/);
+});
+
+test("README sets mobile support expectations and points users to the mobile preset", () => {
+  const readmeSource = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+
+  assert.match(readmeSource, /designed primarily for desktop Obsidian/i);
+  assert.match(readmeSource, /Mobile support is experimental/i);
+  assert.match(readmeSource, /Mobile preset/i);
 });
 
 test("settings expose frontmatter value mappings and a classification report", () => {

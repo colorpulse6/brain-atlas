@@ -19,6 +19,9 @@ test("renderer keeps smooth as the default and supports opt-in idle frame caps",
   assert.match(rendererSource, /PERFORMANCE_FRAME_DELAYS/);
   assert.match(rendererSource, /balanced:\s*1000 \/ 30/);
   assert.match(rendererSource, /batterySaver:\s*1000 \/ 20/);
+  assert.match(rendererSource, /mobile:\s*1000 \/ 15/);
+  assert.match(rendererSource, /effectivePerformancePreset/);
+  assert.match(rendererSource, /maxDevicePixelRatio/);
   assert.match(rendererSource, /scheduleNextFrame\(0\)/);
 });
 
