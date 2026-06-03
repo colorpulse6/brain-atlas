@@ -120,9 +120,20 @@ hover/click/drag keep working exactly as today. This CPU node projection reuses 
   attributes and interpolated by the GPU, reproducing the current per-segment values. The
   inter-lobe edges currently hard-switch color at the midpoint (`t < 0.5 ? cA : cB`) — that is
   modeled by passing both endpoint colors plus a per-vertex `t` and selecting in the shader.
+- **Focused-edge color override:** when an edge touches the focused node, the current
+  `drawEdge` ignores the lobe-color gradient and strokes the **entire** edge in a single color
+  (`edge.A.color`, the source node's own `color`) at the focus alpha. The buffer/shader path
+  must be able to express a uniform single color for an edge, not only the two-endpoint
+  gradient, so focus rendering stays faithful.
 - **Radial gradients (background, haze, halos, signals):** reproduced with distance-based
-  color-stop math in fragment shaders, matching exact stop positions (e.g. background stops at
-  0 / 0.55 / 1; halo 0.32α → 0; haze 0 / 0.55×0.45 / 0).
+  color-stop math in fragment shaders, matching exact stop positions and alphas. Background:
+  stops at position 0 (`bg`), 0.55 (`bg`), 1.0 (`bgFar`). Node halo: position 0 at alpha
+  `0.32 × alpha × graph.CHAOS.bloom`, position 1 at alpha 0. Lobe haze: position 0 at `baseA`,
+  position 0.55 at `baseA × 0.45`, position 1.0 at 0.
+- **Node body specifics:** preserve the `graph.CHAOS.halo` halo-radius multiplier and
+  `graph.CHAOS.bloom` halo-alpha multiplier, the core fill at alpha `min(1, alpha × 0.93)`, the
+  white inner-core dot at `rgba(255,255,255,alpha)` with radius `max(0.7, radius × 0.42)`, and
+  the hub ring + crosshair strokes. None of these factors may be dropped.
 - **Blend math:** premultiplied alpha. `blendFunc(ONE, ONE_MINUS_SRC_ALPHA)` for source-over,
   `blendFunc(ONE, ONE)` for "lighter" (additive). Use the **default, non-sRGB framebuffer** so
   blending happens in gamma-encoded space exactly as Canvas2D does — do not enable an sRGB
