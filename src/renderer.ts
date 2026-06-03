@@ -1,246 +1,25 @@
-import { assignLobePositions, Brain3D, KIND_TO_LOBE, LOBE_CENTERS, type SurfacePoint } from "./shape.ts";
-import { allLobesEnabled, lobeVisibilityMultiplier, type LobeVisibility } from "./lobe-visibility.ts";
+import { Brain3D, LOBE_CENTERS } from "./shape.ts";
+import { lobeVisibilityMultiplier } from "./lobe-visibility.ts";
 import { displayNodeName } from "./node-display.ts";
-import { clampPinnedNodePosition, type PerformancePreset, type PinnedNodePosition } from "./settings.ts";
-import type { BrainEdge, BrainGraph, BrainNode, LobeName, ProjectedPoint, Vec3 } from "./types.ts";
+import type { BrainGraph, BrainNode, LobeName, ProjectedPoint, Vec3 } from "./types.ts";
+import type { SurfacePoint } from "./shape.ts";
+import { RenderCore, type ProjectedNode, type ProjectedEdge } from "./render-core.ts";
 
-interface SignalParticle {
-  id: number;
-  a: BrainNode;
-  b: BrainNode;
-  born: number;
-  dur: number;
-  colA: string;
-  colB: string;
-}
+export type { BrainRendererOptions } from "./render-core.ts";
 
-interface ProjectedNode extends ProjectedPoint {
-  node: BrainNode;
-}
-
-interface ProjectedEdge {
-  e: BrainEdge;
-  A: BrainNode;
-  B: BrainNode;
-  pts: ProjectedPoint[];
-  z: number;
-  sameLobe: boolean;
-}
-
-interface RotateDragState {
-  mode: "rotate";
-  startX: number;
-  startY: number;
-  rotX: number;
-  rotY: number;
-  moved: boolean;
-  pointerId: number;
-}
-
-interface NodeDragState {
-  mode: "node";
-  startX: number;
-  startY: number;
-  nodeId: string;
-  nodeStart: PinnedNodePosition;
-  screenScale: number;
-  latestPosition?: PinnedNodePosition;
-  moved: boolean;
-  pointerId: number;
-}
-
-type DragState = RotateDragState | NodeDragState;
-
-export interface BrainRendererOptions {
-  idleAutoRotate: boolean;
-  showLobeLabels: boolean;
-  enabledLobes: LobeVisibility;
-  performancePreset: PerformancePreset;
-  mobileMode: boolean;
-  onChange?: () => void;
-  onPinNode?: (node: BrainNode, position: PinnedNodePosition) => void;
-}
-
-const LOBE_KIND: Record<LobeName, string> = {
-  frontal: "project",
-  parietal: "concept",
-  temporal: "person",
-  occipital: "source",
-  cerebellum: "dailyNote",
-  stem: "index"
-};
-
-const LOBE_DESCRIPTIONS: Record<LobeName, { sub: string; role: string }> = {
-  frontal: { sub: "Projects - Decisions - Questions", role: "EXECUTIVE" },
-  parietal: { sub: "Concepts - Tools - Threads", role: "INTEGRATION" },
-  temporal: { sub: "People - Organizations", role: "SOCIAL" },
-  occipital: { sub: "Sources - Repos", role: "PERCEPTION" },
-  cerebellum: { sub: "Daily notes - Incidents", role: "TEMPORAL MEMORY" },
-  stem: { sub: "Index - Routing", role: "ROUTING" }
-};
-
-const MIN_ZOOM = 0.55;
-const MAX_ZOOM = 6;
-const PERFORMANCE_FRAME_DELAYS: Record<PerformancePreset, number> = {
-  smooth: 0,
-  balanced: 1000 / 30,
-  batterySaver: 1000 / 20,
-  mobile: 1000 / 15
-};
-
-export class BrainRenderer {
-  private canvas: HTMLCanvasElement | null = null;
-  private ctx: CanvasRenderingContext2D | null = null;
-  private getGraph: (() => BrainGraph) | null = null;
-  private options: BrainRendererOptions = {
-    idleAutoRotate: true,
-    showLobeLabels: true,
-    enabledLobes: allLobesEnabled(),
-    performancePreset: "smooth",
-    mobileMode: false
-  };
-  private raf: number | null = null;
-  private frameTimeout: number | null = null;
-  private resizeObserver: ResizeObserver | null = null;
-  private rot = { x: -0.15, y: 0.55 };
-  private zoom = 1;
-  private drag: DragState | null = null;
-  private lastUserAt = 0;
-  private suppressClickUntil = 0;
-  private projCache: Record<string, ProjectedNode> = {};
-  private signals: SignalParticle[] = [];
-  private lastSpawn = 0;
-  private hoverId: string | null = null;
-  private focusId: string | null = null;
-  private highlightLobe: LobeName | null = null;
-  private width = 1;
-  private height = 1;
-  private dpr = 1;
+export class BrainRenderer extends RenderCore {
   private cloud: SurfacePoint[];
 
   constructor() {
+    super();
     this.cloud = this.buildCloud();
   }
 
-  start(canvas: HTMLCanvasElement, getGraph: () => BrainGraph, options: Partial<BrainRendererOptions> = {}): void {
-    this.stop();
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("Brain Atlas requires Canvas 2D support.");
-    this.canvas = canvas;
-    this.ctx = ctx;
-    this.getGraph = getGraph;
-    this.options = { ...this.options, ...options };
-    this.lastUserAt = performance.now();
-
-    canvas.addEventListener("pointerdown", this.onPointerDown);
-    canvas.addEventListener("pointermove", this.onPointerMove);
-    canvas.addEventListener("pointerup", this.onPointerUp);
-    canvas.addEventListener("pointercancel", this.onPointerUp);
-    canvas.addEventListener("pointerleave", this.onPointerLeave);
-    canvas.addEventListener("wheel", this.onWheel, { passive: false });
-    canvas.addEventListener("contextmenu", this.onContextMenu);
-
-    this.resizeObserver = new ResizeObserver(() => this.resize());
-    this.resizeObserver.observe(canvas);
-    this.resize();
-    this.scheduleNextFrame(0);
-  }
-
-  stop(): void {
-    if (this.raf != null) cancelAnimationFrame(this.raf);
-    this.raf = null;
-    if (this.frameTimeout != null) window.clearTimeout(this.frameTimeout);
-    this.frameTimeout = null;
-    this.resizeObserver?.disconnect();
-    this.resizeObserver = null;
-    if (this.canvas) {
-      this.canvas.removeEventListener("pointerdown", this.onPointerDown);
-      this.canvas.removeEventListener("pointermove", this.onPointerMove);
-      this.canvas.removeEventListener("pointerup", this.onPointerUp);
-      this.canvas.removeEventListener("pointercancel", this.onPointerUp);
-      this.canvas.removeEventListener("pointerleave", this.onPointerLeave);
-      this.canvas.removeEventListener("wheel", this.onWheel);
-      this.canvas.removeEventListener("contextmenu", this.onContextMenu);
-    }
-    this.canvas = null;
-    this.ctx = null;
-    this.getGraph = null;
-    this.drag = null;
-  }
-
-  setOptions(options: Partial<BrainRendererOptions>): void {
-    this.options = { ...this.options, ...options };
-    if (this.canvas && this.ctx && ("performancePreset" in options || "mobileMode" in options)) {
-      this.resize();
-    }
-    this.requestImmediateFrame();
-  }
-
-  setHighlightLobe(lobe: LobeName | null): void {
-    this.highlightLobe = lobe;
-    this.requestImmediateFrame();
-  }
-
-  getHoveredNode(): BrainNode | null {
-    const graph = this.getGraph?.();
-    return this.hoverId && graph ? graph.idx[this.hoverId] ?? null : null;
-  }
-
-  getFocusedNode(): BrainNode | null {
-    const graph = this.getGraph?.();
-    return this.focusId && graph ? graph.idx[this.focusId] ?? null : null;
-  }
-
-  getLobeStats(): Record<LobeName, number> {
-    const stats = this.emptyLobeStats();
-    const graph = this.getGraph?.();
-    if (!graph) return stats;
-    for (const node of graph.nodes) {
-      const lobe = node._lobeName ?? KIND_TO_LOBE[node.kind] ?? "parietal";
-      stats[lobe] += 1;
-    }
-    return stats;
-  }
-
-  hitTest(x: number, y: number): BrainNode | null {
-    return this.hitTestProjected(x, y)?.node ?? null;
-  }
-
-  consumeSuppressedClick(): boolean {
-    if (!this.suppressClickUntil || performance.now() > this.suppressClickUntil) {
-      this.suppressClickUntil = 0;
-      return false;
-    }
-    this.suppressClickUntil = 0;
-    return true;
-  }
-
-  private hitTestProjected(x: number, y: number): ProjectedNode | null {
-    let best: ProjectedNode | null = null;
-    let bestDistance = this.hitTolerance();
-    for (const id in this.projCache) {
-      const projected = this.projCache[id];
-      if (projected.z > 0.4) continue;
-      const distance = Math.hypot(x - projected.sx, y - projected.sy);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        best = projected;
-      }
-    }
-    return best;
-  }
-
-  private draw = (now: number): void => {
-    this.raf = null;
+  protected drawScene(now: number): void {
     const canvas = this.canvas;
     const ctx = this.ctx;
     const graph = this.getGraph?.();
     if (!canvas || !ctx || !graph) return;
-
-    this.ensureLobePositions(graph.nodes);
-    if (!this.drag && this.options.idleAutoRotate && now - this.lastUserAt > 1800) {
-      this.rot.y += 0.00065;
-    }
 
     const pal = graph.activePalette;
     const scale = Math.min(this.width, this.height) * 0.32 * this.zoom;
@@ -273,7 +52,6 @@ export class BrainRenderer {
     const nodeProjs = graph.nodes
       .filter((node) => node._3dLobe)
       .map((node) => ({ node, ...project(node._3dLobe as Vec3) }));
-    this.projCache = Object.fromEntries(nodeProjs.map((node) => [node.node.id, node]));
     const edgeProjs = this.projectEdges(graph, project);
 
     ctx.globalCompositeOperation = "lighter";
@@ -308,42 +86,6 @@ export class BrainRenderer {
     if (this.options.showLobeLabels) this.drawLobeLabels(ctx, project, graph, lobeStats, lobeMul);
     if (this.options.showLobeLabels) this.drawNodeLabels(ctx, nodeProjs, graph, lobeMul);
     this.drawCompass(ctx, graph);
-
-    this.scheduleNextFrame(this.nextFrameDelay(now));
-  };
-
-  private nextFrameDelay(now: number): number {
-    const preset = this.effectivePerformancePreset();
-    if (preset === "smooth") return 0;
-    if (this.drag || now - this.lastUserAt < 700) return 0;
-    return PERFORMANCE_FRAME_DELAYS[preset] ?? 0;
-  }
-
-  private effectivePerformancePreset(): PerformancePreset {
-    if (this.options.mobileMode && this.options.performancePreset === "smooth") return "mobile";
-    return this.options.performancePreset;
-  }
-
-  private scheduleNextFrame(delay: number): void {
-    if (!this.canvas || this.raf != null || this.frameTimeout != null) return;
-    if (delay <= 0) {
-      this.raf = requestAnimationFrame(this.draw);
-      return;
-    }
-    this.frameTimeout = window.setTimeout(() => {
-      this.frameTimeout = null;
-      if (!this.canvas) return;
-      this.raf = requestAnimationFrame(this.draw);
-    }, delay);
-  }
-
-  private requestImmediateFrame(): void {
-    if (!this.canvas) return;
-    if (this.frameTimeout != null) {
-      window.clearTimeout(this.frameTimeout);
-      this.frameTimeout = null;
-    }
-    if (this.raf == null) this.raf = requestAnimationFrame(this.draw);
   }
 
   private drawLobeHaze(
@@ -706,227 +448,6 @@ export class BrainRenderer {
     }
   }
 
-  private spawnSignals(now: number, graph: BrainGraph, interLobeEdges: BrainEdge[]): void {
-    if (interLobeEdges.length && now - this.lastSpawn > 900) {
-      this.lastSpawn = now;
-      const edge = interLobeEdges[Math.floor(Math.random() * interLobeEdges.length)];
-      const forward = Math.random() < 0.5;
-      const A = graph.idx[forward ? edge.a : edge.b];
-      const B = graph.idx[forward ? edge.b : edge.a];
-      if (A && B) {
-        this.signals.push({
-          id: Math.random(),
-          a: A,
-          b: B,
-          born: now,
-          dur: 2400 + Math.random() * 1100,
-          colA: A.color,
-          colB: B.color
-        });
-      }
-    }
-    for (let index = this.signals.length - 1; index >= 0; index -= 1) {
-      if (now - this.signals[index].born > this.signals[index].dur) this.signals.splice(index, 1);
-    }
-  }
-
-  private onPointerDown = (event: PointerEvent): void => {
-    if (!this.canvas || event.button !== 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const point = this.localPoint(event);
-    const hit = this.hitTestProjected(point.x, point.y);
-    if (hit?.node._3dLobe) {
-      const nodeStart = clampPinnedNodePosition(hit.node._3dLobe);
-      this.drag = {
-        mode: "node",
-        startX: event.clientX,
-        startY: event.clientY,
-        nodeId: hit.node.id,
-        nodeStart,
-        screenScale: Math.max(80, this.currentProjectionScale() * Math.max(0.4, hit.scale)),
-        moved: false,
-        pointerId: event.pointerId
-      };
-      this.focusId = hit.node.id;
-      this.hoverId = hit.node.id;
-      this.options.onChange?.();
-    } else {
-      this.drag = {
-        mode: "rotate",
-        startX: event.clientX,
-        startY: event.clientY,
-        rotX: this.rot.x,
-        rotY: this.rot.y,
-        moved: false,
-        pointerId: event.pointerId
-      };
-    }
-    this.lastUserAt = performance.now();
-    this.canvas.setPointerCapture(event.pointerId);
-    this.requestImmediateFrame();
-  };
-
-  private onPointerMove = (event: PointerEvent): void => {
-    if (!this.canvas) return;
-    event.stopPropagation();
-    if (this.drag) {
-      event.preventDefault();
-      const screenDx = event.clientX - this.drag.startX;
-      const screenDy = event.clientY - this.drag.startY;
-      this.drag.moved = this.drag.moved || Math.hypot(screenDx, screenDy) > 3;
-      if (this.drag.mode === "node") {
-        const next = this.draggedNodePosition(this.drag, screenDx, screenDy);
-        this.drag.latestPosition = next;
-        this.moveNodeTo(this.drag.nodeId, next);
-        this.focusId = this.drag.nodeId;
-        this.hoverId = this.drag.nodeId;
-        this.options.onChange?.();
-      } else {
-        const dx = screenDx / 180;
-        const dy = screenDy / 180;
-        this.rot.y = this.drag.rotY + dx;
-        this.rot.x = Math.max(-1.4, Math.min(1.4, this.drag.rotX + dy));
-      }
-      this.lastUserAt = performance.now();
-      this.requestImmediateFrame();
-      return;
-    }
-
-    const point = this.localPoint(event);
-    const hit = this.hitTest(point.x, point.y);
-    if ((hit?.id ?? null) !== this.hoverId) {
-      this.hoverId = hit?.id ?? null;
-      this.options.onChange?.();
-      this.requestImmediateFrame();
-    }
-  };
-
-  private onPointerUp = (event: PointerEvent): void => {
-    event.stopPropagation();
-    const activeDrag = this.drag;
-    this.drag = null;
-    if (!activeDrag) return;
-    try {
-      this.canvas?.releasePointerCapture(activeDrag.pointerId);
-    } catch {
-      // Obsidian can release capture when panes change during interaction.
-    }
-    if (activeDrag.mode === "node" && activeDrag.moved && activeDrag.latestPosition) {
-      const graph = this.getGraph?.();
-      const node = graph?.idx[activeDrag.nodeId];
-      if (node) this.options.onPinNode?.(node, activeDrag.latestPosition);
-      this.suppressClickUntil = performance.now() + 600;
-      this.options.onChange?.();
-      this.requestImmediateFrame();
-      return;
-    }
-    if (activeDrag.moved) {
-      this.suppressClickUntil = performance.now() + 600;
-      return;
-    }
-    const point = this.localPoint(event);
-    const hit = this.hitTest(point.x, point.y);
-    this.focusId = hit?.id ?? null;
-    this.options.onChange?.();
-    this.requestImmediateFrame();
-  };
-
-  private onPointerLeave = (): void => {
-    if (this.drag) return;
-    if (this.hoverId) {
-      this.hoverId = null;
-      this.options.onChange?.();
-      this.requestImmediateFrame();
-    }
-  };
-
-  private onWheel = (event: WheelEvent): void => {
-    event.preventDefault();
-    event.stopPropagation();
-    this.zoom *= 1 - event.deltaY * 0.0012;
-    this.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, this.zoom));
-    this.lastUserAt = performance.now();
-    this.requestImmediateFrame();
-  };
-
-  private onContextMenu = (event: MouseEvent): void => {
-    event.preventDefault();
-    event.stopPropagation();
-    this.rot = { x: -0.15, y: 0.55 };
-    this.zoom = 1;
-    this.lastUserAt = performance.now();
-    this.requestImmediateFrame();
-  };
-
-  private localPoint(event: MouseEvent | PointerEvent): { x: number; y: number } {
-    const rect = this.canvas?.getBoundingClientRect();
-    if (!rect) return { x: 0, y: 0 };
-    return {
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top
-    };
-  }
-
-  private draggedNodePosition(drag: NodeDragState, screenDx: number, screenDy: number): PinnedNodePosition {
-    const right = this.cameraRight();
-    const up = this.cameraUp();
-    const dx = screenDx / drag.screenScale;
-    const dy = screenDy / drag.screenScale;
-    return clampPinnedNodePosition({
-      x: drag.nodeStart.x + right.x * dx - up.x * dy,
-      y: drag.nodeStart.y + right.y * dx - up.y * dy,
-      z: drag.nodeStart.z + right.z * dx - up.z * dy
-    });
-  }
-
-  private moveNodeTo(nodeId: string, position: PinnedNodePosition): void {
-    const graph = this.getGraph?.();
-    const node = graph?.idx[nodeId];
-    if (!node) return;
-    node._3dLobe = { ...position };
-  }
-
-  private cameraRight(): Vec3 {
-    return { x: Math.cos(this.rot.y), y: 0, z: Math.sin(this.rot.y) };
-  }
-
-  private cameraUp(): Vec3 {
-    return {
-      x: Math.sin(this.rot.y) * Math.sin(this.rot.x),
-      y: Math.cos(this.rot.x),
-      z: -Math.cos(this.rot.y) * Math.sin(this.rot.x)
-    };
-  }
-
-  private currentProjectionScale(): number {
-    return Math.min(this.width, this.height) * 0.32 * this.zoom;
-  }
-
-  private hitTolerance(): number {
-    return Math.max(7, 18 / Math.sqrt(this.zoom));
-  }
-
-  private resize(): void {
-    if (!this.canvas || !this.ctx) return;
-    const rect = this.canvas.getBoundingClientRect();
-    this.width = Math.max(1, rect.width);
-    this.height = Math.max(1, rect.height);
-    this.dpr = Math.min(this.maxDevicePixelRatio(), window.devicePixelRatio || 1);
-    this.canvas.width = Math.floor(this.width * this.dpr);
-    this.canvas.height = Math.floor(this.height * this.dpr);
-    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    this.requestImmediateFrame();
-  }
-
-  private maxDevicePixelRatio(): number {
-    return this.effectivePerformancePreset() === "mobile" ? 1 : 2;
-  }
-
-  private ensureLobePositions(nodes: BrainNode[]): void {
-    if (nodes.some((node) => !node._3dLobe)) assignLobePositions(nodes);
-  }
-
   private buildCloud(): SurfacePoint[] {
     const surface = Brain3D.generateSurface(1400, 0.026).map((p, index) => ({
       ...p,
@@ -955,15 +476,16 @@ export class BrainRenderer {
     }
     return [...surface, ...cerebellum, ...stem];
   }
-
-  private emptyLobeStats(): Record<LobeName, number> {
-    return { frontal: 0, parietal: 0, temporal: 0, occipital: 0, cerebellum: 0, stem: 0 };
-  }
-
-  private lobeColor(lobe: LobeName, graph: BrainGraph): string {
-    return graph.activePalette.kinds[LOBE_KIND[lobe] ?? "concept"] ?? graph.activePalette.hud;
-  }
 }
+
+const LOBE_DESCRIPTIONS: Record<LobeName, { sub: string; role: string }> = {
+  frontal: { sub: "Projects - Decisions - Questions", role: "EXECUTIVE" },
+  parietal: { sub: "Concepts - Tools - Threads", role: "INTEGRATION" },
+  temporal: { sub: "People - Organizations", role: "SOCIAL" },
+  occipital: { sub: "Sources - Repos", role: "PERCEPTION" },
+  cerebellum: { sub: "Daily notes - Incidents", role: "TEMPORAL MEMORY" },
+  stem: { sub: "Index - Routing", role: "ROUTING" }
+};
 
 function nodeRadius(node: BrainNode): number {
   if (node.hub) return 6.5;

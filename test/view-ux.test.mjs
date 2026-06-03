@@ -4,6 +4,7 @@ import test from "node:test";
 
 const viewSource = readFileSync(new URL("../src/view.ts", import.meta.url), "utf8");
 const rendererSource = readFileSync(new URL("../src/renderer.ts", import.meta.url), "utf8");
+const coreSource = readFileSync(new URL("../src/render-core.ts", import.meta.url), "utf8");
 const settingsTabSource = readFileSync(new URL("../src/settings-tab.ts", import.meta.url), "utf8");
 const stylesSource = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 
@@ -33,9 +34,9 @@ test("coarse pointer taps can preview a node before opening it", () => {
 });
 
 test("renderer supports dragging nodes into persisted pins without opening after drag", () => {
-  assert.match(rendererSource, /onPinNode/);
-  assert.match(rendererSource, /mode: "node"/);
-  assert.match(rendererSource, /consumeSuppressedClick/);
+  assert.match(coreSource, /onPinNode/);
+  assert.match(coreSource, /mode: "node"/);
+  assert.match(coreSource, /consumeSuppressedClick/);
   assert.match(viewSource, /DRAG NODE - pin/);
   assert.match(viewSource, /pinNode/);
 });
@@ -58,7 +59,7 @@ test("view surfaces classification source and categorization settings", () => {
 test("plugin view is contained and stops scroll events from leaking into Obsidian chrome", () => {
   assert.match(stylesSource, /contain:\s*strict/);
   assert.match(stylesSource, /overscroll-behavior:\s*contain/);
-  assert.match(rendererSource, /event\.stopPropagation\(\)/);
+  assert.match(coreSource, /event\.stopPropagation\(\)/);
 });
 
 test("settings expose light mode and opt-in performance presets", () => {
