@@ -110,7 +110,7 @@ Gate idle auto-rotate and signal spawning on `!this.deterministic`:
 
 - [ ] **Step 4: Repoint moved source-grep assertions**
 
-`test/renderer-interaction.test.mjs` greps `../src/renderer.ts` for `PERFORMANCE_FRAME_DELAYS`, the `balanced/batterySaver/mobile` delays, `effectivePerformancePreset`, `maxDevicePixelRatio`, `scheduleNextFrame(0)`, `MAX_ZOOM = 6`, `hitTolerance`. These now live in `render-core.ts`. Update the test to read `../src/render-core.ts` for those (keep label/draw assertions pointed at `renderer.ts`). Split the `readFileSync` into `coreSource` and `rendererSource` as needed.
+`test/renderer-interaction.test.mjs` greps `../src/renderer.ts` for `PERFORMANCE_FRAME_DELAYS`, the `balanced/batterySaver/mobile` delays, `effectivePerformancePreset`, `maxDevicePixelRatio`, `scheduleNextFrame(0)`, `MAX_ZOOM = 6`, `hitTolerance`. These now live in `render-core.ts`. Update the test to read `../src/render-core.ts` for those (keep label/draw assertions pointed at `renderer.ts`). Split the `readFileSync` into `coreSource` and `rendererSource` as needed. Note: whether bare tokens like `performancePreset`/`effectivePerformancePreset` still appear in `renderer.ts` depends on where `BrainRendererOptions` and the label code (`maxAutomaticLabels`/`drawNodeLabels`, which call `effectivePerformancePreset`) live — they stay in `renderer.ts`, so those two tokens survive in both files. The `npm test` gate in Step 6 catches any mis-repoint immediately; let it guide the exact split.
 
 - [ ] **Step 5: Add determinism-seam unit test**
 
@@ -210,9 +210,9 @@ npx playwright install --with-deps chromium
 ```
 Add to `package.json` scripts: `"test:ab": "playwright test test/ab"`, `"install-local": "node scripts/install-local.mjs"`.
 
-- [ ] **Step 2: Create a deterministic fixture graph**
+- [ ] **Step 2: Create a deterministic fixture graph (reuse the existing demo graph)**
 
-`test/ab/fixture-graph.mjs` — export a function building a fixed `BrainGraph` (stable ids so `assignLobePositions`' `stableHash` layout is deterministic): a few hundred nodes across all 6 lobes, a mix of hub/non-hub, some `archived`/`dormantRelevant`, inter-lobe and intra-lobe edges, and an `activePalette` + `CHAOS`. Reuse adapter/classify/palette types. Keep counts modest so the diff is fast.
+`demo/sample-graph.ts` already exports a deterministic `createDemoBrainGraph()` covering all 6 lobes with stable indexes, `activePalette`, and `CHAOS` (it has its own privacy-guard tests). **Reuse/adapt it** rather than building from scratch. One required change for the A/B palette dimension: it hardcodes `PALETTES.graphite` for both `activePalette` and per-node `color`, so add a `palette` parameter that sets `activePalette` to the chosen palette **and re-derives each `node.color` from that palette** — otherwise a graphite-colored graph diffed against a `daylight` render produces spurious mismatches. Ensure the variant includes some `archived`/`dormantRelevant` nodes and both inter- and intra-lobe edges; keep counts modest so the diff is fast. Put the wrapper in `test/ab/fixture-graph.mjs`.
 
 - [ ] **Step 3: Create the harness page + driver**
 
@@ -431,7 +431,7 @@ git commit -am "feat: WebGL context-loss recovery + graceful fallback"
 **Files:** Modify `README.md`, `versions.json`; final verification.
 
 - [ ] **Step 1:** README: document the `Renderer` setting and that desktop uses WebGL2 for lower CPU while mobile/unsupported uses Canvas2D. Keep "Local-only rendering" wording.
-- [ ] **Step 2:** `versions.json`: add the new release version → `1.5.0` (minAppVersion unchanged).
+- [ ] **Step 2:** Bump the plugin version to `0.2.0` (this is a significant feature) in `manifest.json` and `package.json`. In `versions.json` add a new **key** `"0.2.0"` whose **value** is `"1.5.0"` (the value is `minAppVersion`, which stays `1.5.0` — do NOT set the plugin version to `1.5.0`). The git release tag must match `manifest.json` (`0.2.0`).
 - [ ] **Step 3:** Full gate: `npm test` (unit + source), `npm run test:ab` (canvas2d vs webgl2 across the matrix), `npm run build`, `npm audit --omit=dev`. Grep `main.js` for `fetch|XMLHttpRequest|WebSocket|requestUrl|https://` (expect none new).
 - [ ] **Step 4:** Manual checklist in real Obsidian via `install-local`: all palettes, focus/hover, hub nodes, signals in motion, lobe toggles + highlight, zoom extremes, node drag (incl. hub), idle auto-rotate, and forcing `canvas2d` — confirm no visible difference and smooth desktop CPU.
 - [ ] **Step 5:** Open PR to `main`; ensure CI (incl. A/B job) is green; CODEOWNER review. Commit any doc fixes.
