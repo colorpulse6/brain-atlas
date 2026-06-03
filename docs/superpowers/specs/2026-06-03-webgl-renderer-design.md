@@ -99,6 +99,16 @@ Z-stacking: WebGL canvas (z 0) under the overlay canvas (z 1) under the existing
 (z 2). All pointer/wheel/contextmenu/click listeners attach to the **WebGL (bottom) canvas**;
 the overlay is `pointer-events: none` so events reach it.
 
+**Canvas ownership (both paths).** Today `view.ts` creates a single `.brain-atlas-canvas` and
+passes it to `renderer.start(canvas, …)`, and `view.ts` reaches into `this.canvas` directly for
+`onCanvasClick` rect math and the `click` listener. In the dual model, the **view passes its
+container element** and the renderer creates/owns its canvas(es): the Canvas2D renderer makes one
+canvas; the WebGL renderer makes the WebGL + overlay pair. `view.ts`'s click/rect logic must use
+the renderer's event-receiving (bottom) canvas — expose it via the shared base (e.g.
+`renderer.getInteractionTarget()`) so `onCanvasClick`'s `getBoundingClientRect` and `localPoint`
+repoint there. This is a real `view.ts` contract change (not "minimal"); only the interaction
+*behavior* is unchanged.
+
 ### Why the two-canvas split is fidelity-preserving (critical)
 
 `globalCompositeOperation = "lighter"` (additive) for cloud/haze/signals adds the source color
@@ -222,9 +232,11 @@ palette switch does not re-tessellate ribbons.
   color lerp currently rounds in 0–255 space (`lerpHex`); reproduce with the same quantization
   in-shader if strict identity is needed (otherwise note as a sub-1/255 deviation).
 - **Derived per-point `scale` and `depth`:** computed in-shader from camera-space `z2` with the
-  identical formulas (`scale = (dist/(dist+z2)) × dist / sceneScale`… i.e. matching
-  `makeProjector`'s `f*dist/scale` and `depth = (z2+1.5)/3`) and the same clamps
-  (`max(0.55, scale)` for node radius, `max(0.32, 1 − depth×0.75)` node fade, etc.).
+  identical formulas. In `makeProjector`, `f = sceneScale/(dist+z2)` and the returned per-point
+  `scale = f × dist / sceneScale = dist / (dist + z2)` (the scene scale cancels — do not leave a
+  `dist/sceneScale` factor in); `depth = (z2 + 1.5)/3`. Apply the same clamps where they occur:
+  `max(0.55, scale)` for node radius, `max(0.6, scale)`/`max(0.5, scale)` for labels/signals,
+  `max(0.32, 1 − depth×0.75)` node fade, etc.
 - **Draw order (identical, back-to-front), toggling blend per pass:**
   1. Background gradient (full-screen quad; radial, center `(cx,cy)`, radius `max(w,h) × 0.75`,
      stops `bg @0 / bg @0.55 / bgFar @1`).
@@ -333,15 +345,20 @@ jsdom has no WebGL or real canvas. Strategy:
   conversion matches `hexA` numerics; draw-order/pass list given sample z values matches the
   current ordering and stable tiebreak; capability-detection branch (mobile/no-WebGL2 →
   Canvas2D) is pure and tested.
-- **Keep/repoint source-grep tests.** Existing tests grep `src/renderer.ts` for exact strings
-  (`PERFORMANCE_FRAME_DELAYS`, `effectivePerformancePreset`, `maxDevicePixelRatio`,
-  `scheduleNextFrame(0)`, `MAX_ZOOM = 6`, `hitTolerance`, `mode: "node"`,
-  `consumeSuppressedClick`, `event.stopPropagation()`, and `renderer-labels.test.mjs`'s literal
-  `if (this.options.showLobeLabels) this.drawLobeLabels`). Because frame-pacing/label-gating
-  move to `render-core.ts`, repoint these greps to the new module path (or keep the gated calls
-  in `renderer.ts`). The plan must list each affected test → new target. New `src/gl/*.ts` pure
-  modules import fine under Node type-stripping; keep all `WebGL2RenderingContext` usage behind
-  functions, never module-level instantiation.
+- **Keep/repoint source-grep tests.** Existing tests grep `src/renderer.ts` for exact strings.
+  Because frame-pacing / label-gating / interaction move to `render-core.ts`, the plan must list
+  each affected test → new target (repoint the grep to the new module, or keep the asserted
+  string physically in `renderer.ts`):
+  - `renderer-interaction.test.mjs`: `PERFORMANCE_FRAME_DELAYS`, `balanced/batterySaver/mobile`
+    delays, `effectivePerformancePreset`, `maxDevicePixelRatio`, `scheduleNextFrame(0)`,
+    `MAX_ZOOM = 6`, `hitTolerance`.
+  - `renderer-labels.test.mjs`: the literal `if (this.options.showLobeLabels) this.drawLobeLabels`.
+  - `view-ux.test.mjs`: `event.stopPropagation()`, `mode: "node"`, `consumeSuppressedClick`,
+    `onPinNode`. Note `displayNodeName` is exercised in label drawing, which stays on the
+    Canvas2D overlay reused verbatim, so that grep needs **no** repoint.
+
+  New `src/gl/*.ts` pure modules import fine under Node type-stripping; keep all
+  `WebGL2RenderingContext` usage behind functions, never module-level instantiation.
 - **Manual verification checklist** in the PR: side-by-side WebGL vs Canvas2D across palettes
   (incl. `daylight`), focus + hover, hub nodes, signals, lobe toggles + highlight, zoom
   extremes, node drag (incl. hub), idle auto-rotate, and a device/webview where
