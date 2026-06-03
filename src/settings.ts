@@ -6,6 +6,8 @@ export const PALETTE_NAMES = ["graphite", "ink", "magma", "bio", "acid", "aurora
 export type PaletteName = (typeof PALETTE_NAMES)[number];
 export const PERFORMANCE_PRESETS = ["smooth", "balanced", "batterySaver", "mobile"] as const;
 export type PerformancePreset = (typeof PERFORMANCE_PRESETS)[number];
+export const RENDERER_MODES = ["auto", "webgl2", "canvas2d"] as const;
+export type RendererMode = (typeof RENDERER_MODES)[number];
 
 export interface PinnedNodePosition {
   x: number;
@@ -39,6 +41,7 @@ export interface BrainAtlasSettings {
   pinnedNodePositions: Record<string, PinnedNodePosition>;
   defaultKind: NodeKind;
   inferKindsFromLinks: boolean;
+  rendererMode: RendererMode;
 }
 
 export const DEFAULT_SETTINGS: BrainAtlasSettings = {
@@ -90,7 +93,8 @@ export const DEFAULT_SETTINGS: BrainAtlasSettings = {
   hubThresholdPercent: 4,
   pinnedNodePositions: {},
   defaultKind: "concept",
-  inferKindsFromLinks: true
+  inferKindsFromLinks: true,
+  rendererMode: "auto"
 };
 
 export function normalizeSettings(input: Partial<BrainAtlasSettings> | null | undefined): BrainAtlasSettings {
@@ -114,7 +118,8 @@ export function normalizeSettings(input: Partial<BrainAtlasSettings> | null | un
     enabledLobes: normalizeLobeVisibility(input?.enabledLobes),
     pinnedNodePositions: normalizePinnedNodePositions(input?.pinnedNodePositions),
     defaultKind: normalizeKindValue(input?.defaultKind) ?? DEFAULT_SETTINGS.defaultKind,
-    inferKindsFromLinks: input?.inferKindsFromLinks ?? DEFAULT_SETTINGS.inferKindsFromLinks
+    inferKindsFromLinks: input?.inferKindsFromLinks ?? DEFAULT_SETTINGS.inferKindsFromLinks,
+    rendererMode: normalizeRendererMode(input?.rendererMode) ?? DEFAULT_SETTINGS.rendererMode
   };
 }
 
@@ -142,6 +147,11 @@ function normalizePaletteName(value: unknown): PaletteName | null {
 function normalizePerformancePreset(value: unknown): PerformancePreset | null {
   if (typeof value !== "string") return null;
   return (PERFORMANCE_PRESETS as readonly string[]).includes(value) ? value as PerformancePreset : null;
+}
+
+function normalizeRendererMode(value: unknown): RendererMode | null {
+  if (typeof value !== "string") return null;
+  return (RENDERER_MODES as readonly string[]).includes(value) ? value as RendererMode : null;
 }
 
 export function normalizePinnedNodePositions(input: unknown): Record<string, PinnedNodePosition> {

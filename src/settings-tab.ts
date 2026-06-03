@@ -9,7 +9,8 @@ import {
   normalizeLobeValue,
   type BrainAtlasSettings,
   type PaletteName,
-  type PerformancePreset
+  type PerformancePreset,
+  type RendererMode
 } from "./settings.ts";
 import { LOBE_CENTERS } from "./shape.ts";
 import { CANONICAL_KINDS, type LobeName, type NodeKind } from "./types.ts";
@@ -48,6 +49,16 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         .addOption("batterySaver", "Battery saver")
         .setValue(this.plugin.settings.performancePreset)
         .onChange((value) => this.update({ performancePreset: value as PerformancePreset })));
+
+    new Setting(containerEl)
+      .setName("Renderer")
+      .setDesc("Auto uses WebGL2 on desktop and Canvas2D on mobile. Force a renderer for testing or if WebGL has issues.")
+      .addDropdown((dropdown) => dropdown
+        .addOption("auto", "Auto (recommended)")
+        .addOption("webgl2", "WebGL2")
+        .addOption("canvas2d", "Canvas2D")
+        .setValue(this.plugin.settings.rendererMode)
+        .onChange((value) => this.update({ rendererMode: value as RendererMode })));
 
     new Setting(containerEl)
       .setName("Node cap")
