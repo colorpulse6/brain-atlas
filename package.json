@@ -8,7 +8,9 @@
     "demo:build": "node scripts/build-demo.mjs",
     "dev": "node esbuild.config.mjs",
     "test-vaults:seed": "node scripts/seed-test-vaults.mjs",
-    "test": "node --no-warnings --test test/*.test.mjs"
+    "test": "node --no-warnings --test test/*.test.mjs",
+    "test:ab": "node test/ab/build-harness.mjs && playwright test test/ab",
+    "install-local": "node scripts/install-local.mjs"
   },
   "keywords": [
     "obsidian",
@@ -27,9 +29,12 @@
   },
   "license": "MIT",
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@types/node": "^20.11.30",
     "esbuild": "^0.21.5",
     "obsidian": "^1.5.12",
+    "pixelmatch": "^7.2.0",
+    "pngjs": "^7.0.0",
     "typescript": "^5.4.5"
   }
 }

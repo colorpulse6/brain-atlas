@@ -209,6 +209,15 @@ export abstract class RenderCore {
     this.requestImmediateFrame();
   }
 
+  // ---- Test-only seams (used by A/B pixel-diff harness) ----
+  setFocusForTest(id: string | null): void { this.focusId = id; this.requestImmediateFrame(); }
+  setHoverForTest(id: string | null): void { this.hoverId = id; this.requestImmediateFrame(); }
+  renderOnceForTest(now: number): void {
+    this.draw(now);
+    // draw() schedules a follow-up RAF; cancel it so the harness gets exactly one clean frame.
+    if (this.raf != null) { cancelAnimationFrame(this.raf); this.raf = null; }
+  }
+
   getHoveredNode(): BrainNode | null {
     const graph = this.getGraph?.();
     return this.hoverId && graph ? graph.idx[this.hoverId] ?? null : null;
