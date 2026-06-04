@@ -46,7 +46,8 @@ window.renderFrame = function renderFrame(cfg) {
     height = 360,
     now = 1000,
     enabledPasses = undefined,
-    signals = undefined
+    signals = undefined,
+    showLobeLabels = true
   } = cfg;
 
   if (renderer !== "canvas2d" && renderer !== "webgl2") {
@@ -80,7 +81,7 @@ window.renderFrame = function renderFrame(cfg) {
   const r = renderer === "webgl2" ? new BrainGLRenderer() : new BrainRenderer();
   r.start(canvas, () => graph, {
     idleAutoRotate: true,
-    showLobeLabels: true,
+    showLobeLabels,
     enabledLobes: allLobesEnabled(),
     performancePreset: "smooth",
     mobileMode: false

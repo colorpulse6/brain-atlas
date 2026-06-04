@@ -4,6 +4,8 @@ import test from "node:test";
 
 const rendererSource = readFileSync(new URL("../src/renderer.ts", import.meta.url), "utf8");
 const coreSource = readFileSync(new URL("../src/render-core.ts", import.meta.url), "utf8");
+// Label/compass logic was extracted to the shared overlay module (Task 12).
+const overlayLabelsSource = readFileSync(new URL("../src/overlay-labels.ts", import.meta.url), "utf8");
 
 test("wheel zoom allows deep inspection of dense node clusters", () => {
   assert.match(coreSource, /MAX_ZOOM\s*=\s*6/);
@@ -27,7 +29,10 @@ test("renderer keeps smooth as the default and supports opt-in idle frame caps",
 });
 
 test("renderer caps automatic labels to avoid dense label smears", () => {
-  assert.match(rendererSource, /automaticLabelIds/);
-  assert.match(rendererSource, /maxAutomaticLabels/);
-  assert.match(rendererSource, /focusNeighborLabelLimit/);
+  // automaticLabelIds / maxAutomaticLabels / focusNeighborLabelLimit were extracted
+  // to the shared overlay-labels module (Task 12). renderer.ts delegates to it;
+  // the logic lives in overlayLabelsSource.
+  assert.match(overlayLabelsSource, /automaticLabelIds/);
+  assert.match(overlayLabelsSource, /maxAutomaticLabels/);
+  assert.match(overlayLabelsSource, /focusNeighborLabelLimit/);
 });

@@ -750,3 +750,171 @@ test.describe("Canvas2D reactivity check", () => {
     assert.ok(mismatched > 50, `expected base vs highlight to differ, got ${mismatched} mismatched pixels`);
   });
 });
+
+test.describe("WebGL full scene (geometry + labels + compass) matches Canvas2D", () => {
+  let page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto(`file://${HARNESS_HTML}`);
+    await page.waitForFunction(() => typeof window.renderFrame === "function");
+  });
+
+  test.afterAll(async () => {
+    await page?.close();
+  });
+
+  // Three fixed signals for deterministic rendering.
+  const FIXED_SIGNALS = [
+    { aId: FIXTURE_NODE_IDS.projectHub, bId: FIXTURE_NODE_IDS.personHub, born: 0, dur: 2000 },
+    { aId: FIXTURE_NODE_IDS.conceptHub, bId: FIXTURE_NODE_IDS.sourceHub, born: 0, dur: 2000 },
+    { aId: FIXTURE_NODE_IDS.dailyHub, bId: FIXTURE_NODE_IDS.indexHub, born: 0, dur: 2000 }
+  ];
+
+  // Full scene: all passes including labels + compass. enabledPasses=null (or omit) → all passes.
+  // Both renderers use showLobeLabels:true (harness default).
+  //
+  // Cases:
+  //   1. Each palette at the default rotation (exercises label lobe color paths).
+  //   2. Rotated camera (exercises hemisphere split for geometry + compass orientation change).
+  //   3. Focus on a hub (shows neighbor labels via focusId branch in drawNodeLabels).
+  //   4. showLobeLabels:false — no labels in either renderer; confirms suppression.
+  //
+  // Tolerance rationale:
+  //   Full-scene budget = all-geometry budget (< 0.5%) + label/compass text.
+  //   Labels are crisp monospace text drawn identically on the SAME headless Chromium
+  //   Canvas2D context by both renderers (Canvas2D directly; WebGL via the overlay
+  //   Canvas2D). If font fallback occurs it does so identically → zero label diff.
+  //   The compass uses the same draw calls. A few extra scattered text AA pixels are
+  //   expected; a structured diff (labels offset, missing, wrong color, compass wrong)
+  //   is a BUG and must be fixed.
+  //   Budget: < 0.6% of pixels (~1036 px on 480×360) — 0.5% geometry + 0.1% text AA.
+
+  const FULL_SCENE_CASES = [
+    // Palette coverage with all-default rotation and showLobeLabels:true.
+    ...PALETTES.map((palette) => ({
+      label: `palette=${palette} full-scene`,
+      overrides: { palette, signals: FIXED_SIGNALS }
+    })),
+    // Rotated camera: changes compass orientation + hemisphere split.
+    {
+      label: "palette=graphite rot=(0.3,1.2) full-scene",
+      overrides: { palette: "graphite", rot: { x: 0.3, y: 1.2 }, signals: FIXED_SIGNALS }
+    },
+    // Focus on hub: exercises the focusId neighbor-label branch.
+    {
+      label: "palette=graphite focusId=projectHub full-scene",
+      overrides: {
+        palette: "graphite",
+        focusId: FIXTURE_NODE_IDS.projectHub,
+        signals: FIXED_SIGNALS
+      }
+    },
+    // showLobeLabels:false — labels + compass still enabled but showLobeLabels suppresses
+    // lobe+node labels; only compass is drawn. Both renderers respect the same flag.
+    {
+      label: "palette=graphite showLobeLabels=false full-scene",
+      overrides: {
+        palette: "graphite",
+        showLobeLabels: false,
+        signals: FIXED_SIGNALS
+      }
+    }
+  ];
+
+  for (const { label, overrides } of FULL_SCENE_CASES) {
+    test(label, async () => {
+      const base = {
+        rot: { x: -0.15, y: 0.55 },
+        zoom: 1,
+        dpr: 1,
+        now: 1000,
+        width: 480,
+        height: 360,
+        focusId: null,
+        hoverId: null,
+        highlightLobe: null,
+        // enabledPasses omitted → all passes (geometry + labels + compass).
+        ...overrides
+      };
+
+      const urlCanvas = await renderFrame(page, { ...base, renderer: "canvas2d" });
+      const urlGl = await renderFrame(page, { ...base, renderer: "webgl2" });
+
+      expect(urlCanvas).toBeTruthy();
+      expect(urlGl).toBeTruthy();
+
+      const imgA = decodePng(urlCanvas);
+      const imgB = decodePng(urlGl);
+      expect(imgA.width).toBe(imgB.width);
+      expect(imgA.height).toBe(imgB.height);
+
+      const { width, height } = imgA;
+      const mismatched = pixelmatch(imgA.data, imgB.data, null, width, height, { threshold: 0.1 });
+
+      // Budget: < 0.6% of pixels — 0.5% all-geometry (background+haze+cloud+edges+nodes+signals)
+      // + 0.1% for text AA (lobe labels, node labels, compass glyphs drawn via the SAME
+      // Canvas2D engine in both renderers, so should be near-zero but allow for compositing
+      // order differences). A STRUCTURED diff (labels offset, missing lobe labels, compass wrong
+      // orientation, labels on wrong renderer only) produces thousands of mismatched pixels and
+      // is NOT tolerated — fix the code, do NOT inflate this budget.
+      const budget = Math.ceil(width * height * 0.006);
+      expect(
+        mismatched,
+        `${label}: ${mismatched} mismatched pixels (budget ${budget})`
+      ).toBeLessThanOrEqual(budget);
+    });
+  }
+});
+
+test.describe("WebGL full scene showLobeLabels=false — labels absent on both renderers", () => {
+  let page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto(`file://${HARNESS_HTML}`);
+    await page.waitForFunction(() => typeof window.renderFrame === "function");
+  });
+
+  test.afterAll(async () => {
+    await page?.close();
+  });
+
+  test("showLobeLabels=false: WebGL output matches Canvas2D (no labels, compass present)", async () => {
+    const base = {
+      palette: "graphite",
+      rot: { x: -0.15, y: 0.55 },
+      zoom: 1,
+      dpr: 1,
+      now: 1000,
+      width: 480,
+      height: 360,
+      focusId: null,
+      hoverId: null,
+      highlightLobe: null,
+      showLobeLabels: false
+    };
+
+    const urlCanvas = await renderFrame(page, { ...base, renderer: "canvas2d" });
+    const urlGl = await renderFrame(page, { ...base, renderer: "webgl2" });
+
+    expect(urlCanvas).toBeTruthy();
+    expect(urlGl).toBeTruthy();
+
+    const imgA = decodePng(urlCanvas);
+    const imgB = decodePng(urlGl);
+    expect(imgA.width).toBe(imgB.width);
+    expect(imgA.height).toBe(imgB.height);
+
+    const { width, height } = imgA;
+    const mismatched = pixelmatch(imgA.data, imgB.data, null, width, height, { threshold: 0.1 });
+
+    // Same geometry budget as all-passes test but no label AA scatter expected.
+    // Compass (always drawn) may add a few scattered text-glyph AA pixels.
+    const budget = Math.ceil(width * height * 0.006);
+    expect(
+      mismatched,
+      `showLobeLabels=false: ${mismatched} mismatched pixels (budget ${budget})`
+    ).toBeLessThanOrEqual(budget);
+  });
+});

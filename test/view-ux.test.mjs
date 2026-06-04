@@ -7,6 +7,8 @@ const rendererSource = readFileSync(new URL("../src/renderer.ts", import.meta.ur
 const coreSource = readFileSync(new URL("../src/render-core.ts", import.meta.url), "utf8");
 const settingsTabSource = readFileSync(new URL("../src/settings-tab.ts", import.meta.url), "utf8");
 const stylesSource = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+// Label/compass logic was extracted to the shared overlay module (Task 12).
+const overlayLabelsSource = readFileSync(new URL("../src/overlay-labels.ts", import.meta.url), "utf8");
 
 test("the view explains how notes, links, and regions are derived", () => {
   assert.match(viewSource, /brain-atlas-info-panel/);
@@ -18,7 +20,9 @@ test("the view explains how notes, links, and regions are derived", () => {
 
 test("tooltip, focus card, and canvas labels use display-safe names", () => {
   assert.match(viewSource, /displayNodeName/);
-  assert.match(rendererSource, /displayNodeName/);
+  // displayNodeName was extracted from renderer.ts into the shared overlay-labels
+  // module (Task 12). renderer.ts delegates to it via sharedDrawNodeLabels.
+  assert.match(overlayLabelsSource, /displayNodeName/);
 });
 
 test("mobile layout has narrow-pane controls and overlays", () => {

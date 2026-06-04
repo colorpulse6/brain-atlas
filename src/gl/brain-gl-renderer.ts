@@ -29,6 +29,11 @@ import { lobeVisibilityMultiplier } from "../lobe-visibility.ts";
 import { buildBrainCloud } from "../cloud.ts";
 import { buildCloudBuffer, buildEdgeRibbons, buildNodeBuffer, INDICES_PER_EDGE, LOBE_INDEX } from "./buffers.ts";
 import type { EdgeRibbonBuffer, NodeBuffer } from "./buffers.ts";
+import {
+  drawLobeLabels as sharedDrawLobeLabels,
+  drawNodeLabels as sharedDrawNodeLabels,
+  drawCompass as sharedDrawCompass
+} from "../overlay-labels.ts";
 
 /**
  * Lobe names ordered by their GPU LOBE_INDEX (0-5). Used to build the 6-entry
@@ -355,11 +360,31 @@ export class BrainGLRenderer extends RenderCore {
     // ---- Pass: signals (additive particle trails) ----
     if (this.passEnabled("signals")) this.drawSignals(gl, proj, now);
 
-    // ---- Pass: labels (lobe + node labels, overlay 2D) ---- TODO later task
-    // if (this.passEnabled("labels")) { ... draw into this.overlayCtx ... }
+    // ---- Pass: labels (lobe + node labels, overlay 2D) ----
+    if (this.passEnabled("labels") && this.overlayCtx && this.options.showLobeLabels) {
+      const overlayCtx = this.overlayCtx;
+      // Build the scene projector as a (point)=>ProjectedPoint closure (same params
+      // as Canvas2D drawScene uses for lobe labels).
+      const lobeProject = (point: Vec3) => projectPoint(proj, point);
+      const lobeStats = this.getLobeStats();
+      const scalarLobeMul = (lobe?: LobeName) =>
+        lobeVisibilityMultiplier(lobe, this.options.enabledLobes, this.highlightLobe);
+      // Build nodeProjs from the projCache populated by draw() in RenderCore.
+      const nodeProjs = Object.values(this.projCache);
+      sharedDrawLobeLabels(overlayCtx, lobeProject, graph, lobeStats, scalarLobeMul, (lobe) => this.lobeColor(lobe, graph));
+      sharedDrawNodeLabels(overlayCtx, nodeProjs, graph, scalarLobeMul, {
+        hoverId: this.hoverId,
+        focusId: this.focusId,
+        zoom: this.zoom,
+        width: this.width,
+        mobile: this.effectivePerformancePreset() === "mobile"
+      });
+    }
 
-    // ---- Pass: compass (orientation gizmo, overlay 2D) ---- TODO later task
-    // if (this.passEnabled("compass")) { ... draw into this.overlayCtx ... }
+    // ---- Pass: compass (orientation gizmo, overlay 2D) ----
+    if (this.passEnabled("compass") && this.overlayCtx) {
+      sharedDrawCompass(this.overlayCtx, this.rot, graph, this.width, this.height);
+    }
   }
 
   /** Lazily create + return the background program (full-screen quad). */

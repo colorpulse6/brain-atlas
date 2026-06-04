@@ -1,10 +1,14 @@
 import { Brain3D, LOBE_CENTERS } from "./shape.ts";
 import { lobeVisibilityMultiplier } from "./lobe-visibility.ts";
-import { displayNodeName } from "./node-display.ts";
 import type { BrainGraph, BrainNode, LobeName, ProjectedPoint, Vec3 } from "./types.ts";
 import type { SurfacePoint } from "./shape.ts";
 import { buildBrainCloud } from "./cloud.ts";
 import { RenderCore, type ProjectedNode, type ProjectedEdge } from "./render-core.ts";
+import {
+  drawLobeLabels as sharedDrawLobeLabels,
+  drawNodeLabels as sharedDrawNodeLabels,
+  drawCompass as sharedDrawCompass
+} from "./overlay-labels.ts";
 
 export type { BrainRendererOptions } from "./render-core.ts";
 
@@ -360,59 +364,7 @@ export class BrainRenderer extends RenderCore {
     stats: Record<LobeName, number>,
     lobeMul: (lobe?: LobeName) => number
   ): void {
-    ctx.textBaseline = "middle";
-    for (const rawLobe in LOBE_CENTERS) {
-      const lobe = rawLobe as LobeName;
-      const center = LOBE_CENTERS[lobe];
-      const projected = project(center.c);
-      if (projected.z > 0.6) continue;
-      const color = this.lobeColor(lobe, graph);
-      const alpha = (1 - Math.max(0, projected.depth - 0.2)) * lobeMul(lobe);
-      if (alpha < 0.15) continue;
-      this.drawLobeLabel(ctx, projected, color, alpha, center.label, `${LOBE_DESCRIPTIONS[lobe].role} - ${stats[lobe] ?? 0} nodes`);
-      if (center.mirror) {
-        const mirror = project({ x: -center.c.x, y: center.c.y, z: center.c.z });
-        if (mirror.z < 0.6) this.drawLobeDot(ctx, mirror, color, alpha);
-      }
-    }
-  }
-
-  private drawLobeLabel(
-    ctx: CanvasRenderingContext2D,
-    projected: ProjectedPoint,
-    color: string,
-    alpha: number,
-    label: string,
-    subtitle: string
-  ): void {
-    this.drawLobeDot(ctx, projected, color, alpha);
-    const leadX = projected.sx + 22;
-    const leadY = projected.sy - 22;
-    ctx.strokeStyle = hexA(color, 0.8 * alpha);
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(projected.sx + 2.8, projected.sy - 2.8);
-    ctx.lineTo(leadX - 4, leadY + 6);
-    ctx.stroke();
-    ctx.font = "600 11px 'JetBrains Mono', monospace";
-    ctx.textAlign = "left";
-    ctx.fillStyle = hexA(color, alpha);
-    ctx.fillText(label, leadX, leadY);
-    ctx.font = "9px 'JetBrains Mono', monospace";
-    ctx.fillStyle = hexA(color, 0.62 * alpha);
-    ctx.fillText(subtitle, leadX, leadY + 12);
-  }
-
-  private drawLobeDot(ctx: CanvasRenderingContext2D, projected: ProjectedPoint, color: string, alpha: number): void {
-    ctx.strokeStyle = hexA(color, 0.8 * alpha);
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(projected.sx, projected.sy, 4, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.fillStyle = hexA(color, 0.4 * alpha);
-    ctx.beginPath();
-    ctx.arc(projected.sx, projected.sy, 4, 0, Math.PI * 2);
-    ctx.fill();
+    sharedDrawLobeLabels(ctx, project, graph, stats, lobeMul, (lobe) => this.lobeColor(lobe, graph));
   }
 
   private drawNodeLabels(
@@ -421,97 +373,21 @@ export class BrainRenderer extends RenderCore {
     graph: BrainGraph,
     lobeMul: (lobe?: LobeName) => number
   ): void {
-    ctx.font = "10px 'JetBrains Mono', monospace";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "top";
-    const labels = new Set(this.automaticLabelIds(graph, nodeProjs));
-    if (this.hoverId) labels.add(this.hoverId);
-    if (this.focusId) {
-      labels.add(this.focusId);
-      const focusNeighborLabelLimit = this.effectivePerformancePreset() === "mobile"
-        ? Math.max(3, Math.min(8, Math.round(4 * this.zoom)))
-        : Math.max(8, Math.min(30, Math.round(8 * this.zoom)));
-      for (const id of (graph.adj[this.focusId] ?? []).slice(0, focusNeighborLabelLimit)) labels.add(id);
-    }
-    for (const projected of nodeProjs) {
-      if (!labels.has(projected.node.id)) continue;
-      if (projected.z > 0.25 && !projected.node.hub) continue;
-      const radius = nodeRadius(projected.node) * Math.max(0.6, projected.scale);
-      const alpha = Math.max(0.2, 1 - projected.depth * 0.7) * lobeMul(projected.node._lobeName);
-      if (alpha < 0.1) continue;
-      const label = displayNodeName(projected.node);
-      const width = ctx.measureText(label).width;
-      ctx.fillStyle = `rgba(0,0,0,${0.5 * alpha})`;
-      ctx.fillRect(projected.sx - width / 2 - 4, projected.sy + radius + 4, width + 8, 13);
-      ctx.fillStyle = projected.node.id === this.focusId ? `rgba(255,255,255,${alpha})` : hexA(projected.node.color, 0.95 * alpha);
-      ctx.fillText(label, projected.sx, projected.sy + radius + 5);
-    }
-  }
-
-  private automaticLabelIds(graph: BrainGraph, nodeProjs: ProjectedNode[]): Set<string> {
-    const maxAutomaticLabels = this.maxAutomaticLabels(graph.nodes.length);
-    return new Set(
-      nodeProjs
-        .filter((projected) => projected.node.hub && projected.z <= 0.45)
-        .sort((a, b) => b.node.degree - a.node.degree || a.node.id.localeCompare(b.node.id))
-        .slice(0, maxAutomaticLabels)
-        .map((projected) => projected.node.id)
-    );
-  }
-
-  private maxAutomaticLabels(totalNodes: number): number {
-    if (this.effectivePerformancePreset() === "mobile") {
-      const viewportCap = Math.max(2, Math.floor(this.width / 120));
-      const densityCap = totalNodes > 500 ? 3 : 6;
-      return Math.min(viewportCap, densityCap);
-    }
-    const viewportCap = Math.max(6, Math.floor(this.width / 80));
-    const zoomCap = this.zoom >= 3 ? 34 : this.zoom >= 2 ? 24 : 14;
-    const densityCap = totalNodes > 1000 ? 10 : totalNodes > 500 ? 14 : zoomCap;
-    return Math.min(viewportCap, zoomCap, densityCap);
+    sharedDrawNodeLabels(ctx, nodeProjs, graph, lobeMul, {
+      hoverId: this.hoverId,
+      focusId: this.focusId,
+      zoom: this.zoom,
+      width: this.width,
+      mobile: this.effectivePerformancePreset() === "mobile"
+    });
   }
 
   private drawCompass(ctx: CanvasRenderingContext2D, graph: BrainGraph): void {
-    const cx = this.width - 50;
-    const cy = this.height - 50;
-    const radius = 22;
-    ctx.strokeStyle = hexA(graph.activePalette.hud, 0.25);
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.stroke();
-    const project = Brain3D.makeProjector({ rotX: this.rot.x, rotY: this.rot.y, scale: radius * 4.5, cx, cy, dist: 4 });
-    const axes = [
-      { name: "L", v: { x: 1, y: 0, z: 0 } },
-      { name: "S", v: { x: 0, y: 1, z: 0 } },
-      { name: "A", v: { x: 0, y: 0, z: 1 } }
-    ];
-    for (const axis of axes) {
-      const projected = project(axis.v);
-      const front = 1 - (projected.z + 1.5) / 3;
-      ctx.strokeStyle = hexA(graph.activePalette.hud, 0.30 + front * 0.55);
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(projected.sx, projected.sy);
-      ctx.stroke();
-      ctx.fillStyle = hexA(graph.activePalette.hud, 0.5 + front * 0.4);
-      ctx.font = "8px 'JetBrains Mono', monospace";
-      ctx.textAlign = "left";
-      ctx.textBaseline = "middle";
-      ctx.fillText(axis.name, projected.sx + 3, projected.sy);
-    }
+    sharedDrawCompass(ctx, this.rot, graph, this.width, this.height);
   }
 
 }
 
-const LOBE_DESCRIPTIONS: Record<LobeName, { sub: string; role: string }> = {
-  frontal: { sub: "Projects - Decisions - Questions", role: "EXECUTIVE" },
-  parietal: { sub: "Concepts - Tools - Threads", role: "INTEGRATION" },
-  temporal: { sub: "People - Organizations", role: "SOCIAL" },
-  occipital: { sub: "Sources - Repos", role: "PERCEPTION" },
-  cerebellum: { sub: "Daily notes - Incidents", role: "TEMPORAL MEMORY" },
-  stem: { sub: "Index - Routing", role: "ROUTING" }
-};
 
 function nodeRadius(node: BrainNode): number {
   if (node.hub) return 6.5;
