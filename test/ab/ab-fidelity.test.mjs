@@ -549,6 +549,186 @@ test.describe("WebGL nodes match Canvas2D", () => {
   }
 });
 
+test.describe("WebGL signals match Canvas2D", () => {
+  let page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto(`file://${HARNESS_HTML}`);
+    await page.waitForFunction(() => typeof window.renderFrame === "function");
+  });
+
+  test.afterAll(async () => {
+    await page?.close();
+  });
+
+  // Three fixed signals between known fixture nodes across different lobes.
+  // born=0, dur=2000, now=1000 → tNorm=0.5 → envelope=sin(π/2)=1 (max intensity).
+  // colA/colB use the default palette node colors (resolved from graph in harness).
+  const FIXED_SIGNALS = [
+    // frontal hub → temporal hub (inter-lobe)
+    { aId: FIXTURE_NODE_IDS.projectHub, bId: FIXTURE_NODE_IDS.personHub, born: 0, dur: 2000 },
+    // parietal hub → occipital hub
+    { aId: FIXTURE_NODE_IDS.conceptHub, bId: FIXTURE_NODE_IDS.sourceHub, born: 0, dur: 2000 },
+    // cerebellum hub → stem hub
+    { aId: FIXTURE_NODE_IDS.dailyHub, bId: FIXTURE_NODE_IDS.indexHub, born: 0, dur: 2000 }
+  ];
+
+  // Cases: each palette + one highlighted-lobe case.
+  const SIGNAL_CASES = [
+    ...PALETTES.map((palette) => ({ palette, overrides: {} })),
+    { palette: "graphite", overrides: { highlightLobe: "frontal" } }
+  ];
+
+  for (const { palette, overrides } of SIGNAL_CASES) {
+    const caseName = [
+      `palette=${palette}`,
+      Object.entries(overrides)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(",") || "base"
+    ].join(" ");
+
+    test(caseName, async () => {
+      const base = {
+        palette,
+        rot: { x: -0.15, y: 0.55 },
+        zoom: 1,
+        dpr: 1,
+        now: 1000,
+        width: 480,
+        height: 360,
+        focusId: null,
+        hoverId: null,
+        highlightLobe: null,
+        enabledPasses: ["background", "haze", "cloud", "edges", "nodes", "signals"],
+        signals: FIXED_SIGNALS,
+        ...overrides
+      };
+
+      const urlCanvas = await renderFrame(page, { ...base, renderer: "canvas2d" });
+      const urlGl = await renderFrame(page, { ...base, renderer: "webgl2" });
+
+      expect(urlCanvas).toBeTruthy();
+      expect(urlGl).toBeTruthy();
+
+      const imgA = decodePng(urlCanvas);
+      const imgB = decodePng(urlGl);
+      expect(imgA.width).toBe(imgB.width);
+      expect(imgA.height).toBe(imgB.height);
+
+      const { width, height } = imgA;
+      const mismatched = pixelmatch(imgA.data, imgB.data, null, width, height, { threshold: 0.1 });
+
+      // Signal sprites are soft additive radial halos + analytic filled circles.
+      // The halo is a radial falloff (1-t) which Canvas2D renders as a radial
+      // gradient (continuous) while WebGL computes it per-fragment analytically —
+      // both are identical in math, but GPU float rounding at sub-pixel edges
+      // produces ~1/255 scattered differences. Budget < 0.4% of pixels (~692 px)
+      // catches regional bugs (wrong Bézier, wrong color lerp, wrong additive sum,
+      // wrong position) which produce thousands of mismatched pixels.
+      const budget = Math.ceil(width * height * 0.004);
+      expect(
+        mismatched,
+        `${caseName}: ${mismatched} mismatched pixels (budget ${budget})`
+      ).toBeLessThanOrEqual(budget);
+    });
+  }
+});
+
+test.describe("WebGL full geometry matches Canvas2D", () => {
+  let page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto(`file://${HARNESS_HTML}`);
+    await page.waitForFunction(() => typeof window.renderFrame === "function");
+  });
+
+  test.afterAll(async () => {
+    await page?.close();
+  });
+
+  // Combined all-geometry comparison: background + haze + cloud + edges + nodes + signals.
+  // Labels and compass are excluded (Task 12 overlay). This is the milestone gate
+  // verifying all geometry passes composite correctly together.
+  const FIXED_SIGNALS = [
+    { aId: FIXTURE_NODE_IDS.projectHub, bId: FIXTURE_NODE_IDS.personHub, born: 0, dur: 2000 },
+    { aId: FIXTURE_NODE_IDS.conceptHub, bId: FIXTURE_NODE_IDS.sourceHub, born: 0, dur: 2000 },
+    { aId: FIXTURE_NODE_IDS.dailyHub, bId: FIXTURE_NODE_IDS.indexHub, born: 0, dur: 2000 }
+  ];
+
+  const ALL_PASSES = ["background", "haze", "cloud", "edges", "nodes", "signals"];
+
+  const COMBINED_CASES = [
+    // Each palette at the default rotation (lobe color coverage).
+    ...PALETTES.map((palette) => ({
+      label: `palette=${palette} base`,
+      overrides: { palette }
+    })),
+    // Rotated camera: exercises far/near hemisphere compositing for cloud, edges, nodes.
+    {
+      label: "palette=graphite rot=(0.3,1.2)",
+      overrides: { palette: "graphite", rot: { x: 0.3, y: 1.2 } }
+    },
+    // Focus on a hub: exercises focus edge + node radius bump.
+    {
+      label: "palette=graphite focusId=projectHub",
+      overrides: { palette: "graphite", focusId: FIXTURE_NODE_IDS.projectHub }
+    },
+    // Injected signals + highlighted lobe: exercises signal regionAlpha via lobeMul.
+    {
+      label: "palette=graphite highlightLobe=frontal signals",
+      overrides: { palette: "graphite", highlightLobe: "frontal" }
+    }
+  ];
+
+  for (const { label, overrides } of COMBINED_CASES) {
+    test(label, async () => {
+      const base = {
+        rot: { x: -0.15, y: 0.55 },
+        zoom: 1,
+        dpr: 1,
+        now: 1000,
+        width: 480,
+        height: 360,
+        focusId: null,
+        hoverId: null,
+        highlightLobe: null,
+        enabledPasses: ALL_PASSES,
+        signals: FIXED_SIGNALS,
+        ...overrides
+      };
+
+      const urlCanvas = await renderFrame(page, { ...base, renderer: "canvas2d" });
+      const urlGl = await renderFrame(page, { ...base, renderer: "webgl2" });
+
+      expect(urlCanvas).toBeTruthy();
+      expect(urlGl).toBeTruthy();
+
+      const imgA = decodePng(urlCanvas);
+      const imgB = decodePng(urlGl);
+      expect(imgA.width).toBe(imgB.width);
+      expect(imgA.height).toBe(imgB.height);
+
+      const { width, height } = imgA;
+      const mismatched = pixelmatch(imgA.data, imgB.data, null, width, height, { threshold: 0.1 });
+
+      // Combined all-geometry budget: the union of per-pass AA/rounding budgets.
+      // Background (0.2%) + haze (0.3%) + cloud (0.05%) + edges (0.25%) +
+      // nodes (0.15%) + signals (0.4%) — but passes partially cancel (shared
+      // area is not double-counted). A structural compositing bug (wrong blend
+      // mode, wrong draw order, additive vs source-over swap) produces thousands
+      // of mismatched pixels and is NOT tolerated — fix it, don't loosen this.
+      // Budget: < 0.5% of pixels (~864 px).
+      const budget = Math.ceil(width * height * 0.005);
+      expect(
+        mismatched,
+        `${label}: ${mismatched} mismatched pixels (budget ${budget})`
+      ).toBeLessThanOrEqual(budget);
+    });
+  }
+});
+
 test.describe("Canvas2D reactivity check", () => {
   let page;
 

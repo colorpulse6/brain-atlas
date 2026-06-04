@@ -18,12 +18,12 @@
  */
 
 import { RenderCore } from "../render-core.ts";
-import type { BrainGraph, LobeName } from "../types.ts";
+import type { BrainGraph, LobeName, Vec3 } from "../types.ts";
 import { sceneProjection, projectPoint } from "./projection.ts";
 import type { ProjectionOpts } from "./projection.ts";
 import { hexToRgb01 } from "./color.ts";
 import { createProgram, getUniformLocations, createStaticBuffer } from "./programs.ts";
-import { BACKGROUND_VS, BACKGROUND_FS, HAZE_VS, HAZE_FS, CLOUD_VS, CLOUD_FS, EDGE_VS, EDGE_FS, NODE_VS, NODE_FS } from "./shaders.ts";
+import { BACKGROUND_VS, BACKGROUND_FS, HAZE_VS, HAZE_FS, CLOUD_VS, CLOUD_FS, EDGE_VS, EDGE_FS, NODE_VS, NODE_FS, SIGNAL_VS, SIGNAL_FS } from "./shaders.ts";
 import { LOBE_CENTERS } from "../shape.ts";
 import { lobeVisibilityMultiplier } from "../lobe-visibility.ts";
 import { buildBrainCloud } from "../cloud.ts";
@@ -41,6 +41,47 @@ const LOBE_BY_INDEX: LobeName[] = (() => {
   }
   return arr;
 })();
+
+/**
+ * lerpHex: interpolate two CSS hex colors (#rrggbb or rgb(r,g,b)) in 0-255
+ * integer space with Math.round. Matches renderer.ts lerpHex exactly so
+ * CPU-computed signal colors are numerically identical to Canvas2D.
+ *
+ * Both colA and colB are always "#rrggbb" hex strings from node.color.
+ */
+function lerpHex(a: string, b: string, t: number): [number, number, number] {
+  const ha = a.replace("#", "");
+  const hb = b.replace("#", "");
+  const ar = parseInt(ha.slice(0, 2), 16);
+  const ag = parseInt(ha.slice(2, 4), 16);
+  const ab = parseInt(ha.slice(4, 6), 16);
+  const br = parseInt(hb.slice(0, 2), 16);
+  const bg = parseInt(hb.slice(2, 4), 16);
+  const bb = parseInt(hb.slice(4, 6), 16);
+  return [
+    Math.round(ar + (br - ar) * t) / 255,
+    Math.round(ag + (bg - ag) * t) / 255,
+    Math.round(ab + (bb - ab) * t) / 255
+  ];
+}
+
+interface SignalProgram {
+  program: WebGLProgram;
+  /** Dynamic VBO; re-uploaded each frame with the active sub-sprite data. */
+  vertexBuffer: WebGLBuffer;
+  vao: WebGLVertexArrayObject;
+  uniforms: Record<string, WebGLUniformLocation | null>;
+  /**
+   * Pre-allocated CPU scratch buffer for up to MAX_SIGNAL_SPRITES sprites.
+   * 9 floats per vertex × 6 verts per sprite = 54 floats per sprite.
+   */
+  scratch: Float32Array;
+  /** GPU buffer capacity in bytes (allocated once, re-used via bufferSubData). */
+  capacityBytes: number;
+}
+
+/** Maximum number of signals × sub-sprites the buffer is pre-allocated for. */
+const MAX_SIGNAL_SPRITES = 64; // 10 signals × 6 sub-sprites + generous headroom
 
 interface BackgroundProgram {
   program: WebGLProgram;
@@ -137,6 +178,7 @@ export class BrainGLRenderer extends RenderCore {
   private nodeProgram: NodeProgram | null = null;
   /** Identity of the graph the node buffers were built from (rebuild on change). */
   private nodeGraph: BrainGraph | null = null;
+  private signalProgram: SignalProgram | null = null;
 
   protected acquireSurface(canvas: HTMLCanvasElement): boolean {
     const gl = canvas.getContext("webgl2", {
@@ -239,6 +281,12 @@ export class BrainGLRenderer extends RenderCore {
     }
     this.nodeProgram = null;
     this.nodeGraph = null;
+    if (gl && this.signalProgram) {
+      gl.deleteVertexArray(this.signalProgram.vao);
+      gl.deleteBuffer(this.signalProgram.vertexBuffer);
+      gl.deleteProgram(this.signalProgram.program);
+    }
+    this.signalProgram = null;
     if (this.overlay && this.overlay.parentElement) {
       this.overlay.parentElement.removeChild(this.overlay);
     }
@@ -304,8 +352,8 @@ export class BrainGLRenderer extends RenderCore {
     if (this.passEnabled("edges")) this.drawEdges(gl, graph, proj, -1, lobeMul, focusIdx, hoverIdx);
     if (this.passEnabled("nodes")) this.drawNodes(gl, graph, proj, -1, lobeMul, focusIdx, hoverIdx);
 
-    // ---- Pass: signals (additive particle trails) ---- TODO Task 11
-    // if (this.passEnabled("signals")) { ... }
+    // ---- Pass: signals (additive particle trails) ----
+    if (this.passEnabled("signals")) this.drawSignals(gl, proj, now);
 
     // ---- Pass: labels (lobe + node labels, overlay 2D) ---- TODO later task
     // if (this.passEnabled("labels")) { ... draw into this.overlayCtx ... }
@@ -1161,4 +1209,192 @@ export class BrainGLRenderer extends RenderCore {
     gl.bindVertexArray(null);
     gl.disable(gl.BLEND);
   }
+
+  /**
+   * Lazily create + return the signal sprite program.
+   *
+   * The signal VBO is DYNAMIC: rebuilt each frame in drawSignals via bufferSubData.
+   * We pre-allocate a buffer sized for MAX_SIGNAL_SPRITES sprites to avoid
+   * reallocation. The CPU scratch Float32Array is kept on the program object.
+   *
+   * Vertex layout (9 floats per vertex):
+   *   aCenter(2), aCorner(2), aColor(3), aHaloAlpha(1), aCoreAlpha(1),
+   *   aHaloRadiusDev(1), aCoreRadiusDev(1)  → 11 floats per vertex.
+   * 6 verts per sprite (two triangles covering the bounding square).
+   */
+  private ensureSignalProgram(gl: WebGL2RenderingContext): SignalProgram {
+    if (this.signalProgram) return this.signalProgram;
+
+    const program = createProgram(gl, SIGNAL_VS, SIGNAL_FS);
+
+    const FLOATS_PER_VERT = 11;
+    const VERTS_PER_SPRITE = 6;
+    const capacityFloats = MAX_SIGNAL_SPRITES * VERTS_PER_SPRITE * FLOATS_PER_VERT;
+    const capacityBytes = capacityFloats * 4;
+
+    const vertexBuffer = gl.createBuffer();
+    if (!vertexBuffer) throw new Error("Brain Atlas: failed to create signal vertex buffer.");
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, capacityBytes, gl.DYNAMIC_DRAW);
+
+    const stride = FLOATS_PER_VERT * 4;
+    const loc = (name: string) => gl.getAttribLocation(program, name);
+    const vao = gl.createVertexArray();
+    if (!vao) throw new Error("Brain Atlas: failed to create signal VAO.");
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+
+    const fattr = (name: string, size: number, offsetFloats: number) => {
+      const l = loc(name);
+      if (l < 0) return;
+      gl.enableVertexAttribArray(l);
+      gl.vertexAttribPointer(l, size, gl.FLOAT, false, stride, offsetFloats * 4);
+    };
+    fattr("aCenter", 2, 0);
+    fattr("aCorner", 2, 2);
+    fattr("aColor", 3, 4);
+    fattr("aHaloAlpha", 1, 7);
+    fattr("aCoreAlpha", 1, 8);
+    fattr("aHaloRadiusDev", 1, 9);
+    fattr("aCoreRadiusDev", 1, 10);
+    gl.bindVertexArray(null);
+
+    const uniforms = getUniformLocations(gl, program, ["uResolution", "uDpr"]);
+
+    this.signalProgram = {
+      program,
+      vertexBuffer,
+      vao,
+      uniforms,
+      scratch: new Float32Array(capacityFloats),
+      capacityBytes
+    };
+    return this.signalProgram;
+  }
+
+  /**
+   * Draw the signal particle trail pass.
+   *
+   * Each signal has 6 sub-sprites; all geometry + alpha is computed on the CPU
+   * (signals are few: single-digit count × 6 = a handful of quads). Values are
+   * packed into a dynamic VBO (bufferSubData), then drawn as TRIANGLES (two tris
+   * per quad = 6 verts per sprite).
+   *
+   * Blend: additive (ONE, ONE) — matches Canvas2D "lighter".
+   *
+   * Reproduces drawSignals() in renderer.ts EXACTLY. Key formula mirror:
+   *   ctrl  = (a._3dLobe + b._3dLobe) * 0.35
+   *   t     = max(0, tNorm - index*0.035)
+   *   point = quadratic Bézier(a._3dLobe, ctrl, b._3dLobe, t)
+   *   color = lerpHex(colA, colB, t) — Math.round in 0-255 space (same helper)
+   *   fade  = (1 - index/6) * envelope
+   *   depth = max(0.3, 1 - pr.depth * 0.6)
+   *   radius = (1.3 - index*0.15) * max(0.5, pr.scale)  (CSS px)
+   *   haloAlpha = 0.22 * fade * depth * regionAlpha
+   *   coreAlpha = 0.55 * fade * depth * regionAlpha
+   */
+  private drawSignals(
+    gl: WebGL2RenderingContext,
+    proj: ProjectionOpts,
+    now: number
+  ): void {
+    if (this.signals.length === 0) return;
+
+    const sp = this.ensureSignalProgram(gl);
+    const scratch = sp.scratch;
+    const FLOATS_PER_VERT = 11;
+    const VERTS_PER_SPRITE = 6;
+
+    // Corner offsets (two triangles, matching the standard quad winding).
+    const corners: [number, number][] = [
+      [-1, -1], [1, -1], [-1, 1],
+      [-1, 1],  [1, -1], [1, 1]
+    ];
+
+    let spriteCount = 0;
+    let o = 0; // float offset into scratch
+
+    for (const signal of this.signals) {
+      if (!signal.a._3dLobe || !signal.b._3dLobe) continue;
+
+      const tNorm = (now - signal.born) / signal.dur;
+      if (tNorm < 0 || tNorm > 1) continue;
+
+      const envelope = Math.sin(tNorm * Math.PI);
+      const regionAlpha = Math.max(
+        lobeVisibilityMultiplier(signal.a._lobeName, this.options.enabledLobes, this.highlightLobe),
+        lobeVisibilityMultiplier(signal.b._lobeName, this.options.enabledLobes, this.highlightLobe)
+      );
+
+      const aLobe = signal.a._3dLobe as Vec3;
+      const bLobe = signal.b._3dLobe as Vec3;
+      const ctrl: Vec3 = {
+        x: (aLobe.x + bLobe.x) * 0.35,
+        y: (aLobe.y + bLobe.y) * 0.35,
+        z: (aLobe.z + bLobe.z) * 0.35
+      };
+
+      for (let index = 0; index < 6; index += 1) {
+        if (spriteCount >= MAX_SIGNAL_SPRITES) break;
+
+        const t = Math.max(0, tNorm - index * 0.035);
+        const mt = 1 - t;
+        const point: Vec3 = {
+          x: mt * mt * aLobe.x + 2 * mt * t * ctrl.x + t * t * bLobe.x,
+          y: mt * mt * aLobe.y + 2 * mt * t * ctrl.y + t * t * bLobe.y,
+          z: mt * mt * aLobe.z + 2 * mt * t * ctrl.z + t * t * bLobe.z
+        };
+        const pr = projectPoint(proj, point);
+
+        const [cr, cg, cb] = lerpHex(signal.colA, signal.colB, t);
+        const fade = (1 - index / 6) * envelope;
+        const depth = Math.max(0.3, 1 - pr.depth * 0.6);
+        const radius = (1.3 - index * 0.15) * Math.max(0.5, pr.scale);
+
+        const haloAlpha = 0.22 * fade * depth * regionAlpha;
+        const coreAlpha = 0.55 * fade * depth * regionAlpha;
+        const haloRadiusDev = radius * 3.2 * this.dpr;
+        const coreRadiusDev = Math.max(0.6, radius) * this.dpr;
+
+        // Emit 6 vertices for this sprite quad.
+        for (let c = 0; c < VERTS_PER_SPRITE; c++) {
+          scratch[o++] = pr.sx;           // aCenter.x (CSS px)
+          scratch[o++] = pr.sy;           // aCenter.y (CSS px)
+          scratch[o++] = corners[c][0];   // aCorner.x
+          scratch[o++] = corners[c][1];   // aCorner.y
+          scratch[o++] = cr;              // aColor.r
+          scratch[o++] = cg;              // aColor.g
+          scratch[o++] = cb;              // aColor.b
+          scratch[o++] = haloAlpha;       // aHaloAlpha
+          scratch[o++] = coreAlpha;       // aCoreAlpha
+          scratch[o++] = haloRadiusDev;   // aHaloRadiusDev
+          scratch[o++] = coreRadiusDev;   // aCoreRadiusDev
+        }
+        spriteCount += 1;
+      }
+    }
+
+    if (spriteCount === 0) return;
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+
+    gl.useProgram(sp.program);
+    gl.bindVertexArray(sp.vao);
+
+    // Upload the packed sprite data (just the filled portion).
+    gl.bindBuffer(gl.ARRAY_BUFFER, sp.vertexBuffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, scratch, 0, spriteCount * VERTS_PER_SPRITE * FLOATS_PER_VERT);
+
+    const wDpr = Math.floor(this.width * this.dpr);
+    const hDpr = Math.floor(this.height * this.dpr);
+    gl.uniform2f(sp.uniforms.uResolution, wDpr, hDpr);
+    gl.uniform1f(sp.uniforms.uDpr, this.dpr);
+
+    gl.drawArrays(gl.TRIANGLES, 0, spriteCount * VERTS_PER_SPRITE);
+
+    gl.bindVertexArray(null);
+    gl.disable(gl.BLEND);
+  }
+
 }

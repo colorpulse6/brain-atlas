@@ -17,12 +17,16 @@
  *   height:   number   (CSS pixels)
  *   now:      number   (timestamp passed to renderOnceForTest)
  *   enabledPasses: string[] | undefined  (subset of passes to draw; undefined = all)
+ *   signals:  Array<{aId, bId, born, dur, colA, colB}> | undefined
+ *             Signal descriptors. aId/bId are node IDs in the fixture graph.
+ *             Injected via setSignalsForTest so the signal pass is deterministic.
  */
 
 import { BrainRenderer } from "../../src/renderer.ts";
 import { BrainGLRenderer } from "../../src/gl/brain-gl-renderer.ts";
 import { allLobesEnabled } from "../../src/lobe-visibility.ts";
 import { buildFixtureGraph } from "./fixture-graph.mjs";
+import { assignLobePositions } from "../../src/shape.ts";
 
 /**
  * @param {object} cfg
@@ -41,7 +45,8 @@ window.renderFrame = function renderFrame(cfg) {
     width = 480,
     height = 360,
     now = 1000,
-    enabledPasses = undefined
+    enabledPasses = undefined,
+    signals = undefined
   } = cfg;
 
   if (renderer !== "canvas2d" && renderer !== "webgl2") {
@@ -91,6 +96,34 @@ window.renderFrame = function renderFrame(cfg) {
   if (highlightLobe) r.setHighlightLobe(highlightLobe);
   if (focusId) r.setFocusForTest(focusId);
   if (hoverId) r.setHoverForTest(hoverId);
+
+  // Inject fixed signals if supplied. We resolve aId/bId to BrainNode objects
+  // from the fixture graph (which has lobe positions assigned by start()).
+  // Both renderers receive the SAME injected signal list so the signal pass is
+  // deterministic and A/B-comparable at the fixed `now` timestamp.
+  if (signals && signals.length > 0) {
+    // Ensure lobe positions are assigned (start() → resize() → draw() assigns them;
+    // but we need them before renderOnceForTest so the signal particles have _3dLobe).
+    // start() calls resize() which triggers draw(), so by the time we reach here
+    // positions may not be set yet (first frame hasn't run). Force assignment.
+    assignLobePositions(graph.nodes);
+    const particleList = signals.map((s, i) => {
+      const a = graph.idx[s.aId];
+      const b = graph.idx[s.bId];
+      if (!a) throw new Error(`harness: signal aId not found: ${s.aId}`);
+      if (!b) throw new Error(`harness: signal bId not found: ${s.bId}`);
+      return {
+        id: i,
+        a,
+        b,
+        born: s.born,
+        dur: s.dur,
+        colA: s.colA ?? a.color,
+        colB: s.colB ?? b.color
+      };
+    });
+    r.setSignalsForTest(particleList);
+  }
 
   // Render exactly one frame synchronously at the injected timestamp.
   r.renderOnceForTest(now);

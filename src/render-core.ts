@@ -261,6 +261,8 @@ export abstract class RenderCore {
   // ---- Test-only seams (used by A/B pixel-diff harness) ----
   setFocusForTest(id: string | null): void { this.focusId = id; this.requestImmediateFrame(); }
   setHoverForTest(id: string | null): void { this.hoverId = id; this.requestImmediateFrame(); }
+  /** Test-only: inject a fixed signal list so the signals pass is deterministic and comparable. */
+  setSignalsForTest(signals: SignalParticle[]): void { this.signals = signals; this.requestImmediateFrame(); }
   renderOnceForTest(now: number): void {
     this.draw(now);
     // draw() schedules a follow-up RAF; cancel it so the harness gets exactly one clean frame.

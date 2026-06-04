@@ -482,6 +482,121 @@ void main() {
 `;
 
 // ============================================================
+// SIGNAL PASS (Task 11)
+// ============================================================
+//
+// Signal particles travel along quadratic Bézier curves between two brain
+// nodes, rendered as a trail of 6 sub-sprites (index 0..5) per signal.
+// All per-signal and per-sub-sprite values are computed on the CPU each frame
+// (signals are few — single-digit count × 6 = a handful of quads) and packed
+// into a DYNAMIC vertex buffer (rebuilt each frame via bufferSubData).
+//
+// Per sub-sprite the CPU computes:
+//   t       = max(0, tNorm - index * 0.035)
+//   (sx,sy) = project(bezier(a._3dLobe, ctrl, b._3dLobe, t))  (CSS px)
+//   color   = lerpHex(colA, colB, t)  (0-255 ints, Math.round, same as renderer.ts)
+//   fade    = (1 - index/6) * envelope      (envelope = sin(tNorm * PI))
+//   depth   = max(0.3, 1 - pr.depth * 0.6)
+//   radius  = (1.3 - index*0.15) * max(0.5, pr.scale)  (CSS px)
+//   haloAlpha = 0.22 * fade * depth * regionAlpha
+//   coreAlpha = 0.55 * fade * depth * regionAlpha
+//   haloRadius = radius * 3.2 (CSS px)
+//   coreRadius = max(0.6, radius) (CSS px)
+//
+// Both HALO (radial falloff) and CORE (filled circle) are ADDITIVE in Canvas2D
+// ("lighter" composite). Summing their premultiplied contributions before the
+// additive blend is exact: output = vec4(rgb*(halo+core), halo+core).
+//
+// Vertex layout (9 floats per vertex): center (sx,sy), corner (2), rgb (3),
+// haloAlpha (1), coreAlpha (1), haloRadiusDev (1), coreRadiusDev (1) — actually
+// we pass radiusDev (halo) and coreRadiusDev separately.
+//
+// The VS places each quad corner; the FS computes radial halo coverage + analytic
+// circle core coverage and emits premultiplied additive output.
+
+/** Signal sprite vertex shader. Center + corner → clip space; passes varyings to FS. */
+export const SIGNAL_VS = `#version 300 es
+precision highp float;
+
+// Per-vertex attributes (packed from CPU per-frame into a dynamic buffer).
+in vec2 aCenter;        // sprite center in CSS px (sx, sy)
+in vec2 aCorner;        // quad corner offset [-1,1]^2
+in vec3 aColor;         // RGB [0,1]
+in float aHaloAlpha;    // halo alpha factor (0.22 * fade * depth * regionAlpha)
+in float aCoreAlpha;    // core alpha factor (0.55 * fade * depth * regionAlpha)
+in float aHaloRadiusDev;// halo radius in device px (radius * 3.2 * dpr)
+in float aCoreRadiusDev;// core radius in device px (max(0.6, radius) * dpr)
+
+uniform vec2 uResolution; // device-px framebuffer size (w, h)
+uniform float uDpr;       // device pixel ratio
+
+out vec2 vCornerDev;    // corner offset from sprite center in device px
+out vec3 vColor;
+out float vHaloAlpha;
+out float vCoreAlpha;
+out float vHaloRadiusDev;
+out float vCoreRadiusDev;
+
+void main() {
+  // Bounding half-extent: the larger of halo or core.
+  float halfExtentDev = max(aHaloRadiusDev, aCoreRadiusDev);
+
+  // Corner offset in device px.
+  vCornerDev = aCorner * halfExtentDev;
+  vColor = aColor;
+  vHaloAlpha = aHaloAlpha;
+  vCoreAlpha = aCoreAlpha;
+  vHaloRadiusDev = aHaloRadiusDev;
+  vCoreRadiusDev = aCoreRadiusDev;
+
+  // Convert CSS px center + corner to clip space.
+  // Corner offset added in CSS px (before dpr multiply).
+  float halfExtentCss = halfExtentDev / uDpr;
+  vec2 cssPx = aCenter + aCorner * halfExtentCss;
+  vec2 devPx = cssPx * uDpr;
+  vec2 ndc = (devPx / uResolution) * 2.0 - 1.0;
+  ndc.y = -ndc.y; // CSS top-left → GL bottom-left
+  gl_Position = vec4(ndc, 0.0, 1.0);
+}
+`;
+
+/** Signal sprite fragment shader. Halo radial + core filled circle, premultiplied additive. */
+export const SIGNAL_FS = `#version 300 es
+precision highp float;
+
+in vec2 vCornerDev;
+in vec3 vColor;
+in float vHaloAlpha;
+in float vCoreAlpha;
+in float vHaloRadiusDev;
+in float vCoreRadiusDev;
+
+out vec4 outColor;
+
+void main() {
+  float dist = length(vCornerDev);
+
+  // HALO: radial falloff 1 → 0 from center to haloRadius.
+  // Canvas2D stop 0 → haloAlpha, stop 1 → 0; linear in between.
+  float haloContrib = 0.0;
+  if (vHaloRadiusDev > 0.0) {
+    float t = clamp(dist / vHaloRadiusDev, 0.0, 1.0);
+    haloContrib = vHaloAlpha * (1.0 - t);
+  }
+
+  // CORE: analytic filled circle (max(0.6, radius) CSS px → device px).
+  float coreCov = clamp(vCoreRadiusDev - dist + 0.5, 0.0, 1.0);
+  float coreContrib = vCoreAlpha * coreCov;
+
+  // Both are additive; sum contributions before the additive blend.
+  float totalAlpha = haloContrib + coreContrib;
+
+  // Premultiplied additive output (blendFunc(ONE, ONE)).
+  outColor = vec4(vColor * totalAlpha, totalAlpha);
+}
+`;
+
+// ============================================================
 // NODE PASS (Task 10)
 // ============================================================
 //
