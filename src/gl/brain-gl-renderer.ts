@@ -23,11 +23,12 @@ import { sceneProjection, projectPoint } from "./projection.ts";
 import type { ProjectionOpts } from "./projection.ts";
 import { hexToRgb01 } from "./color.ts";
 import { createProgram, getUniformLocations, createStaticBuffer } from "./programs.ts";
-import { BACKGROUND_VS, BACKGROUND_FS, HAZE_VS, HAZE_FS, CLOUD_VS, CLOUD_FS } from "./shaders.ts";
+import { BACKGROUND_VS, BACKGROUND_FS, HAZE_VS, HAZE_FS, CLOUD_VS, CLOUD_FS, EDGE_VS, EDGE_FS } from "./shaders.ts";
 import { LOBE_CENTERS } from "../shape.ts";
 import { lobeVisibilityMultiplier } from "../lobe-visibility.ts";
 import { buildBrainCloud } from "../cloud.ts";
-import { buildCloudBuffer, LOBE_INDEX } from "./buffers.ts";
+import { buildCloudBuffer, buildEdgeRibbons, INDICES_PER_EDGE, LOBE_INDEX } from "./buffers.ts";
+import type { EdgeRibbonBuffer } from "./buffers.ts";
 
 /**
  * Lobe names ordered by their GPU LOBE_INDEX (0-5). Used to build the 6-entry
@@ -64,6 +65,32 @@ interface CloudProgram {
   vertexCount: number;
 }
 
+interface EdgeProgram {
+  program: WebGLProgram;
+  /** One interleaved static VBO holding all per-vertex attributes. */
+  vertexBuffer: WebGLBuffer;
+  /** Dynamic element buffer; re-uploaded each frame with the sorted index order. */
+  indexBuffer: WebGLBuffer;
+  vao: WebGLVertexArrayObject;
+  uniforms: Record<string, WebGLUniformLocation | null>;
+  /** The built ribbon buffer (positions, ranges, static index template). */
+  buf: EdgeRibbonBuffer;
+  /**
+   * Per-edge cached centerline points (13 model-space points per edge, flattened
+   * as [x0,y0,z0, x1,y1,z1, ...]) for fast per-frame mean-z without re-reading the
+   * interleaved VBO. Length = edgeCount * 13 * 3.
+   */
+  centerline: Float32Array;
+  /** Dense edge count (number of valid edges). */
+  edgeCount: number;
+  /** Per-frame scratch: mean projected z per dense edge index. */
+  meanZ: Float32Array;
+  /** Per-frame scratch: dense edge indices being sorted for one hemisphere. */
+  sortScratch: Int32Array;
+  /** Per-frame scratch: the sorted GLOBAL element indices uploaded each draw. */
+  indexScratch: Uint32Array;
+}
+
 export class BrainGLRenderer extends RenderCore {
   private gl: WebGL2RenderingContext | null = null;
   private overlay: HTMLCanvasElement | null = null;
@@ -73,6 +100,9 @@ export class BrainGLRenderer extends RenderCore {
   private bgProgram: BackgroundProgram | null = null;
   private hazeProgram: HazeProgram | null = null;
   private cloudProgram: CloudProgram | null = null;
+  private edgeProgram: EdgeProgram | null = null;
+  /** Identity of the graph the edge buffers were built from (rebuild on change). */
+  private edgeGraph: BrainGraph | null = null;
 
   protected acquireSurface(canvas: HTMLCanvasElement): boolean {
     const gl = canvas.getContext("webgl2", {
@@ -159,6 +189,14 @@ export class BrainGLRenderer extends RenderCore {
       gl.deleteProgram(this.cloudProgram.program);
     }
     this.cloudProgram = null;
+    if (gl && this.edgeProgram) {
+      gl.deleteVertexArray(this.edgeProgram.vao);
+      gl.deleteBuffer(this.edgeProgram.vertexBuffer);
+      gl.deleteBuffer(this.edgeProgram.indexBuffer);
+      gl.deleteProgram(this.edgeProgram.program);
+    }
+    this.edgeProgram = null;
+    this.edgeGraph = null;
     if (this.overlay && this.overlay.parentElement) {
       this.overlay.parentElement.removeChild(this.overlay);
     }
@@ -208,14 +246,20 @@ export class BrainGLRenderer extends RenderCore {
     // Back-to-front, hemisphere-interleaved draw order (matches Canvas2D drawScene
     // and leaves clean slots for the edges/nodes passes — Tasks 9-10).
     //
+    // Per-frame focus/hover NODE indices (in node-buffer index space — the same
+    // index space the edge buffer's nodeIdxA/B reference). -1 = none. Computed once
+    // and passed to both edge hemispheres so drawEdge's isFocus/isHover are in-shader.
+    const focusIdx = this.nodeBufferIndexOf(graph, this.focusId);
+    const hoverIdx = this.nodeBufferIndexOf(graph, this.hoverId);
+
     // FAR hemisphere (projected z > 0), back of the scene:
     if (this.passEnabled("cloud")) this.drawCloud(gl, proj, now, +1, lobeMul, lobeColors);
-    // if (this.passEnabled("edges")) { /* TODO Task 9: edges far (z > 0) */ }
+    if (this.passEnabled("edges")) this.drawEdges(gl, graph, proj, +1, lobeMul, focusIdx, hoverIdx);
     // if (this.passEnabled("nodes")) { /* TODO Task 10: nodes far (z > 0) */ }
 
     // NEAR hemisphere (projected z <= 0), front of the scene:
     if (this.passEnabled("cloud")) this.drawCloud(gl, proj, now, -1, lobeMul, lobeColors);
-    // if (this.passEnabled("edges")) { /* TODO Task 9: edges near (z <= 0) */ }
+    if (this.passEnabled("edges")) this.drawEdges(gl, graph, proj, -1, lobeMul, focusIdx, hoverIdx);
     // if (this.passEnabled("nodes")) { /* TODO Task 10: nodes near (z <= 0) */ }
 
     // ---- Pass: signals (additive particle trails) ---- TODO Task 11
@@ -542,6 +586,275 @@ export class BrainGLRenderer extends RenderCore {
     gl.uniform3fv(cp.uniforms["uLobeColors[0]"], lobeColors);
 
     gl.drawArrays(gl.TRIANGLES, 0, cp.vertexCount);
+
+    gl.bindVertexArray(null);
+    gl.disable(gl.BLEND);
+  }
+
+  /**
+   * Node-buffer index of `id` (the index space the edge buffer's nodeIdxA/B use:
+   * position among graph.nodes that have _3dLobe, 0-based). Returns -1 if absent.
+   * Matches the nodeBufferIdx map built in buildEdgeRibbons / buildNodeBuffer.
+   */
+  private nodeBufferIndexOf(graph: BrainGraph, id: string | null): number {
+    if (!id) return -1;
+    let idx = 0;
+    for (const node of graph.nodes) {
+      if (!node._3dLobe) continue;
+      if (node.id === id) return idx;
+      idx += 1;
+    }
+    return -1;
+  }
+
+  /**
+   * Lazily build the edge ribbon program + static VBO + the dynamic element buffer.
+   * Rebuilds (rebuilding the geometry) when the graph identity changes.
+   *
+   * The interleaved static VBO holds every per-vertex attribute (positions,
+   * tangentRef, segStartRef, side, colors, sameLobe, colorSelector, lobe/node
+   * indices). The element buffer is DYNAMIC: drawEdges re-uploads a sorted slice
+   * of global indices each frame so a single indexed draw renders one hemisphere
+   * back-to-front.
+   */
+  private ensureEdgeProgram(gl: WebGL2RenderingContext, graph: BrainGraph): EdgeProgram {
+    if (this.edgeProgram && this.edgeGraph === graph) return this.edgeProgram;
+
+    // Graph changed (or first build): tear down any prior program/buffers.
+    if (this.edgeProgram) {
+      gl.deleteVertexArray(this.edgeProgram.vao);
+      gl.deleteBuffer(this.edgeProgram.vertexBuffer);
+      gl.deleteBuffer(this.edgeProgram.indexBuffer);
+      gl.deleteProgram(this.edgeProgram.program);
+      this.edgeProgram = null;
+    }
+
+    const program = createProgram(gl, EDGE_VS, EDGE_FS);
+    const buf = buildEdgeRibbons(graph);
+    const edgeCount = buf.edgeRanges.length;
+    const vCount = buf.vertexCount;
+
+    // Interleaved layout (floats per vertex):
+    //   pos(3) tangentRef(3) segStartRef(3) side(1)
+    //   colorA(3) colorB(3) focusColor(3) sameLobe(1)
+    //   colorSelector(1) lobeIdxA(1) lobeIdxB(1) nodeIdxA(1) nodeIdxB(1)
+    // = 25 floats.
+    const F = 25;
+    const data = new Float32Array(vCount * F);
+    for (let v = 0; v < vCount; v++) {
+      let o = v * F;
+      data[o++] = buf.positions[v * 3 + 0];
+      data[o++] = buf.positions[v * 3 + 1];
+      data[o++] = buf.positions[v * 3 + 2];
+      data[o++] = buf.tangentRef[v * 3 + 0];
+      data[o++] = buf.tangentRef[v * 3 + 1];
+      data[o++] = buf.tangentRef[v * 3 + 2];
+      data[o++] = buf.segStartRef[v * 3 + 0];
+      data[o++] = buf.segStartRef[v * 3 + 1];
+      data[o++] = buf.segStartRef[v * 3 + 2];
+      data[o++] = buf.sides[v];
+      data[o++] = buf.colorA[v * 3 + 0];
+      data[o++] = buf.colorA[v * 3 + 1];
+      data[o++] = buf.colorA[v * 3 + 2];
+      data[o++] = buf.colorB[v * 3 + 0];
+      data[o++] = buf.colorB[v * 3 + 1];
+      data[o++] = buf.colorB[v * 3 + 2];
+      data[o++] = buf.focusColor[v * 3 + 0];
+      data[o++] = buf.focusColor[v * 3 + 1];
+      data[o++] = buf.focusColor[v * 3 + 2];
+      data[o++] = buf.sameLobe[v];
+      data[o++] = buf.colorSelector[v];
+      data[o++] = buf.lobeIdxA[v];
+      data[o++] = buf.lobeIdxB[v];
+      data[o++] = buf.nodeIdxA[v];
+      data[o++] = buf.nodeIdxB[v];
+    }
+    const vertexBuffer = createStaticBuffer(gl, data);
+
+    // Cache per-edge centerline points (13 per edge, side=-1 vertices) for mean-z.
+    const centerline = new Float32Array(edgeCount * 13 * 3);
+    for (let e = 0; e < edgeCount; e++) {
+      const start = buf.edgeRanges[e].start;
+      for (let j = 0; j < 13; j++) {
+        const v = start + j * 2; // side=-1 vertex of tIdx j
+        const c = (e * 13 + j) * 3;
+        centerline[c + 0] = buf.positions[v * 3 + 0];
+        centerline[c + 1] = buf.positions[v * 3 + 1];
+        centerline[c + 2] = buf.positions[v * 3 + 2];
+      }
+    }
+
+    // Dynamic element buffer sized to hold ALL edges' indices (worst case one
+    // hemisphere = all edges). Re-uploaded (bufferSubData) each frame.
+    const indexBuffer = gl.createBuffer();
+    if (!indexBuffer) throw new Error("Brain Atlas: failed to create edge index buffer.");
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, buf.indices.byteLength, gl.DYNAMIC_DRAW);
+
+    // VAO: bind the interleaved VBO + the element buffer + wire attributes.
+    const stride = F * 4;
+    const loc = (name: string) => gl.getAttribLocation(program, name);
+    const vao = gl.createVertexArray();
+    if (!vao) throw new Error("Brain Atlas: failed to create edge VAO.");
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+    const fattr = (name: string, size: number, offsetFloats: number) => {
+      const l = loc(name);
+      if (l < 0) return;
+      gl.enableVertexAttribArray(l);
+      gl.vertexAttribPointer(l, size, gl.FLOAT, false, stride, offsetFloats * 4);
+    };
+    fattr("aPosition", 3, 0);
+    fattr("aTangentRef", 3, 3);
+    fattr("aSegStartRef", 3, 6);
+    fattr("aSide", 1, 9);
+    fattr("aColorA", 3, 10);
+    fattr("aColorB", 3, 13);
+    fattr("aFocusColor", 3, 16);
+    fattr("aSameLobe", 1, 19);
+    fattr("aColorSelector", 1, 20);
+    fattr("aLobeIdxA", 1, 21);
+    fattr("aLobeIdxB", 1, 22);
+    fattr("aNodeIdxA", 1, 23);
+    fattr("aNodeIdxB", 1, 24);
+    // Bind the element buffer INSIDE the VAO so it is captured by the VAO state.
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+    gl.bindVertexArray(null);
+
+    const uniforms = getUniformLocations(gl, program, [
+      "uResolution",
+      "uDpr",
+      "uRotX",
+      "uRotY",
+      "uSceneScale",
+      "uCx",
+      "uCy",
+      "uDist",
+      "uIsFar",
+      "uFocusNodeIndex",
+      "uHoverNodeIndex",
+      "uLobeMul[0]"
+    ]);
+
+    this.edgeProgram = {
+      program,
+      vertexBuffer,
+      indexBuffer,
+      vao,
+      uniforms,
+      buf,
+      centerline,
+      edgeCount,
+      meanZ: new Float32Array(edgeCount),
+      sortScratch: new Int32Array(edgeCount),
+      indexScratch: new Uint32Array(buf.indices.length)
+    };
+    this.edgeGraph = graph;
+    return this.edgeProgram;
+  }
+
+  /**
+   * Draw the edge ribbon pass for one hemisphere.
+   *
+   * hemisphere = +1 draws far edges (mean projected z > 0); -1 draws near edges
+   * (mean z <= 0). Each frame the CPU computes each edge's mean z (project the 13
+   * sample points' z-component only — pure arithmetic, no allocation), partitions
+   * far/near, stably sorts each group by mean z DESCENDING (tiebreak = dense edge
+   * index, matching Canvas2D's stable sort over edges in graph order), then uploads
+   * the sorted global element indices and issues ONE indexed draw.
+   *
+   * Blend: source-over premultiplied (ONE, ONE_MINUS_SRC_ALPHA). Edges are
+   * translucent, so the (sorted) draw order is reproduced exactly.
+   */
+  private drawEdges(
+    gl: WebGL2RenderingContext,
+    graph: BrainGraph,
+    proj: ProjectionOpts,
+    hemisphere: 1 | -1,
+    lobeMul: Float32Array,
+    focusIdx: number,
+    hoverIdx: number
+  ): void {
+    const ep = this.ensureEdgeProgram(gl, graph);
+    if (ep.edgeCount === 0) return;
+
+    // ---- CPU mean-z (z-only projection; no per-point allocation) ----
+    const cosY = Math.cos(proj.rotY);
+    const sinY = Math.sin(proj.rotY);
+    const cosX = Math.cos(proj.rotX);
+    const sinX = Math.sin(proj.rotX);
+    const cl = ep.centerline;
+    const meanZ = ep.meanZ;
+    for (let e = 0; e < ep.edgeCount; e++) {
+      let zSum = 0;
+      const base = e * 13 * 3;
+      for (let j = 0; j < 13; j++) {
+        const c = base + j * 3;
+        const x = cl[c + 0];
+        const y = cl[c + 1];
+        const z = cl[c + 2];
+        const z1 = -x * sinY + z * cosY;
+        const z2 = y * sinX + z1 * cosX;
+        zSum += z2;
+      }
+      meanZ[e] = zSum / 13;
+    }
+
+    // ---- Partition + stable sort (descending mean z, tiebreak dense index) ----
+    const wantFar = hemisphere > 0;
+    const sort = ep.sortScratch;
+    let n = 0;
+    for (let e = 0; e < ep.edgeCount; e++) {
+      const isFar = meanZ[e] > 0;
+      if (isFar === wantFar) sort[n++] = e;
+    }
+    if (n === 0) return;
+    // sortScratch[0..n) holds dense edge indices in graph order (ascending).
+    // Sort DESCENDING by meanZ; ties keep ascending index order (JS sort is stable).
+    const slice = sort.subarray(0, n);
+    // Array.prototype.sort on a typed-array subarray is stable in V8; tiebreak is
+    // the existing ascending order, matching Canvas2D's stable .sort((a,b)=>b.z-a.z).
+    slice.sort((a, b) => meanZ[b] - meanZ[a]);
+
+    // ---- Build sorted global element-index order, upload ----
+    const indices = ep.buf.indices;
+    const scratch = ep.indexScratch;
+    let o = 0;
+    for (let i = 0; i < n; i++) {
+      const e = slice[i];
+      const ib = e * INDICES_PER_EDGE;
+      for (let k = 0; k < INDICES_PER_EDGE; k++) {
+        scratch[o++] = indices[ib + k];
+      }
+    }
+    const count = o; // number of indices to draw
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
+    gl.useProgram(ep.program);
+    gl.bindVertexArray(ep.vao);
+
+    // Upload the sorted index slice (count uint32s) into the dynamic element buffer.
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ep.indexBuffer);
+    gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, scratch, 0, count);
+
+    const wDpr = Math.floor(this.width * this.dpr);
+    const hDpr = Math.floor(this.height * this.dpr);
+    gl.uniform2f(ep.uniforms.uResolution, wDpr, hDpr);
+    gl.uniform1f(ep.uniforms.uDpr, this.dpr);
+    gl.uniform1f(ep.uniforms.uRotX, proj.rotX);
+    gl.uniform1f(ep.uniforms.uRotY, proj.rotY);
+    gl.uniform1f(ep.uniforms.uSceneScale, proj.scale);
+    gl.uniform1f(ep.uniforms.uCx, proj.cx);
+    gl.uniform1f(ep.uniforms.uCy, proj.cy);
+    gl.uniform1f(ep.uniforms.uDist, proj.dist);
+    gl.uniform1f(ep.uniforms.uIsFar, wantFar ? 1 : 0);
+    gl.uniform1f(ep.uniforms.uFocusNodeIndex, focusIdx);
+    gl.uniform1f(ep.uniforms.uHoverNodeIndex, hoverIdx);
+    gl.uniform1fv(ep.uniforms["uLobeMul[0]"], lobeMul);
+
+    gl.drawElements(gl.TRIANGLES, count, gl.UNSIGNED_INT, 0);
 
     gl.bindVertexArray(null);
     gl.disable(gl.BLEND);

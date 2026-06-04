@@ -295,3 +295,188 @@ void main() {
   outColor = vec4(color * a, a);
 }
 `;
+
+// ============================================================
+// EDGE PASS (Task 9)
+// ============================================================
+//
+// Each edge is a quadratic-Bézier ribbon: 13 model-space centerline points
+// expanded to 26 vertices (each point duplicated side=-1/+1), drawn as indexed
+// TRIANGLES (12 segments × 2 tris). The renderer sorts edges back-to-front on the
+// CPU (mean projected z descending) and re-uploads a sorted element-index buffer
+// each frame, issuing ONE indexed draw per hemisphere. Because the far pass draws
+// ONLY far edges (mean z > 0) and the near pass ONLY near edges, the edge-level
+// `isFar` flag is a per-DRAW uniform (uIsFar), not a per-edge attribute.
+//
+// Reproduces drawEdge() in renderer.ts EXACTLY:
+//   isFocus = focus node is an endpoint; isHover = hover node is an endpoint.
+//   lobeM   = max(uLobeMul[lobeIdxA], uLobeMul[lobeIdxB])
+//   interBoost = sameLobe ? 1.0 : 1.6
+//   baseA = (isFocus ? (isFar?0.55:0.85)
+//            : isHover ? (isFar?0.25:0.40)
+//            : (isFar?0.05:0.13)) * lobeM * interBoost
+//   lineWidth (CSS px) = isFocus ? 1.3 : (isFar ? 0.55 : 0.7)
+//   per-segment alpha = baseA * (1 - ((p0.depth + p1.depth) / 2) * 0.35)
+//   per-segment color = sameLobe ? cA : (segIdx < 6 ? cA : cB), unless isFocus → focusColor.
+//
+// DEPTH-FADE APPROACH: FLAT per-segment constant (chosen, not per-vertex interp).
+// Canvas2D draws each of the 12 segments as a single stroke() with one constant
+// alpha derived from the segment's TWO endpoint depths — a hard stair-step. We
+// reproduce this exactly: at segment k's provoking vertex (tIdx k+1) we project
+// aPosition (= segment END point, p1) and aSegStartRef (= segment START point, p0,
+// = tIdx k) and average their depths, emitting the result as a `flat` varying so
+// the whole segment strokes one constant alpha. This is byte-faithful to the
+// stair-step (a per-vertex interpolated fade would smooth across segment seams and
+// drift from the reference). segStartRef/aPosition are flat-correct because under
+// LAST_VERTEX_CONVENTION the provoking vertex of segment k is tIdx k+1, whose
+// aPosition is p1 and whose aSegStartRef is p0.
+//
+// RIBBON GEOMETRY + AA: the VS projects aPosition and aTangentRef (the next
+// centerline point) to screen space, takes the normalized screen tangent, rotates
+// it 90° for the perpendicular, and offsets the vertex by side * (halfLineWidthDev
+// + 1px AA margin) in DEVICE px. The FS computes signed distance from the centerline
+// and analytic coverage = clamp(halfLineWidthDev - |dist| + 0.5, 0, 1), reproducing
+// Canvas2D's sub-pixel lineWidth (0.55 / 0.7 / 1.3) partial coverage.
+//
+// Blend: source-over premultiplied — blendFunc(ONE, ONE_MINUS_SRC_ALPHA). Edges are
+// translucent and the Canvas2D draw order (sorted) is reproduced on the CPU.
+
+/** Edge ribbon vertex shader: projects centerline, extrudes perpendicular, flat alpha/color. */
+export const EDGE_VS = `#version 300 es
+precision highp float;
+
+in vec3 aPosition;     // model xyz, this centerline point (segment END at the provoking vertex)
+in vec3 aTangentRef;   // model xyz of the next centerline point (for screen tangent)
+in vec3 aSegStartRef;  // model xyz of the provoked segment's START point (p0)
+in float aSide;        // extrusion side -1 / +1
+in vec3 aColorA;       // lobe A rgb
+in vec3 aColorB;       // lobe B rgb
+in vec3 aFocusColor;   // edge.A.color rgb (focus override)
+in float aSameLobe;    // 1 = same lobe, 0 = inter-lobe
+in float aColorSelector; // flat: 0 = cA, 1 = cB (provoking-vertex corrected)
+in float aLobeIdxA;    // lobe index 0-5 of endpoint A
+in float aLobeIdxB;    // lobe index 0-5 of endpoint B
+in float aNodeIdxA;    // node-buffer index of endpoint A
+in float aNodeIdxB;    // node-buffer index of endpoint B
+
+uniform vec2 uResolution;  // device-px framebuffer size (w, h)
+uniform float uDpr;        // device pixel ratio
+uniform float uRotX;
+uniform float uRotY;
+uniform float uSceneScale; // min(w,h) * 0.32 * zoom
+uniform float uCx;
+uniform float uCy;
+uniform float uDist;       // 3.4
+uniform float uIsFar;      // +1.0 = far pass (mean z > 0), 0.0 = near pass
+uniform float uLobeMul[6]; // lobeVisibilityMultiplier per lobe
+uniform float uFocusNodeIndex; // node index of focus node, or -1
+uniform float uHoverNodeIndex; // node index of hover node, or -1
+
+flat out vec3 vColor;        // per-segment color (cA / cB / focus override)
+flat out float vAlpha;       // per-segment constant alpha (stair-step)
+flat out float vHalfWidthDev; // half line width in device px (for AA coverage)
+out float vDistFromCenter;   // signed distance from centerline in device px
+
+// Project a model point to CSS-px screen position; also returns depth via out param.
+vec2 projectCss(vec3 p, float cosX, float sinX, float cosY, float sinY, out float depth) {
+  float rotatedX = p.x * cosY + p.z * sinY;
+  float z1 = -p.x * sinY + p.z * cosY;
+  float rotatedY = p.y * cosX - z1 * sinX;
+  float z2 = p.y * sinX + z1 * cosX;
+  float f = uSceneScale / (uDist + z2);
+  depth = (z2 + 1.5) / 3.0;
+  return vec2(uCx + rotatedX * f * uDist, uCy - rotatedY * f * uDist);
+}
+
+void main() {
+  float cosY = cos(uRotY);
+  float sinY = sin(uRotY);
+  float cosX = cos(uRotX);
+  float sinX = sin(uRotX);
+
+  // Project this centerline point + the tangent reference + the segment-start point.
+  float depthThis, depthTan, depthStart;
+  vec2 cssThis = projectCss(aPosition, cosX, sinX, cosY, sinY, depthThis);
+  vec2 cssTan  = projectCss(aTangentRef, cosX, sinX, cosY, sinY, depthTan);
+  vec2 cssStart = projectCss(aSegStartRef, cosX, sinX, cosY, sinY, depthStart);
+
+  // ---- Per-edge dynamic values (drawEdge) computed in-shader ----
+  int lobeA = int(aLobeIdxA + 0.5);
+  int lobeB = int(aLobeIdxB + 0.5);
+  float lobeM = max(uLobeMul[lobeA], uLobeMul[lobeB]);
+  float interBoost = aSameLobe > 0.5 ? 1.0 : 1.6;
+
+  bool isFar = uIsFar > 0.5;
+
+  float fIdx = uFocusNodeIndex;
+  float hIdx = uHoverNodeIndex;
+  bool isFocus = fIdx >= 0.0 && (abs(aNodeIdxA - fIdx) < 0.5 || abs(aNodeIdxB - fIdx) < 0.5);
+  bool isHover = hIdx >= 0.0 && (abs(aNodeIdxA - hIdx) < 0.5 || abs(aNodeIdxB - hIdx) < 0.5);
+
+  float baseA;
+  if (isFocus) {
+    baseA = isFar ? 0.55 : 0.85;
+  } else if (isHover) {
+    baseA = isFar ? 0.25 : 0.40;
+  } else {
+    baseA = isFar ? 0.05 : 0.13;
+  }
+  baseA *= lobeM * interBoost;
+
+  float lineWidthCss = isFocus ? 1.3 : (isFar ? 0.55 : 0.7);
+
+  // FLAT per-segment alpha (stair-step): avg of the segment's two endpoint depths.
+  // At the provoking vertex (tIdx k+1) aPosition = p1 (segment END), aSegStartRef = p0.
+  float avgDepth = (depthStart + depthThis) * 0.5;
+  vAlpha = baseA * (1.0 - avgDepth * 0.35);
+
+  // Per-segment color: intra-lobe → cA; inter-lobe → cA for segs 0-5, cB for 6-11
+  // (delivered via flat aColorSelector). Focus edges override to focusColor.
+  vec3 segColor = aColorSelector > 0.5 ? aColorB : aColorA;
+  vColor = isFocus ? aFocusColor : segColor;
+
+  // ---- Ribbon extrusion (perpendicular to screen tangent) ----
+  // Half line width in device px; +1px AA margin so the FS coverage edge fits.
+  float halfWidthDev = lineWidthCss * 0.5 * uDpr;
+  vHalfWidthDev = halfWidthDev;
+  float extrude = halfWidthDev + 1.0; // device px
+
+  // Screen tangent (CSS px is fine for direction; scale cancels in normalize).
+  vec2 dir = cssTan - cssThis;
+  float len = length(dir);
+  vec2 tdir = len > 1e-6 ? dir / len : vec2(1.0, 0.0);
+  vec2 nrm = vec2(-tdir.y, tdir.x); // 90° rotation → perpendicular
+
+  vDistFromCenter = aSide * extrude;
+
+  // Centerline in device px, then offset along the perpendicular by side*extrude.
+  vec2 devThis = cssThis * uDpr;
+  vec2 devPos = devThis + nrm * (aSide * extrude);
+
+  // Device px → NDC (top-left CSS origin → GL bottom-left).
+  vec2 ndc = (devPos / uResolution) * 2.0 - 1.0;
+  ndc.y = -ndc.y;
+  gl_Position = vec4(ndc, 0.0, 1.0);
+}
+`;
+
+/** Edge ribbon fragment shader: analytic centerline coverage, source-over premultiplied. */
+export const EDGE_FS = `#version 300 es
+precision highp float;
+
+flat in vec3 vColor;
+flat in float vAlpha;
+flat in float vHalfWidthDev;
+in float vDistFromCenter;
+
+out vec4 outColor;
+
+void main() {
+  // Analytic coverage reproducing Canvas2D's sub-pixel lineWidth partial coverage.
+  float coverage = clamp(vHalfWidthDev - abs(vDistFromCenter) + 0.5, 0.0, 1.0);
+  float a = vAlpha * coverage;
+
+  // Premultiplied source-over output (blendFunc(ONE, ONE_MINUS_SRC_ALPHA)).
+  outColor = vec4(vColor * a, a);
+}
+`;

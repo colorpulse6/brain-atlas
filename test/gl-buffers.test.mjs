@@ -42,8 +42,10 @@ import {
   buildCloudBuffer,
   buildNodeBuffer,
   incidentEdgeRanges,
+  edgeLocalIndices,
   LOBE_INDEX,
-  VERTS_PER_EDGE
+  VERTS_PER_EDGE,
+  INDICES_PER_EDGE
 } from "../src/gl/buffers.ts";
 
 // ---- Minimal test fixtures ----
@@ -250,6 +252,29 @@ function deliveredFlatValue(attr, edgeStart, segmentK) {
   return attr[vMinus];
 }
 
+// ---- Index-template provoking helper (indexed TRIANGLES, Task 9) ----
+// Under indexed TRIANGLES with WebGL2 LAST_VERTEX_CONVENTION, the GPU delivers a
+// flat attribute for a triangle from its LAST index. This helper reads the actual
+// `indices` template (edge-local 0-25) for segment k's two triangles and returns
+// the flat value the GPU would deliver for each, VERIFYING the index winding puts
+// the intended provoking vertex (tIdx k+1) last so segment k's color/index map
+// stays correct (the deliveredFlatValue equivalence under the new layout).
+function deliveredViaIndices(attr, edgeStart, indices, edgeLocalBase, segmentK) {
+  // Each segment owns 2 triangles × 3 indices = 6 entries in the local template.
+  const base = edgeLocalBase + segmentK * 6;
+  const tri1Last = indices[base + 2];      // [a, b, d] → last = d
+  const tri2Last = indices[base + 5];      // [a, d, c] → last = c
+  // Both provoking vertices must be at tIdx k+1 (local verts 2(k+1) or 2(k+1)+1).
+  const provTIdx1 = Math.floor(tri1Last / 2);
+  const provTIdx2 = Math.floor(tri2Last / 2);
+  assert.equal(provTIdx1, segmentK + 1, `seg${segmentK} tri1 provoking tIdx`);
+  assert.equal(provTIdx2, segmentK + 1, `seg${segmentK} tri2 provoking tIdx`);
+  const v1 = edgeStart + tri1Last;
+  const v2 = edgeStart + tri2Last;
+  assert.equal(attr[v1], attr[v2], `seg${segmentK}: both triangle provoking values must agree`);
+  return attr[v1];
+}
+
 test("buildEdgeRibbons: per-segment color selector — intra-lobe: all 12 segments deliver cA (0)", () => {
   const result = buildEdgeRibbons(GRAPH);
   // Edge 0 is intra-lobe (frontal→frontal). colorSelector must always be 0.
@@ -376,6 +401,104 @@ test("buildEdgeRibbons: segmentIndex — provoking vertex delivers correct segme
         `edge at ${edgeStart} seg${k}: delivered segmentIndex should be ${k}, got ${delivered}`
       );
     }
+  }
+});
+
+// ---- Index template (indexed TRIANGLES, Task 9) ----
+
+test("INDICES_PER_EDGE is 72 (12 segments × 2 triangles × 3 indices)", () => {
+  assert.equal(INDICES_PER_EDGE, 72);
+});
+
+test("edgeLocalIndices: length 72, all values in [0, 25]", () => {
+  const idx = edgeLocalIndices();
+  assert.equal(idx.length, INDICES_PER_EDGE);
+  for (let i = 0; i < idx.length; i++) {
+    assert.ok(idx[i] >= 0 && idx[i] <= 25, `index ${i} out of range: ${idx[i]}`);
+  }
+});
+
+test("buildEdgeRibbons: indices length = edges × INDICES_PER_EDGE", () => {
+  const result = buildEdgeRibbons(GRAPH);
+  assert.equal(result.indices.length, 2 * INDICES_PER_EDGE);
+});
+
+test("buildEdgeRibbons: each edge's global indices live within its own vertex range", () => {
+  const result = buildEdgeRibbons(GRAPH);
+  for (let e = 0; e < result.edgeRanges.length; e++) {
+    const { start, count } = result.edgeRanges[e];
+    const base = e * INDICES_PER_EDGE;
+    for (let i = 0; i < INDICES_PER_EDGE; i++) {
+      const gi = result.indices[base + i];
+      assert.ok(
+        gi >= start && gi < start + count,
+        `edge ${e} index ${i}=${gi} outside range [${start}, ${start + count})`
+      );
+    }
+  }
+});
+
+test("buildEdgeRibbons: index winding delivers correct flat segmentIndex per segment", () => {
+  // The meaningful provoking-vertex check under the indexed-TRIANGLES layout:
+  // read the ACTUAL index template and confirm each segment's two triangles
+  // provoke the tIdx=k+1 vertex, delivering segmentIndex = k.
+  const result = buildEdgeRibbons(GRAPH);
+  for (let e = 0; e < result.edgeRanges.length; e++) {
+    const edgeStart = result.edgeRanges[e].start;
+    for (let k = 0; k < 12; k++) {
+      const delivered = deliveredViaIndices(result.segmentIndex, edgeStart, result.indices, 0, k);
+      assert.equal(delivered, k, `edge ${e} seg${k}: delivered segmentIndex should be ${k}`);
+    }
+  }
+});
+
+test("buildEdgeRibbons: index winding delivers correct flat colorSelector (inter-lobe segs 0-5→cA, 6-11→cB)", () => {
+  const result = buildEdgeRibbons(GRAPH);
+  // Edge 1 (A–C) is inter-lobe. Reproduces renderer.ts `t < 0.5 ? cA : cB`.
+  const edgeStart = result.edgeRanges[1].start;
+  for (let k = 0; k < 12; k++) {
+    const expected = k < 6 ? 0 : 1;
+    const delivered = deliveredViaIndices(result.colorSelector, edgeStart, result.indices, 0, k);
+    assert.equal(delivered, expected, `inter-lobe seg${k}: delivered colorSelector should be ${expected}`);
+  }
+  // Edge 0 (A–B) is intra-lobe: always cA (0).
+  const edge0Start = result.edgeRanges[0].start;
+  for (let k = 0; k < 12; k++) {
+    const delivered = deliveredViaIndices(result.colorSelector, edge0Start, result.indices, 0, k);
+    assert.equal(delivered, 0, `intra-lobe seg${k}: delivered colorSelector should be 0 (cA)`);
+  }
+});
+
+test("buildEdgeRibbons: tangentRef points to the next centerline point (last falls back to previous)", () => {
+  const result = buildEdgeRibbons(GRAPH);
+  const EPS = 1e-6;
+  // Edge 0, tIdx 0 (verts 0,1): tangentRef should equal the tIdx 1 centerline point.
+  // tIdx 1 position is at vertex 2 (= tIdx 1 side -1) in positions.
+  for (const v of [0, 1]) {
+    assert.ok(Math.abs(result.tangentRef[v * 3 + 0] - result.positions[2 * 3 + 0]) < EPS, `v${v} tangentRef.x`);
+    assert.ok(Math.abs(result.tangentRef[v * 3 + 1] - result.positions[2 * 3 + 1]) < EPS, `v${v} tangentRef.y`);
+    assert.ok(Math.abs(result.tangentRef[v * 3 + 2] - result.positions[2 * 3 + 2]) < EPS, `v${v} tangentRef.z`);
+  }
+  // Edge 0, tIdx 12 (verts 24,25): tangentRef falls back to tIdx 11 (vertex 22).
+  for (const v of [24, 25]) {
+    assert.ok(Math.abs(result.tangentRef[v * 3 + 0] - result.positions[22 * 3 + 0]) < EPS, `v${v} tangentRef.x`);
+    assert.ok(Math.abs(result.tangentRef[v * 3 + 1] - result.positions[22 * 3 + 1]) < EPS, `v${v} tangentRef.y`);
+    assert.ok(Math.abs(result.tangentRef[v * 3 + 2] - result.positions[22 * 3 + 2]) < EPS, `v${v} tangentRef.z`);
+  }
+});
+
+test("buildEdgeRibbons: segStartRef points to the provoked segment's START point (tIdx-1, clamped)", () => {
+  const result = buildEdgeRibbons(GRAPH);
+  const EPS = 1e-6;
+  // tIdx 6 (verts 12,13) provokes segment 5; its START point is tIdx 5 (vertex 10).
+  for (const v of [12, 13]) {
+    assert.ok(Math.abs(result.segStartRef[v * 3 + 0] - result.positions[10 * 3 + 0]) < EPS, `v${v} segStartRef.x`);
+    assert.ok(Math.abs(result.segStartRef[v * 3 + 1] - result.positions[10 * 3 + 1]) < EPS, `v${v} segStartRef.y`);
+    assert.ok(Math.abs(result.segStartRef[v * 3 + 2] - result.positions[10 * 3 + 2]) < EPS, `v${v} segStartRef.z`);
+  }
+  // tIdx 0 (verts 0,1) clamps to tIdx 0 (itself).
+  for (const v of [0, 1]) {
+    assert.ok(Math.abs(result.segStartRef[v * 3 + 0] - result.positions[0]) < EPS, `v${v} segStartRef.x`);
   }
 });
 

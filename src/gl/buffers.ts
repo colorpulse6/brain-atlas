@@ -20,7 +20,18 @@
  *                 enabling analytic AA in the fragment shader.
  *
  * Layout (per vertex, by array):
- *   positions    Float32Array  stride 3    model xyz
+ *   positions    Float32Array  stride 3    model xyz (this centerline point, tIdx j)
+ *   tangentRef   Float32Array  stride 3    model xyz of the NEXT centerline point
+ *                                          (tIdx j+1; for the last point tIdx 12 it is
+ *                                          tIdx 11). The vertex shader projects both
+ *                                          positions, takes the screen-space direction
+ *                                          and rotates it 90° to extrude side*halfWidth.
+ *   segStartRef  Float32Array  stride 3    model xyz of the segment-START centerline
+ *                                          point that this vertex provokes: tIdx j-1
+ *                                          (clamped to 0). Combined with positions
+ *                                          (= the segment-END point under last-vertex
+ *                                          convention) the VS can flat-compute the
+ *                                          per-segment average depth (p0.depth+p1.depth)/2.
  *   sides        Float32Array  stride 1    extrusion side: -1 or +1
  *   colorA       Float32Array  stride 3    lobe A color [r,g,b] in [0,1]
  *   colorB       Float32Array  stride 3    lobe B color [r,g,b] in [0,1]
@@ -47,13 +58,28 @@
  *                                          edgeRanges[].edgeIndex carries the original
  *                                          graph.edges index; this attribute is the dense index.
  *
- * Vertex ordering within one edge (for triangle-strip drawing):
+ * Vertex ordering within one edge:
  *   tIdx=0 side=-1,  tIdx=0 side=+1,
  *   tIdx=1 side=-1,  tIdx=1 side=+1,
  *   …
  *   tIdx=12 side=-1, tIdx=12 side=+1
- *   → draw with gl.drawArrays(gl.TRIANGLE_STRIP, start, 26) per edge
- *     (with gl.PRIMITIVE_RESTART or separate draw calls between edges)
+ *
+ * INDEXED TRIANGLES (Task 9): rather than a TRIANGLE_STRIP (which would need
+ * primitive-restart / degenerate joins to batch edges), the buffer also emits a
+ * static `indices` template of INDICES_PER_EDGE = 72 uint32s per edge (12 segments
+ * × 2 triangles × 3 indices). The renderer re-uploads these 72-index blocks each
+ * frame in sorted edge order (a few thousand uint32s) and issues ONE indexed draw
+ * per hemisphere. Indices are LOCAL to the edge (0-25); add edgeRange.start to make
+ * them global. Per segment k, the quad corners are:
+ *   a = 2k     (tIdx k,   side -1)
+ *   b = 2k + 1 (tIdx k,   side +1)
+ *   c = 2k + 2 (tIdx k+1, side -1)
+ *   d = 2k + 3 (tIdx k+1, side +1)
+ * Two triangles cover the quad with their LAST (provoking, LAST_VERTEX_CONVENTION)
+ * index at tIdx k+1 so the flat segmentIndex / colorSelector — stored at tIdx k+1
+ * for segment k — is delivered correctly:
+ *   tri 1: [a, b, d]   (last = d, tIdx k+1)
+ *   tri 2: [a, d, c]   (last = c, tIdx k+1)
  *
  * segmentIndex for vertex at tIdx: clamp(tIdx-1, 0, 11)  [provoking-vertex corrected]
  *   Segment k is drawn from tIdx k and k+1; its provoking vertex is tIdx k+1, which stores k.
@@ -93,6 +119,34 @@ import { hexToRgb01 } from "./color.ts";
 
 /** 13 Bézier sample points × 2 sides (triangle strip) = 26 vertices per edge. */
 export const VERTS_PER_EDGE = 26;
+
+/** 12 segments × 2 triangles × 3 indices = 72 element indices per edge (indexed TRIANGLES). */
+export const INDICES_PER_EDGE = 72;
+
+/**
+ * Build the local (0-25, edge-relative) element-index template for ONE edge's
+ * 12 segments under the indexed-TRIANGLES layout (see header docs). The renderer
+ * adds edgeRange.start to each value and writes 72-index blocks in sorted order.
+ *
+ * Each triangle's LAST index is the provoking vertex at tIdx k+1, so the flat
+ * segmentIndex / colorSelector attributes (stored for segment k at tIdx k+1) are
+ * delivered correctly under WebGL2's fixed LAST_VERTEX_CONVENTION.
+ */
+export function edgeLocalIndices(): Uint32Array {
+  const out = new Uint32Array(INDICES_PER_EDGE);
+  let o = 0;
+  for (let k = 0; k < 12; k++) {
+    const a = 2 * k;       // tIdx k,   side -1
+    const b = 2 * k + 1;   // tIdx k,   side +1
+    const c = 2 * k + 2;   // tIdx k+1, side -1
+    const d = 2 * k + 3;   // tIdx k+1, side +1
+    // tri 1: provoking (last) vertex = d (tIdx k+1)
+    out[o++] = a; out[o++] = b; out[o++] = d;
+    // tri 2: provoking (last) vertex = c (tIdx k+1)
+    out[o++] = a; out[o++] = d; out[o++] = c;
+  }
+  return out;
+}
 
 /** Canonical lobe indices (0-5). These are the indices used in GPU buffers. */
 export const LOBE_INDEX: Record<LobeName, number> = {
@@ -135,8 +189,20 @@ export interface EdgeRange extends VertexRange {
 
 /** Output of buildEdgeRibbons. */
 export interface EdgeRibbonBuffer {
-  /** Model-space xyz per vertex. Length = vertexCount * 3. */
+  /** Model-space xyz per vertex (this centerline point, tIdx j). Length = vertexCount * 3. */
   positions: Float32Array;
+  /**
+   * Model-space xyz of the NEXT centerline point (tIdx j+1; last point uses tIdx 11)
+   * so the vertex shader can compute a screen-space tangent for perpendicular extrusion.
+   * Length = vertexCount * 3.
+   */
+  tangentRef: Float32Array;
+  /**
+   * Model-space xyz of the segment-START centerline point this vertex provokes
+   * (tIdx j-1, clamped to 0). Length = vertexCount * 3. With positions (segment END
+   * under last-vertex convention) the VS flat-computes per-segment avg depth.
+   */
+  segStartRef: Float32Array;
   /** Extrusion side: -1 or +1. Length = vertexCount. */
   sides: Float32Array;
   /** Lobe A RGB per vertex. Length = vertexCount * 3. */
@@ -176,6 +242,13 @@ export interface EdgeRibbonBuffer {
    * index; this attribute is the dense index used for per-draw-call lookups.
    */
   edgeIndex: Uint32Array;
+  /**
+   * Static element-index template, INDICES_PER_EDGE (72) per edge, indices LOCAL
+   * to each edge's vertex range (0-25). The renderer adds edgeRange.start and
+   * re-uploads 72-index blocks in sorted edge order each frame for ONE indexed
+   * draw per hemisphere. Length = edgeRanges.length * INDICES_PER_EDGE.
+   */
+  indices: Uint32Array;
   /** Total vertex count across all edges. */
   vertexCount: number;
   /** Per-edge vertex range metadata. */
@@ -277,6 +350,8 @@ export function buildEdgeRibbons(graph: BrainGraph): EdgeRibbonBuffer {
 
   // Allocate all arrays
   const positions    = new Float32Array(totalVerts * 3);
+  const tangentRef   = new Float32Array(totalVerts * 3);
+  const segStartRef  = new Float32Array(totalVerts * 3);
   const sides        = new Float32Array(totalVerts);
   const colorA       = new Float32Array(totalVerts * 3);
   const colorB       = new Float32Array(totalVerts * 3);
@@ -291,6 +366,8 @@ export function buildEdgeRibbons(graph: BrainGraph): EdgeRibbonBuffer {
   const edgeIndexArr = new Uint32Array(totalVerts);
 
   const edgeRanges: EdgeRange[] = [];
+  const indices = new Uint32Array(validEdges.length * INDICES_PER_EDGE);
+  const localIndices = edgeLocalIndices();
   let vBase = 0; // vertex offset for the current edge
 
   for (let vi = 0; vi < validEdges.length; vi++) {
@@ -315,13 +392,29 @@ export function buildEdgeRibbons(graph: BrainGraph): EdgeRibbonBuffer {
       z: (A._3dLobe!.z + B._3dLobe!.z) * 0.35
     };
 
+    // Precompute all 13 centerline model points so tangentRef (next point) and
+    // segStartRef (previous point) can be looked up without recomputing the Bézier.
+    const cx = new Float64Array(POINTS);
+    const cy = new Float64Array(POINTS);
+    const cz = new Float64Array(POINTS);
+    for (let j = 0; j < POINTS; j++) {
+      const t = j / SAMPLES;
+      const mt = 1 - t;
+      cx[j] = mt * mt * A._3dLobe!.x + 2 * mt * t * ctrl.x + t * t * B._3dLobe!.x;
+      cy[j] = mt * mt * A._3dLobe!.y + 2 * mt * t * ctrl.y + t * t * B._3dLobe!.y;
+      cz[j] = mt * mt * A._3dLobe!.z + 2 * mt * t * ctrl.z + t * t * B._3dLobe!.z;
+    }
+
     // Sample the Bézier at POINTS = 13 values of t
     for (let tIdx = 0; tIdx < POINTS; tIdx++) {
-      const t = tIdx / SAMPLES;
-      const mt = 1 - t;
-      const px = mt * mt * A._3dLobe!.x + 2 * mt * t * ctrl.x + t * t * B._3dLobe!.x;
-      const py = mt * mt * A._3dLobe!.y + 2 * mt * t * ctrl.y + t * t * B._3dLobe!.y;
-      const pz = mt * mt * A._3dLobe!.z + 2 * mt * t * ctrl.z + t * t * B._3dLobe!.z;
+      const px = cx[tIdx];
+      const py = cy[tIdx];
+      const pz = cz[tIdx];
+
+      // tangentRef = next centerline point (tIdx+1); last point falls back to tIdx-1.
+      const tRefIdx = tIdx < POINTS - 1 ? tIdx + 1 : tIdx - 1;
+      // segStartRef = segment-START point for the segment this vertex provokes (tIdx-1, clamped).
+      const sRefIdx = tIdx > 0 ? tIdx - 1 : 0;
 
       // PROVOKING-VERTEX CONVENTION (WebGL2 fixed at LAST_VERTEX_CONVENTION):
       // In a TRIANGLE_STRIP, segment k (between tIdx k and k+1) is drawn by two triangles
@@ -355,6 +448,14 @@ export function buildEdgeRibbons(graph: BrainGraph): EdgeRibbonBuffer {
         positions[v * 3 + 1] = py;
         positions[v * 3 + 2] = pz;
 
+        tangentRef[v * 3 + 0] = cx[tRefIdx];
+        tangentRef[v * 3 + 1] = cy[tRefIdx];
+        tangentRef[v * 3 + 2] = cz[tRefIdx];
+
+        segStartRef[v * 3 + 0] = cx[sRefIdx];
+        segStartRef[v * 3 + 1] = cy[sRefIdx];
+        segStartRef[v * 3 + 2] = cz[sRefIdx];
+
         sides[v] = side;
 
         colorA[v * 3 + 0] = cA[0];
@@ -381,12 +482,20 @@ export function buildEdgeRibbons(graph: BrainGraph): EdgeRibbonBuffer {
       }
     }
 
+    // Append this edge's 72-index block (local indices offset by vBase → global).
+    const iBase = vi * INDICES_PER_EDGE;
+    for (let k = 0; k < INDICES_PER_EDGE; k++) {
+      indices[iBase + k] = vBase + localIndices[k];
+    }
+
     edgeRanges.push({ edgeIndex: edgeIdx, start: vBase, count: VERTS });
     vBase += VERTS;
   }
 
   return {
     positions,
+    tangentRef,
+    segStartRef,
     sides,
     colorA,
     colorB,
@@ -399,6 +508,7 @@ export function buildEdgeRibbons(graph: BrainGraph): EdgeRibbonBuffer {
     lobeIdxA,
     lobeIdxB,
     edgeIndex: edgeIndexArr,
+    indices,
     vertexCount: totalVerts,
     edgeRanges
   };
