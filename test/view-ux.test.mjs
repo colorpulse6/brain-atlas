@@ -9,6 +9,7 @@ const settingsTabSource = readFileSync(new URL("../src/settings-tab.ts", import.
 const stylesSource = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 // Label/compass logic was extracted to the shared overlay module (Task 12).
 const overlayLabelsSource = readFileSync(new URL("../src/overlay-labels.ts", import.meta.url), "utf8");
+const glRendererSource = readFileSync(new URL("../src/gl/brain-gl-renderer.ts", import.meta.url), "utf8");
 
 test("the view explains how notes, links, and regions are derived", () => {
   assert.match(viewSource, /brain-atlas-info-panel/);
@@ -93,4 +94,56 @@ test("settings expose frontmatter value mappings and a classification report", (
   assert.match(settingsTabSource, /Folder region mappings/);
   assert.match(settingsTabSource, /Classification report/);
   assert.match(settingsTabSource, /Unmapped frontmatter values/);
+});
+
+test("view selects WebGL2 renderer on desktop with Canvas2D fallback", () => {
+  // view imports BrainGLRenderer
+  assert.match(viewSource, /BrainGLRenderer/);
+  // renderer field is typed as RenderCore (the abstract base)
+  assert.match(viewSource, /RenderCore/);
+  // rendererMode setting is referenced for selection logic
+  assert.match(viewSource, /rendererMode/);
+  // startRenderer method exists and calls selectRenderer
+  assert.match(viewSource, /startRenderer/);
+  assert.match(viewSource, /selectRenderer/);
+  // fallback try/catch: Canvas2D fallback when WebGL fails
+  assert.match(viewSource, /fallback/);
+  // interaction target uses the clean getInteractionTarget() accessor
+  assert.match(viewSource, /getInteractionTarget/);
+  // canvas2d mode forces Canvas2D
+  assert.match(viewSource, /canvas2d/);
+  // mobile check feeds renderer selection
+  assert.match(viewSource, /isMobileRuntime/);
+});
+
+test("canvas is recreated when renderer kind changes to avoid locked context", () => {
+  // canvasContextKind tracks the context kind successfully bound to this.canvas
+  assert.match(viewSource, /canvasContextKind/);
+  // recreateCanvas replaces the DOM canvas element and resets the kind
+  assert.match(viewSource, /recreateCanvas/);
+  // rendererStarted guards start-vs-setOptions in rebuild()
+  assert.match(viewSource, /rendererStarted/);
+  // desiredKind is derived from the selected renderer type
+  assert.match(viewSource, /desiredKind/);
+  // recreation only happens when kinds differ (not on same-kind restart)
+  assert.match(viewSource, /canvasContextKind !== desiredKind/);
+  // fresh canvas is prepended so it stays under the HUD/controls in DOM order
+  assert.match(viewSource, /prepend/);
+});
+
+test("renderer options are factored into a single rendererOptions() helper", () => {
+  // The DRY helper must exist in view.ts
+  assert.match(viewSource, /rendererOptions/);
+  // onOpen/onShow no longer duplicate the options object inline
+  // (startRenderer() is called instead of inline .start(...) with raw options)
+  assert.match(viewSource, /startRenderer\(\)/);
+});
+
+test("WebGL2 renderer overlay is pointer-transparent and sits above the WebGL canvas", () => {
+  // overlay is pointer-events:none so clicks fall through to the WebGL canvas
+  assert.match(glRendererSource, /pointerEvents.*none|pointer-events.*none/);
+  // overlay is absolutely positioned to cover the WebGL canvas
+  assert.match(glRendererSource, /position.*absolute|absolute.*position/);
+  // .brain-atlas-root is position:relative so absolute children are contained
+  assert.match(stylesSource, /\.brain-atlas-root[\s\S]*?position:\s*relative/);
 });
