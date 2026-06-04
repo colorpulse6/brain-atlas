@@ -202,6 +202,85 @@ test.describe("WebGL background matches Canvas2D", () => {
   }
 });
 
+test.describe("WebGL haze matches Canvas2D", () => {
+  let page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto(`file://${HARNESS_HTML}`);
+    await page.waitForFunction(() => typeof window.renderFrame === "function");
+  });
+
+  test.afterAll(async () => {
+    await page?.close();
+  });
+
+  // Test matrices: palettes × highlight cases.
+  // Both background + haze are enabled so the A/B covers the full layered
+  // composite (haze is additive on top of background).
+  //
+  // Tolerance rationale:
+  //   Soft radial gradients with piecewise-linear alpha produce near-identical
+  //   results across Canvas2D and WebGL when the coordinate/dpr math is correct.
+  //   We allow < 0.3% of pixels (budget = ceil(w*h*0.003)) to account for
+  //   sub-pixel AA rounding at gradient edges. A whole-region mismatch (e.g.
+  //   wrong Y-flip, wrong dpr scaling, or wrong alpha formula) produces thousands
+  //   of mismatches and is NOT tolerated — fix the shader, don't loosen this.
+  const HAZE_CASES = [
+    ...PALETTES.map((palette) => ({ palette, overrides: {} })),
+    ...PALETTES.map((palette) => ({ palette, overrides: { highlightLobe: "frontal" } }))
+  ];
+
+  for (const { palette, overrides } of HAZE_CASES) {
+    const caseName = [
+      `palette=${palette}`,
+      Object.entries(overrides)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(",") || "base"
+    ].join(" ");
+
+    test(caseName, async () => {
+      const base = {
+        palette,
+        rot: { x: -0.15, y: 0.55 },
+        zoom: 1,
+        dpr: 1,
+        now: 1000,
+        width: 480,
+        height: 360,
+        focusId: null,
+        hoverId: null,
+        highlightLobe: null,
+        enabledPasses: ["background", "haze"],
+        ...overrides
+      };
+
+      const urlCanvas = await renderFrame(page, { ...base, renderer: "canvas2d" });
+      const urlGl = await renderFrame(page, { ...base, renderer: "webgl2" });
+
+      expect(urlCanvas).toBeTruthy();
+      expect(urlGl).toBeTruthy();
+
+      const imgA = decodePng(urlCanvas);
+      const imgB = decodePng(urlGl);
+      expect(imgA.width).toBe(imgB.width);
+      expect(imgA.height).toBe(imgB.height);
+
+      const { width, height } = imgA;
+      const mismatched = pixelmatch(imgA.data, imgB.data, null, width, height, { threshold: 0.1 });
+
+      // Budget: < 0.3% of pixels for soft-gradient AA/rounding differences.
+      // Whole-region differences (wrong Y-flip, dpr, alpha formula) produce
+      // thousands of mismatches and must be fixed in the shader.
+      const budget = Math.ceil(width * height * 0.003);
+      expect(
+        mismatched,
+        `${caseName}: ${mismatched} mismatched pixels (budget ${budget})`
+      ).toBeLessThanOrEqual(budget);
+    });
+  }
+});
+
 test.describe("Canvas2D reactivity check", () => {
   let page;
 

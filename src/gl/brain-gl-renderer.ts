@@ -18,13 +18,23 @@
  */
 
 import { RenderCore } from "../render-core.ts";
-import type { BrainGraph } from "../types.ts";
-import { sceneProjection } from "./projection.ts";
+import type { BrainGraph, LobeName } from "../types.ts";
+import { sceneProjection, projectPoint } from "./projection.ts";
+import type { ProjectionOpts } from "./projection.ts";
 import { hexToRgb01 } from "./color.ts";
 import { createProgram, getUniformLocations, createStaticBuffer } from "./programs.ts";
-import { BACKGROUND_VS, BACKGROUND_FS } from "./shaders.ts";
+import { BACKGROUND_VS, BACKGROUND_FS, HAZE_VS, HAZE_FS } from "./shaders.ts";
+import { LOBE_CENTERS } from "../shape.ts";
+import { lobeVisibilityMultiplier } from "../lobe-visibility.ts";
 
 interface BackgroundProgram {
+  program: WebGLProgram;
+  quadBuffer: WebGLBuffer;
+  vao: WebGLVertexArrayObject;
+  uniforms: Record<string, WebGLUniformLocation | null>;
+}
+
+interface HazeProgram {
   program: WebGLProgram;
   quadBuffer: WebGLBuffer;
   vao: WebGLVertexArrayObject;
@@ -38,6 +48,7 @@ export class BrainGLRenderer extends RenderCore {
 
   // Lazily created GL resources (created once, reused across frames).
   private bgProgram: BackgroundProgram | null = null;
+  private hazeProgram: HazeProgram | null = null;
 
   protected acquireSurface(canvas: HTMLCanvasElement): boolean {
     const gl = canvas.getContext("webgl2", {
@@ -112,6 +123,12 @@ export class BrainGLRenderer extends RenderCore {
       gl.deleteProgram(this.bgProgram.program);
     }
     this.bgProgram = null;
+    if (gl && this.hazeProgram) {
+      gl.deleteVertexArray(this.hazeProgram.vao);
+      gl.deleteBuffer(this.hazeProgram.quadBuffer);
+      gl.deleteProgram(this.hazeProgram.program);
+    }
+    this.hazeProgram = null;
     if (this.overlay && this.overlay.parentElement) {
       this.overlay.parentElement.removeChild(this.overlay);
     }
@@ -139,8 +156,10 @@ export class BrainGLRenderer extends RenderCore {
       this.drawBackground(gl, graph, proj.cx, proj.cy);
     }
 
-    // ---- Pass: haze (lobe glow, additive) ---- TODO Task 7
-    // if (this.passEnabled("haze")) { ... }
+    // ---- Pass: haze (lobe glow, additive) ----
+    if (this.passEnabled("haze")) {
+      this.drawHaze(gl, graph, proj);
+    }
 
     // ---- Pass: cloud (point sprites, additive, far then near halves) ---- TODO Task 8
     // if (this.passEnabled("cloud")) { ... }
@@ -210,6 +229,8 @@ export class BrainGLRenderer extends RenderCore {
     const radius = Math.max(this.width, this.height) * 0.75;
 
     // Background is opaque: no blending, just paint the quad over the framebuffer.
+    // Pass blend convention: each pass explicitly sets (or disables) blending at
+    // its start so passes compose correctly regardless of execution order.
     gl.disable(gl.BLEND);
 
     gl.useProgram(bg.program);
@@ -224,5 +245,114 @@ export class BrainGLRenderer extends RenderCore {
 
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     gl.bindVertexArray(null);
+  }
+
+  /** Lazily create + return the haze program (unit quad, per-lobe draw calls). */
+  private ensureHazeProgram(gl: WebGL2RenderingContext): HazeProgram {
+    if (this.hazeProgram) return this.hazeProgram;
+    const program = createProgram(gl, HAZE_VS, HAZE_FS);
+    const aPosition = gl.getAttribLocation(program, "aPosition");
+    // Unit quad [-1, 1]² covering exactly the haze circle's bounding square.
+    // The vertex shader scales+translates it to screen space per draw call.
+    const quad = new Float32Array([
+      -1, -1,
+       1, -1,
+      -1,  1,
+      -1,  1,
+       1, -1,
+       1,  1
+    ]);
+    const quadBuffer = createStaticBuffer(gl, quad);
+
+    // VAO captures the buffer+attrib layout (same pattern as ensureBackgroundProgram).
+    const vao = gl.createVertexArray();
+    if (!vao) throw new Error("Brain Atlas: failed to create haze VAO.");
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+    gl.enableVertexAttribArray(aPosition);
+    gl.vertexAttribPointer(aPosition, 2, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+
+    const uniforms = getUniformLocations(gl, program, [
+      "uResolution",
+      "uDpr",
+      "uCenter",
+      "uRadius",
+      "uColor",
+      "uBaseA"
+    ]);
+    this.hazeProgram = { program, quadBuffer, vao, uniforms };
+    return this.hazeProgram;
+  }
+
+  /**
+   * Draw the lobe-haze pass: one additive radial-gradient quad per lobe (+ mirror).
+   *
+   * Blend convention: additive (ONE, ONE). Set at the start of this pass and
+   * disabled afterward. Later passes set their own blend modes explicitly.
+   *
+   * Draw order: Canvas2D sorts quads by pr.z descending, but additive blending
+   * is commutative — accumulation order does not affect the result. We skip the
+   * sort here (each quad's contribution is independent).
+   */
+  private drawHaze(gl: WebGL2RenderingContext, graph: BrainGraph, proj: ProjectionOpts): void {
+    const hz = this.ensureHazeProgram(gl);
+
+    // Haze uses additive blending (same as Canvas2D "lighter" composite operation).
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+
+    gl.useProgram(hz.program);
+    gl.bindVertexArray(hz.vao);
+
+    const wDpr = Math.floor(this.width * this.dpr);
+    const hDpr = Math.floor(this.height * this.dpr);
+    gl.uniform2f(hz.uniforms.uResolution, wDpr, hDpr);
+    gl.uniform1f(hz.uniforms.uDpr, this.dpr);
+
+    // sceneScale = proj.scale = min(w,h) * 0.32 * zoom
+    const sceneScale = proj.scale;
+
+    for (const rawLobe in LOBE_CENTERS) {
+      const lobe = rawLobe as LobeName;
+      const lobeCenter = LOBE_CENTERS[lobe];
+
+      // Draw the primary center and, if mirrored, the mirror.
+      const centers = [lobeCenter.c];
+      if (lobeCenter.mirror) {
+        centers.push({ x: -lobeCenter.c.x, y: lobeCenter.c.y, z: lobeCenter.c.z });
+      }
+
+      for (const center of centers) {
+        const pr = projectPoint(proj, center);
+
+        // radius = lobeCenter.r * sceneScale * 1.4 * pr.scale
+        const radius = lobeCenter.r * sceneScale * 1.4 * pr.scale;
+
+        // depthFade = max(0.25, 1 - pr.depth * 0.55)
+        const depthFade = Math.max(0.25, 1 - pr.depth * 0.55);
+
+        // baseA = (highlight ? 0.18 : 0.07) * depthFade * lobeVisibilityMultiplier(...)
+        const highlightMul = this.highlightLobe === lobe ? 0.18 : 0.07;
+        const baseA = highlightMul * depthFade * lobeVisibilityMultiplier(lobe, this.options.enabledLobes, this.highlightLobe);
+
+        if (baseA < 0.005) continue;
+
+        const [r, g, b] = hexToRgb01(this.lobeColor(lobe, graph));
+
+        gl.uniform2f(hz.uniforms.uCenter, pr.sx, pr.sy);
+        gl.uniform1f(hz.uniforms.uRadius, radius);
+        gl.uniform3f(hz.uniforms.uColor, r, g, b);
+        gl.uniform1f(hz.uniforms.uBaseA, baseA);
+
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+      }
+    }
+
+    gl.bindVertexArray(null);
+
+    // Restore blend state: disable blend so subsequent opaque passes (if any)
+    // are not affected. Each pass sets its own blend mode at its start.
+    gl.disable(gl.BLEND);
   }
 }
