@@ -23,12 +23,12 @@ import { sceneProjection, projectPoint } from "./projection.ts";
 import type { ProjectionOpts } from "./projection.ts";
 import { hexToRgb01 } from "./color.ts";
 import { createProgram, getUniformLocations, createStaticBuffer } from "./programs.ts";
-import { BACKGROUND_VS, BACKGROUND_FS, HAZE_VS, HAZE_FS, CLOUD_VS, CLOUD_FS, EDGE_VS, EDGE_FS } from "./shaders.ts";
+import { BACKGROUND_VS, BACKGROUND_FS, HAZE_VS, HAZE_FS, CLOUD_VS, CLOUD_FS, EDGE_VS, EDGE_FS, NODE_VS, NODE_FS } from "./shaders.ts";
 import { LOBE_CENTERS } from "../shape.ts";
 import { lobeVisibilityMultiplier } from "../lobe-visibility.ts";
 import { buildBrainCloud } from "../cloud.ts";
-import { buildCloudBuffer, buildEdgeRibbons, INDICES_PER_EDGE, LOBE_INDEX } from "./buffers.ts";
-import type { EdgeRibbonBuffer } from "./buffers.ts";
+import { buildCloudBuffer, buildEdgeRibbons, buildNodeBuffer, INDICES_PER_EDGE, LOBE_INDEX } from "./buffers.ts";
+import type { EdgeRibbonBuffer, NodeBuffer } from "./buffers.ts";
 
 /**
  * Lobe names ordered by their GPU LOBE_INDEX (0-5). Used to build the 6-entry
@@ -91,6 +91,37 @@ interface EdgeProgram {
   indexScratch: Uint32Array;
 }
 
+interface NodeProgram {
+  program: WebGLProgram;
+  /** One interleaved static VBO holding all per-vertex attributes (6 verts/node). */
+  vertexBuffer: WebGLBuffer;
+  /** Dynamic element buffer; re-uploaded each frame with the sorted node-quad order. */
+  indexBuffer: WebGLBuffer;
+  vao: WebGLVertexArrayObject;
+  uniforms: Record<string, WebGLUniformLocation | null>;
+  /** Built node buffer (positions, radii, flags, colors). */
+  buf: NodeBuffer;
+  /**
+   * Per-node model-space center (flattened [x0,y0,z0, x1,...]) for fast per-frame
+   * z-only projection without re-reading the interleaved VBO. Length = count*3.
+   */
+  centers: Float32Array;
+  /** Node count (number of _3dLobe nodes). */
+  nodeCount: number;
+  /** Per-frame scratch: projected z per node. */
+  projZ: Float32Array;
+  /** Per-frame scratch: dense node indices being sorted for one hemisphere. */
+  sortScratch: Int32Array;
+  /**
+   * Static element-index template: 6 indices per node quad (two triangles), LOCAL
+   * to the node's 6-vertex range (0-5) offset by node*6 to make them global.
+   * The renderer re-uploads sorted 6-index blocks each frame for one indexed draw.
+   */
+  baseIndices: Uint32Array;
+  /** Per-frame scratch: the sorted GLOBAL element indices uploaded each draw. */
+  indexScratch: Uint32Array;
+}
+
 export class BrainGLRenderer extends RenderCore {
   private gl: WebGL2RenderingContext | null = null;
   private overlay: HTMLCanvasElement | null = null;
@@ -103,6 +134,9 @@ export class BrainGLRenderer extends RenderCore {
   private edgeProgram: EdgeProgram | null = null;
   /** Identity of the graph the edge buffers were built from (rebuild on change). */
   private edgeGraph: BrainGraph | null = null;
+  private nodeProgram: NodeProgram | null = null;
+  /** Identity of the graph the node buffers were built from (rebuild on change). */
+  private nodeGraph: BrainGraph | null = null;
 
   protected acquireSurface(canvas: HTMLCanvasElement): boolean {
     const gl = canvas.getContext("webgl2", {
@@ -197,6 +231,14 @@ export class BrainGLRenderer extends RenderCore {
     }
     this.edgeProgram = null;
     this.edgeGraph = null;
+    if (gl && this.nodeProgram) {
+      gl.deleteVertexArray(this.nodeProgram.vao);
+      gl.deleteBuffer(this.nodeProgram.vertexBuffer);
+      gl.deleteBuffer(this.nodeProgram.indexBuffer);
+      gl.deleteProgram(this.nodeProgram.program);
+    }
+    this.nodeProgram = null;
+    this.nodeGraph = null;
     if (this.overlay && this.overlay.parentElement) {
       this.overlay.parentElement.removeChild(this.overlay);
     }
@@ -255,12 +297,12 @@ export class BrainGLRenderer extends RenderCore {
     // FAR hemisphere (projected z > 0), back of the scene:
     if (this.passEnabled("cloud")) this.drawCloud(gl, proj, now, +1, lobeMul, lobeColors);
     if (this.passEnabled("edges")) this.drawEdges(gl, graph, proj, +1, lobeMul, focusIdx, hoverIdx);
-    // if (this.passEnabled("nodes")) { /* TODO Task 10: nodes far (z > 0) */ }
+    if (this.passEnabled("nodes")) this.drawNodes(gl, graph, proj, +1, lobeMul, focusIdx, hoverIdx);
 
     // NEAR hemisphere (projected z <= 0), front of the scene:
     if (this.passEnabled("cloud")) this.drawCloud(gl, proj, now, -1, lobeMul, lobeColors);
     if (this.passEnabled("edges")) this.drawEdges(gl, graph, proj, -1, lobeMul, focusIdx, hoverIdx);
-    // if (this.passEnabled("nodes")) { /* TODO Task 10: nodes near (z <= 0) */ }
+    if (this.passEnabled("nodes")) this.drawNodes(gl, graph, proj, -1, lobeMul, focusIdx, hoverIdx);
 
     // ---- Pass: signals (additive particle trails) ---- TODO Task 11
     // if (this.passEnabled("signals")) { ... }
@@ -853,6 +895,266 @@ export class BrainGLRenderer extends RenderCore {
     gl.uniform1f(ep.uniforms.uFocusNodeIndex, focusIdx);
     gl.uniform1f(ep.uniforms.uHoverNodeIndex, hoverIdx);
     gl.uniform1fv(ep.uniforms["uLobeMul[0]"], lobeMul);
+
+    gl.drawElements(gl.TRIANGLES, count, gl.UNSIGNED_INT, 0);
+
+    gl.bindVertexArray(null);
+    gl.disable(gl.BLEND);
+  }
+
+  /**
+   * Lazily build the node sprite program + static VBO + dynamic element buffer.
+   * Rebuilds when the graph identity changes.
+   *
+   * Each _3dLobe node is expanded into a screen-space QUAD (6 vertices) carrying
+   * its model xyz, base radius, hub flag, status code, lobe index, color, node
+   * index, and a [-1,1]² corner offset. The vertex shader projects + sizes the
+   * quad (bounding the node's full extent) and the fragment shader composites the
+   * node's layers (halo/core/dot/[ring/crosshair]) in-fragment (see NODE_FS).
+   *
+   * The element buffer is DYNAMIC: drawNodes re-uploads a sorted slice of global
+   * indices each frame so one indexed draw renders a whole hemisphere back-to-front.
+   */
+  private ensureNodeProgram(gl: WebGL2RenderingContext, graph: BrainGraph): NodeProgram {
+    if (this.nodeProgram && this.nodeGraph === graph) return this.nodeProgram;
+
+    if (this.nodeProgram) {
+      gl.deleteVertexArray(this.nodeProgram.vao);
+      gl.deleteBuffer(this.nodeProgram.vertexBuffer);
+      gl.deleteBuffer(this.nodeProgram.indexBuffer);
+      gl.deleteProgram(this.nodeProgram.program);
+      this.nodeProgram = null;
+    }
+
+    const program = createProgram(gl, NODE_VS, NODE_FS);
+    const buf = buildNodeBuffer(graph.nodes);
+    const nodeCount = buf.count;
+
+    // Interleaved layout (floats per vertex):
+    //   pos(3) radiusBase(1) hub(1) status(1) lobeIndex(1)
+    //   color(3) nodeIndex(1) corner(2) = 13 floats.
+    const F = 13;
+    const VERTS_PER_NODE = 6;
+    // Corner offsets matching the cloud/bg/haze quad winding (two triangles).
+    const corners = [
+      [-1, -1],
+      [ 1, -1],
+      [-1,  1],
+      [-1,  1],
+      [ 1, -1],
+      [ 1,  1]
+    ];
+    const vertexCount = nodeCount * VERTS_PER_NODE;
+    const data = new Float32Array(vertexCount * F);
+    let o = 0;
+    for (let i = 0; i < nodeCount; i++) {
+      const x = buf.positions[i * 3 + 0];
+      const y = buf.positions[i * 3 + 1];
+      const z = buf.positions[i * 3 + 2];
+      const r = buf.radius[i];
+      const hub = buf.hub[i];
+      const status = buf.status[i];
+      const lobe = buf.lobeIndex[i];
+      const cr = buf.color[i * 3 + 0];
+      const cg = buf.color[i * 3 + 1];
+      const cb = buf.color[i * 3 + 2];
+      const nIdx = buf.nodeIndex[i];
+      for (let c = 0; c < VERTS_PER_NODE; c++) {
+        data[o++] = x;
+        data[o++] = y;
+        data[o++] = z;
+        data[o++] = r;
+        data[o++] = hub;
+        data[o++] = status;
+        data[o++] = lobe;
+        data[o++] = cr;
+        data[o++] = cg;
+        data[o++] = cb;
+        data[o++] = nIdx;
+        data[o++] = corners[c][0];
+        data[o++] = corners[c][1];
+      }
+    }
+    const vertexBuffer = createStaticBuffer(gl, data);
+
+    // Cache per-node model centers for fast per-frame z-only projection.
+    const centers = new Float32Array(nodeCount * 3);
+    centers.set(buf.positions.subarray(0, nodeCount * 3));
+
+    // Static element-index template: 6 indices per node quad (two triangles).
+    // Local 0-5; the renderer offsets by node*6 to make them global.
+    const baseIndices = new Uint32Array(nodeCount * 6);
+    for (let i = 0; i < nodeCount; i++) {
+      const v = i * VERTS_PER_NODE;
+      const ib = i * 6;
+      // Two triangles: (0,1,3) (3,1,5)? Use the quad corner winding above:
+      // verts 0,1,2 = tri A; verts 3,4,5 = tri B (matches the corners[] order).
+      baseIndices[ib + 0] = v + 0;
+      baseIndices[ib + 1] = v + 1;
+      baseIndices[ib + 2] = v + 2;
+      baseIndices[ib + 3] = v + 3;
+      baseIndices[ib + 4] = v + 4;
+      baseIndices[ib + 5] = v + 5;
+    }
+
+    const indexBuffer = gl.createBuffer();
+    if (!indexBuffer) throw new Error("Brain Atlas: failed to create node index buffer.");
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, baseIndices.byteLength, gl.DYNAMIC_DRAW);
+
+    const stride = F * 4;
+    const loc = (name: string) => gl.getAttribLocation(program, name);
+    const vao = gl.createVertexArray();
+    if (!vao) throw new Error("Brain Atlas: failed to create node VAO.");
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+    const fattr = (name: string, size: number, offsetFloats: number) => {
+      const l = loc(name);
+      if (l < 0) return;
+      gl.enableVertexAttribArray(l);
+      gl.vertexAttribPointer(l, size, gl.FLOAT, false, stride, offsetFloats * 4);
+    };
+    fattr("aPosition", 3, 0);
+    fattr("aRadiusBase", 1, 3);
+    fattr("aHub", 1, 4);
+    fattr("aStatus", 1, 5);
+    fattr("aLobeIndex", 1, 6);
+    fattr("aColor", 3, 7);
+    fattr("aNodeIndex", 1, 10);
+    fattr("aCorner", 2, 11);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+    gl.bindVertexArray(null);
+
+    const uniforms = getUniformLocations(gl, program, [
+      "uResolution",
+      "uDpr",
+      "uRotX",
+      "uRotY",
+      "uSceneScale",
+      "uCx",
+      "uCy",
+      "uDist",
+      "uHemisphere",
+      "uHalo",
+      "uBloom",
+      "uFocusNodeIndex",
+      "uHoverNodeIndex",
+      "uLobeMul[0]"
+    ]);
+
+    this.nodeProgram = {
+      program,
+      vertexBuffer,
+      indexBuffer,
+      vao,
+      uniforms,
+      buf,
+      centers,
+      nodeCount,
+      projZ: new Float32Array(nodeCount),
+      sortScratch: new Int32Array(nodeCount),
+      baseIndices,
+      indexScratch: new Uint32Array(nodeCount * 6)
+    };
+    this.nodeGraph = graph;
+    return this.nodeProgram;
+  }
+
+  /**
+   * Draw the node sprite pass for one hemisphere.
+   *
+   * hemisphere = +1 draws far nodes (projected z > 0); -1 draws near nodes (z <= 0).
+   * Each frame the CPU projects each node's single center z (pure arithmetic, no
+   * allocation), partitions far/near, stably sorts each group by z DESCENDING
+   * (tiebreak = node index, matching Canvas2D's stable sort over nodeProjs in
+   * graph order), then uploads the sorted 6-index quad blocks and issues ONE
+   * indexed draw. The vertex shader also re-checks far-ness and culls quads whose
+   * far-ness != the requested pass (defense-in-depth; the CPU partition already
+   * excludes them), plus the alpha<0.05 cull.
+   *
+   * Blend: source-over premultiplied (ONE, ONE_MINUS_SRC_ALPHA). Each node's layer
+   * stack is composited in-fragment, then blended onto the framebuffer.
+   */
+  private drawNodes(
+    gl: WebGL2RenderingContext,
+    graph: BrainGraph,
+    proj: ProjectionOpts,
+    hemisphere: 1 | -1,
+    lobeMul: Float32Array,
+    focusIdx: number,
+    hoverIdx: number
+  ): void {
+    const np = this.ensureNodeProgram(gl, graph);
+    if (np.nodeCount === 0) return;
+
+    // ---- CPU z-only projection per node (no per-node allocation) ----
+    const cosY = Math.cos(proj.rotY);
+    const sinY = Math.sin(proj.rotY);
+    const cosX = Math.cos(proj.rotX);
+    const sinX = Math.sin(proj.rotX);
+    const ce = np.centers;
+    const projZ = np.projZ;
+    for (let i = 0; i < np.nodeCount; i++) {
+      const x = ce[i * 3 + 0];
+      const y = ce[i * 3 + 1];
+      const z = ce[i * 3 + 2];
+      const z1 = -x * sinY + z * cosY;
+      const z2 = y * sinX + z1 * cosX;
+      projZ[i] = z2;
+    }
+
+    // ---- Partition + stable sort (descending z, tiebreak node index) ----
+    const wantFar = hemisphere > 0;
+    const sort = np.sortScratch;
+    let n = 0;
+    for (let i = 0; i < np.nodeCount; i++) {
+      const isFar = projZ[i] > 0;
+      if (isFar === wantFar) sort[n++] = i;
+    }
+    if (n === 0) return;
+    const slice = sort.subarray(0, n);
+    // JS sort is stable in V8; ties keep ascending node index (matches Canvas2D's
+    // stable .sort((a,b)=>b.z-a.z) over nodeProjs in graph order).
+    slice.sort((a, b) => projZ[b] - projZ[a]);
+
+    // ---- Build sorted global element-index order (6 per node), upload ----
+    const baseIndices = np.baseIndices;
+    const scratch = np.indexScratch;
+    let o = 0;
+    for (let i = 0; i < n; i++) {
+      const node = slice[i];
+      const ib = node * 6;
+      for (let k = 0; k < 6; k++) {
+        scratch[o++] = baseIndices[ib + k];
+      }
+    }
+    const count = o;
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
+    gl.useProgram(np.program);
+    gl.bindVertexArray(np.vao);
+
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, np.indexBuffer);
+    gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, scratch, 0, count);
+
+    const wDpr = Math.floor(this.width * this.dpr);
+    const hDpr = Math.floor(this.height * this.dpr);
+    gl.uniform2f(np.uniforms.uResolution, wDpr, hDpr);
+    gl.uniform1f(np.uniforms.uDpr, this.dpr);
+    gl.uniform1f(np.uniforms.uRotX, proj.rotX);
+    gl.uniform1f(np.uniforms.uRotY, proj.rotY);
+    gl.uniform1f(np.uniforms.uSceneScale, proj.scale);
+    gl.uniform1f(np.uniforms.uCx, proj.cx);
+    gl.uniform1f(np.uniforms.uCy, proj.cy);
+    gl.uniform1f(np.uniforms.uDist, proj.dist);
+    gl.uniform1f(np.uniforms.uHemisphere, wantFar ? 1 : -1);
+    gl.uniform1f(np.uniforms.uHalo, graph.CHAOS.halo);
+    gl.uniform1f(np.uniforms.uBloom, graph.CHAOS.bloom);
+    gl.uniform1f(np.uniforms.uFocusNodeIndex, focusIdx);
+    gl.uniform1f(np.uniforms.uHoverNodeIndex, hoverIdx);
+    gl.uniform1fv(np.uniforms["uLobeMul[0]"], lobeMul);
 
     gl.drawElements(gl.TRIANGLES, count, gl.UNSIGNED_INT, 0);
 

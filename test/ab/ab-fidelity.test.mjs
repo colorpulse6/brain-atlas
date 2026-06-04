@@ -458,6 +458,97 @@ test.describe("WebGL edges match Canvas2D", () => {
   }
 });
 
+test.describe("WebGL nodes match Canvas2D", () => {
+  let page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto(`file://${HARNESS_HTML}`);
+    await page.waitForFunction(() => typeof window.renderFrame === "function");
+  });
+
+  test.afterAll(async () => {
+    await page?.close();
+  });
+
+  // Cases exercise: palettes (lobe + node colors), a rotation that splits far/near
+  // (the two sorted node draws), focusId on a hub (1.25 radius bump + that hub's
+  // ring + crosshair) and hoverId on a non-hub node (1.18 bump). Archived/dormant
+  // nodes are dimmed in every case (the fixture contains them — status 0.30/0.55).
+  // background + haze + cloud + edges + nodes all enabled so the A/B covers the full
+  // layered composite the nodes blend onto (source-over, in-fragment layered).
+  const NODE_CASES = [
+    ...PALETTES.map((palette) => ({ palette, rot: { x: -0.15, y: 0.55 }, overrides: {} })),
+    // Rotated camera splits which nodes fall on each side of z = 0.
+    { palette: "graphite", rot: { x: 0.3, y: 1.2 }, overrides: {} },
+    // Focus on a hub: 1.25 radius bump; the focus node is a hub → ring + crosshair.
+    { palette: "graphite", rot: { x: -0.15, y: 0.55 }, overrides: { focusId: FIXTURE_NODE_IDS.projectHub } },
+    // Hover on a non-hub node: 1.18 radius bump.
+    { palette: "graphite", rot: { x: -0.15, y: 0.55 }, overrides: { hoverId: FIXTURE_NODE_IDS.nonHub } }
+  ];
+
+  for (const { palette, rot, overrides } of NODE_CASES) {
+    const caseName = [
+      `palette=${palette}`,
+      `rot=(${rot.x},${rot.y})`,
+      Object.entries(overrides)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(",") || "base"
+    ].join(" ");
+
+    test(caseName, async () => {
+      const base = {
+        palette,
+        rot,
+        zoom: 1,
+        dpr: 1,
+        now: 1000,
+        width: 480,
+        height: 360,
+        focusId: null,
+        hoverId: null,
+        highlightLobe: null,
+        enabledPasses: ["background", "haze", "cloud", "edges", "nodes"],
+        ...overrides
+      };
+
+      const urlCanvas = await renderFrame(page, { ...base, renderer: "canvas2d" });
+      const urlGl = await renderFrame(page, { ...base, renderer: "webgl2" });
+
+      expect(urlCanvas).toBeTruthy();
+      expect(urlGl).toBeTruthy();
+
+      const imgA = decodePng(urlCanvas);
+      const imgB = decodePng(urlGl);
+      expect(imgA.width).toBe(imgB.width);
+      expect(imgA.height).toBe(imgB.height);
+
+      const { width, height } = imgA;
+      const mismatched = pixelmatch(imgA.data, imgB.data, null, width, height, { threshold: 0.1 });
+
+      // Nodes are filled circles (halo + core + white dot) plus, for hubs, a thin
+      // 0.8px ring + crosshair. The WebGL path composites these layers in-fragment
+      // (premultiplied source-over, mathematically identical to Canvas2D's
+      // sequential source-over draws) and approximates Canvas2D's sub-pixel
+      // arc()/stroke() with a ~1 device-px analytic coverage edge. On filled
+      // circles the AA boundary is a smaller fraction of node area than the cloud's
+      // tiny dots, so the per-node scatter is low; hub rings/crosshairs add some
+      // thin-stroke AA boundary. Measured across these cases: 21-107 scattered px
+      // on a 480x360 (172800 px) frame — 0.01%-0.06%, never regional; the focus-hub
+      // case (1.25x bump + ring + crosshair → most thin-stroke AA) is the worst.
+      // A LARGE or STRUCTURED diff (missing halos, wrong dim, crosshair missing/wrong,
+      // focus/hover bump absent, wrong sort) is thousands of px / regional and is NOT
+      // tolerated — fix the shader/sort, do NOT inflate this budget. Budget < 0.15% of
+      // pixels (~260 px) leaves ~2.4x headroom over the worst case while catching a bug.
+      const budget = Math.ceil(width * height * 0.0015);
+      expect(
+        mismatched,
+        `${caseName}: ${mismatched} mismatched pixels (budget ${budget})`
+      ).toBeLessThanOrEqual(budget);
+    });
+  }
+});
+
 test.describe("Canvas2D reactivity check", () => {
   let page;
 

@@ -480,3 +480,253 @@ void main() {
   outColor = vec4(vColor * a, a);
 }
 `;
+
+// ============================================================
+// NODE PASS (Task 10)
+// ============================================================
+//
+// Each node is ONE screen-space QUAD (6 verts) sized to cover the node's full
+// extent. The fragment shader composites the node's OWN layers in Canvas2D
+// order — halo → core → white dot → [hub ring → crosshair] — into a single
+// PREMULTIPLIED result, then that result is source-over blended onto the
+// framebuffer with blendFunc(ONE, ONE_MINUS_SRC_ALPHA).
+//
+// Why this is EXACT: source-over is associative. Compositing the node's layers
+// over transparent and then over the framebuffer equals Canvas2D's sequential
+// layer-over-framebuffer draws (every node layer is drawn source-over in
+// renderer.ts drawNode). The whole node stack draws atomically per quad; nodes
+// are z-sorted back-to-front on the CPU (same as the edge pass) so the
+// per-node source-over order matches Canvas2D.
+//
+// Reproduces drawNode() in renderer.ts EXACTLY:
+//   isHover = id == hoverId; isFocus = id == focusId  (via uHoverNodeIndex /
+//             uFocusNodeIndex compared to aNodeIndex).
+//   radius  = nodeRadius * max(0.55, pr.scale) * (isHover?1.18 : isFocus?1.25 : 1)
+//   fade    = max(0.32, 1 - pr.depth * 0.75)
+//   dim     = status==archived ? 0.30 : status==dormantRelevant ? 0.55 : 1
+//   alpha   = fade * dim * uLobeMul[lobeIndex]
+//   CULL if alpha < 0.05 (quad pushed off-screen in the VS).
+//
+//   HALO (radial gradient c@0 → 0@1, source-over): haloRadius = radius*3.6*halo;
+//     layer alpha = 0.32*alpha*bloom * clamp(1 - dist/haloRadius, 0, 1), color = node.color.
+//   CORE (filled circle radius `radius`): color node.color,
+//     layer alpha = min(1, alpha*0.93) * coverage.
+//   WHITE DOT (filled circle radius max(0.7, radius*0.42)): color white,
+//     layer alpha = min(1, alpha) * coverage.
+//   HUB RING (stroked circle radius radius+4, lineWidth 0.8): color node.color,
+//     layer alpha = min(1, 0.55*alpha) * annulusCoverage.
+//   HUB CROSSHAIR (two lines through center, lineWidth 0.8, half-length radius*3.2):
+//     color node.color, layer alpha = min(1, 0.45*alpha) * crosshairCoverage.
+//
+// All coverage AA uses DEVICE px (×dpr), matching the cloud/edge approach: a ~1
+// device-px analytic edge on each filled/stroked primitive.
+//
+// Bounding quad: the quad half-extent (in CSS px) is the max of haloRadius,
+// (radius + 4 + halfStroke), and (radius*3.2 + halfStroke) so every layer
+// (including the crosshair arms and the outer edge of the ring stroke) fits.
+
+/** Node sprite vertex shader: projects the node, expands to a bounding quad. */
+export const NODE_VS = `#version 300 es
+precision highp float;
+
+in vec3 aPosition;     // model-space xyz (from _3dLobe)
+in float aRadiusBase;  // base nodeRadius (hub?6.5 : 2.6+min(3.4,deg*0.42))
+in float aHub;         // 1 = hub, 0 = non-hub
+in float aStatus;      // 0=active, 1=dormantRelevant, 2=archived
+in float aLobeIndex;   // lobe index 0-5
+in vec3 aColor;        // node color rgb [0,1]
+in float aNodeIndex;   // node-buffer index (focus/hover match)
+in vec2 aCorner;       // quad corner offset in [-1, 1]^2
+
+uniform vec2 uResolution;  // device-px framebuffer size (w, h)
+uniform float uDpr;        // device pixel ratio
+uniform float uRotX;
+uniform float uRotY;
+uniform float uSceneScale; // min(w,h) * 0.32 * zoom
+uniform float uCx;
+uniform float uCy;
+uniform float uDist;       // 3.4
+uniform float uHemisphere; // +1.0 = far pass (z>0), -1.0 = near pass (z<=0)
+uniform float uHalo;       // graph.CHAOS.halo
+uniform float uBloom;      // graph.CHAOS.bloom
+uniform float uLobeMul[6]; // lobeVisibilityMultiplier per lobe
+uniform float uFocusNodeIndex; // node index of focus node, or -1
+uniform float uHoverNodeIndex; // node index of hover node, or -1
+
+out vec2 vLocalDev;     // fragment offset from node center, in device px
+out float vAlpha;       // per-node straight alpha
+out float vRadiusDev;   // node radius in device px
+out float vHaloRadiusDev; // halo radius in device px
+flat out float vHub;    // hub flag (1/0)
+flat out vec3 vColor;   // node color
+flat out float vBloom;  // CHAOS.bloom
+
+void main() {
+  float cosY = cos(uRotY);
+  float sinY = sin(uRotY);
+  float cosX = cos(uRotX);
+  float sinX = sin(uRotX);
+
+  float rotatedX = aPosition.x * cosY + aPosition.z * sinY;
+  float z1 = -aPosition.x * sinY + aPosition.z * cosY;
+  float rotatedY = aPosition.y * cosX - z1 * sinX;
+  float z2 = aPosition.y * sinX + z1 * cosX;
+
+  float f = uSceneScale / (uDist + z2);
+  float sx = uCx + rotatedX * f * uDist;          // CSS px
+  float sy = uCy - rotatedY * f * uDist;          // CSS px
+  float prScale = uDist / (uDist + z2);
+  float depth = (z2 + 1.5) / 3.0;
+
+  // far = projected z > 0 (matches drawScene's nodeProjs.filter(n=>n.z>0)).
+  bool far = z2 > 0.0;
+  bool wantFar = uHemisphere > 0.0;
+  if (far != wantFar) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0); // off-screen cull
+    vLocalDev = vec2(0.0);
+    vAlpha = 0.0;
+    vRadiusDev = 0.0;
+    vHaloRadiusDev = 0.0;
+    vHub = 0.0;
+    vColor = vec3(0.0);
+    vBloom = 0.0;
+    return;
+  }
+
+  // Hover/focus radius bump (matches drawNode).
+  float nIdx = aNodeIndex;
+  bool isHover = uHoverNodeIndex >= 0.0 && abs(nIdx - uHoverNodeIndex) < 0.5;
+  bool isFocus = uFocusNodeIndex >= 0.0 && abs(nIdx - uFocusNodeIndex) < 0.5;
+  float bump = isHover ? 1.18 : (isFocus ? 1.25 : 1.0);
+
+  // radius = nodeRadius(node) * max(0.55, pr.scale) * bump  (CSS px)
+  float radiusCss = aRadiusBase * max(0.55, prScale) * bump;
+
+  // fade / dim / alpha (drawNode).
+  float fade = max(0.32, 1.0 - depth * 0.75);
+  float dim = aStatus > 1.5 ? 0.30 : (aStatus > 0.5 ? 0.55 : 1.0); // archived/dormant/active
+  int lobe = int(aLobeIndex + 0.5);
+  float alpha = fade * dim * uLobeMul[lobe];
+
+  if (alpha < 0.05) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0); // alpha-cull
+    vLocalDev = vec2(0.0);
+    vAlpha = 0.0;
+    vRadiusDev = 0.0;
+    vHaloRadiusDev = 0.0;
+    vHub = 0.0;
+    vColor = vec3(0.0);
+    vBloom = 0.0;
+    return;
+  }
+
+  // Bounding half-extent in CSS px: max of halo, ring outer, crosshair arm.
+  // Stroke half-width 0.4 (lineWidth 0.8) + ~1 CSS px AA pad.
+  float haloRadiusCss = radiusCss * 3.6 * uHalo;
+  float strokePad = 0.4 + 1.0;
+  float ringOuterCss = radiusCss + 4.0 + strokePad;
+  float crosshairCss = radiusCss * 3.2 + strokePad;
+  float boundCss = haloRadiusCss;
+  if (aHub > 0.5) {
+    boundCss = max(boundCss, max(ringOuterCss, crosshairCss));
+  }
+  // Guard against a zero bound (halo=0 + non-hub): keep at least the core+dot.
+  boundCss = max(boundCss, radiusCss + 1.0);
+
+  vAlpha = alpha;
+  vRadiusDev = radiusCss * uDpr;
+  vHaloRadiusDev = haloRadiusCss * uDpr;
+  vHub = aHub;
+  vColor = aColor;
+  vBloom = uBloom;
+  vLocalDev = aCorner * boundCss * uDpr;
+
+  // Place quad corner at screen(sx,sy) + corner*boundCss (CSS px), then to clip.
+  vec2 cssPx = vec2(sx, sy) + aCorner * boundCss;
+  vec2 devPx = cssPx * uDpr;
+  vec2 ndc = (devPx / uResolution) * 2.0 - 1.0;
+  ndc.y = -ndc.y;
+  gl_Position = vec4(ndc, 0.0, 1.0);
+}
+`;
+
+/** Node fragment shader: in-fragment layered compositing, premultiplied source-over. */
+export const NODE_FS = `#version 300 es
+precision highp float;
+
+uniform float uDpr;    // device pixel ratio (CSS→device px scale for layer geometry)
+
+in vec2 vLocalDev;     // fragment offset from node center (device px)
+in float vAlpha;       // per-node straight alpha
+in float vRadiusDev;   // node radius (device px)
+in float vHaloRadiusDev; // halo radius (device px)
+flat in float vHub;
+flat in vec3 vColor;
+flat in float vBloom;
+
+out vec4 outColor;
+
+// Source-over a straight-color layer (premultiplied) onto a premultiplied
+// accumulator: acc = layerPremult + acc*(1 - layerAlpha).
+vec4 over(vec4 acc, vec3 color, float layerAlpha) {
+  vec3 layerPremult = color * layerAlpha;
+  return vec4(layerPremult + acc.rgb * (1.0 - layerAlpha),
+              layerAlpha + acc.a * (1.0 - layerAlpha));
+}
+
+void main() {
+  float dist = length(vLocalDev);          // device px from node center
+  float lx = vLocalDev.x;
+  float ly = vLocalDev.y;
+
+  // Accumulator starts transparent (premultiplied rgba = 0).
+  vec4 acc = vec4(0.0);
+
+  // ---- HALO (bottom): radial gradient c@0 → 0@1, source-over ----
+  // Canvas2D fills a haloRadius circle whose alpha falls 1→0 linearly with t.
+  if (vHaloRadiusDev > 0.0) {
+    float t = clamp(dist / vHaloRadiusDev, 0.0, 1.0);
+    float haloA = 0.32 * vAlpha * vBloom * (1.0 - t);
+    acc = over(acc, vColor, haloA);
+  }
+
+  // ---- CORE: filled circle of the node radius, color node.color ----
+  float coreCov = clamp(vRadiusDev - dist + 0.5, 0.0, 1.0);
+  float coreA = min(1.0, vAlpha * 0.93) * coreCov;
+  acc = over(acc, vColor, coreA);
+
+  // ---- WHITE DOT: filled circle radius max(0.7, radius*0.42), white ----
+  // max(0.7, radius*0.42) is in CSS px; 0.7 CSS px → 0.7*uDpr device px.
+  float dotRadiusDev = max(0.7 * uDpr, vRadiusDev * 0.42);
+  float dotCov = clamp(dotRadiusDev - dist + 0.5, 0.0, 1.0);
+  float dotA = min(1.0, vAlpha) * dotCov;
+  acc = over(acc, vec3(1.0), dotA);
+
+  if (vHub > 0.5) {
+    // Stroke half-width 0.4 CSS px → device px.
+    float halfStrokeDev = 0.4 * uDpr;
+
+    // ---- HUB RING: stroked circle radius radius+4, lineWidth 0.8 ----
+    float ringRadiusDev = vRadiusDev + 4.0 * uDpr;
+    float ringDist = abs(dist - ringRadiusDev);
+    float ringCov = clamp(halfStrokeDev - ringDist + 0.5, 0.0, 1.0);
+    float ringA = min(1.0, 0.55 * vAlpha) * ringCov;
+    acc = over(acc, vColor, ringA);
+
+    // ---- HUB CROSSHAIR: two lines through center, half-length radius*3.2 ----
+    float armDev = vRadiusDev * 3.2;
+    // Horizontal arm: |ly| within halfStroke AND |lx| <= armDev.
+    float hCov = clamp(halfStrokeDev - abs(ly) + 0.5, 0.0, 1.0)
+               * clamp(armDev - abs(lx) + 0.5, 0.0, 1.0);
+    // Vertical arm: |lx| within halfStroke AND |ly| <= armDev.
+    float vCov = clamp(halfStrokeDev - abs(lx) + 0.5, 0.0, 1.0)
+               * clamp(armDev - abs(ly) + 0.5, 0.0, 1.0);
+    float crossCov = max(hCov, vCov);
+    float crossA = min(1.0, 0.45 * vAlpha) * crossCov;
+    acc = over(acc, vColor, crossA);
+  }
+
+  // acc is already premultiplied. Output for blendFunc(ONE, ONE_MINUS_SRC_ALPHA).
+  outColor = acc;
+}
+`;
