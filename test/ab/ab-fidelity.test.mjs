@@ -138,6 +138,70 @@ test.describe("Canvas2D self-check (0 pixel diff)", () => {
   }
 });
 
+test.describe("WebGL background matches Canvas2D", () => {
+  let page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto(`file://${HARNESS_HTML}`);
+    await page.waitForFunction(() => typeof window.renderFrame === "function");
+  });
+
+  test.afterAll(async () => {
+    await page?.close();
+  });
+
+  const BG_CASES = [
+    ...PALETTES.map((palette) => ({ palette, dpr: 1 })),
+    // dpr:2 case exercises the gl_FragCoord.y / uDpr Y-flip path at non-trivial dpr.
+    { palette: "graphite", dpr: 2 }
+  ];
+
+  for (const { palette, dpr } of BG_CASES) {
+    test(`palette=${palette} dpr=${dpr} background pass`, async () => {
+      const base = {
+        palette,
+        rot: { x: 0.3, y: 1.2 },
+        zoom: 1.2,
+        dpr,
+        now: 1000,
+        width: 480,
+        height: 360,
+        focusId: null,
+        hoverId: null,
+        highlightLobe: null,
+        enabledPasses: ["background"]
+      };
+
+      const urlCanvas = await renderFrame(page, { ...base, renderer: "canvas2d" });
+      const urlGl = await renderFrame(page, { ...base, renderer: "webgl2" });
+
+      expect(urlCanvas).toBeTruthy();
+      expect(urlGl).toBeTruthy();
+
+      const imgA = decodePng(urlCanvas);
+      const imgB = decodePng(urlGl);
+      expect(imgA.width).toBe(imgB.width);
+      expect(imgA.height).toBe(imgB.height);
+
+      const { width, height } = imgA;
+      const mismatched = pixelmatch(imgA.data, imgB.data, null, width, height, { threshold: 0.1 });
+
+      // The radial gradient is a smooth field; a handful of pixels along the
+      // bg->bgFar interpolation band can differ by 1/255 due to GPU float
+      // rounding vs Canvas2D's gradient rasterizer. We allow a tiny budget
+      // (< 0.2% of pixels). A large diff (whole regions) would indicate a real
+      // fidelity bug (Y-flip, dpr conversion, or stop interpolation) and is NOT
+      // tolerated — fix the shader, don't loosen this.
+      const budget = Math.ceil(width * height * 0.002);
+      expect(
+        mismatched,
+        `palette=${palette} dpr=${dpr}: ${mismatched} mismatched pixels (budget ${budget})`
+      ).toBeLessThanOrEqual(budget);
+    });
+  }
+});
+
 test.describe("Canvas2D reactivity check", () => {
   let page;
 

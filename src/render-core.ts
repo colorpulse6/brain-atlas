@@ -80,7 +80,6 @@ const LOBE_KIND: Record<LobeName, string> = {
 
 export abstract class RenderCore {
   protected canvas: HTMLCanvasElement | null = null;
-  protected ctx: CanvasRenderingContext2D | null = null;
   protected getGraph: (() => BrainGraph) | null = null;
   protected options: BrainRendererOptions = {
     idleAutoRotate: true,
@@ -110,26 +109,70 @@ export abstract class RenderCore {
 
   protected deterministic = false;
 
+  /**
+   * Pass-gating test seam. null = render all passes (production default).
+   * When a Set is supplied, only passes whose name is present are drawn.
+   * Lets the A/B harness compare matching SUBSETS of passes while they are
+   * built incrementally (e.g. {"background"} now, {"background","haze"} next).
+   */
+  protected enabledPasses: Set<string> | null = null;
+
   setDeterministic(on: boolean): void { this.deterministic = on; }
+
+  /** Test-only: restrict drawScene to a subset of passes (null = all passes). */
+  setEnabledPassesForTest(passes: Set<string> | null): void {
+    this.enabledPasses = passes;
+    this.requestImmediateFrame();
+  }
+
+  /** True if the named pass should be drawn under the current gating. */
+  protected passEnabled(name: string): boolean {
+    return !this.enabledPasses || this.enabledPasses.has(name);
+  }
 
   setView(view: { rot?: { x: number; y: number }; zoom?: number; dpr?: number }): void {
     if (view.rot) this.rot = { ...view.rot };
     if (typeof view.zoom === "number") this.zoom = view.zoom;
     if (typeof view.dpr === "number") {
       this.forcedDpr = view.dpr;
-      this.resize(); // resizes backing store + transform using forcedDpr; guards on canvas/ctx
+      this.resize(); // resizes backing store + transform using forcedDpr; guards on canvas/isReady
     }
     this.requestImmediateFrame();
   }
 
   protected abstract drawScene(now: number): void;
 
+  /**
+   * Acquire the rendering surface(s) for `canvas`. Subclass responsibility:
+   * the Canvas2D renderer grabs a 2D context; the WebGL renderer grabs a
+   * WebGL2 context and creates its overlay canvas. Returns false on failure
+   * (e.g. no WebGL2 support) — `start()` will then stop and throw.
+   */
+  protected abstract acquireSurface(canvas: HTMLCanvasElement): boolean;
+
+  /**
+   * Size the backing store(s) and set transforms/viewport using the already
+   * computed this.width / this.height / this.dpr. Called by base resize().
+   */
+  protected abstract resizeSurface(): void;
+
+  /** True once the subclass surface is acquired and ready to draw. */
+  protected abstract isReady(): boolean;
+
+  /**
+   * The element that receives pointer/wheel/contextmenu listeners and that the
+   * host view should size. Base attaches listeners to this.canvas; the WebGL
+   * renderer's interaction target is the same WebGL canvas.
+   */
+  getInteractionTarget(): HTMLCanvasElement | null {
+    return this.canvas;
+  }
+
   protected draw = (now: number): void => {
     this.raf = null;
     const canvas = this.canvas;
-    const ctx = this.ctx;
     const graph = this.getGraph?.();
-    if (!canvas || !ctx || !graph) return;
+    if (!canvas || !this.isReady() || !graph) return;
 
     this.ensureLobePositions(graph.nodes);
     if (!this.drag && !this.deterministic && this.options.idleAutoRotate && now - this.lastUserAt > 1800) {
@@ -152,10 +195,10 @@ export abstract class RenderCore {
 
   start(canvas: HTMLCanvasElement, getGraph: () => BrainGraph, options: Partial<BrainRendererOptions> = {}): void {
     this.stop();
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("Brain Atlas requires Canvas 2D support.");
+    if (!this.acquireSurface(canvas)) {
+      throw new Error("Brain Atlas could not acquire a rendering surface.");
+    }
     this.canvas = canvas;
-    this.ctx = ctx;
     this.getGraph = getGraph;
     this.options = { ...this.options, ...options };
     this.lastUserAt = performance.now();
@@ -190,15 +233,21 @@ export abstract class RenderCore {
       this.canvas.removeEventListener("wheel", this.onWheel);
       this.canvas.removeEventListener("contextmenu", this.onContextMenu);
     }
+    this.releaseSurface();
     this.canvas = null;
-    this.ctx = null;
     this.getGraph = null;
     this.drag = null;
   }
 
+  /**
+   * Release subclass-owned surface resources (contexts, extra canvases, GL
+   * objects). Called by stop() before this.canvas is cleared. Default no-op.
+   */
+  protected releaseSurface(): void {}
+
   setOptions(options: Partial<BrainRendererOptions>): void {
     this.options = { ...this.options, ...options };
-    if (this.canvas && this.ctx && ("performancePreset" in options || "mobileMode" in options)) {
+    if (this.canvas && this.isReady() && ("performancePreset" in options || "mobileMode" in options)) {
       this.resize();
     }
     this.requestImmediateFrame();
@@ -479,14 +528,12 @@ export abstract class RenderCore {
   }
 
   protected resize(): void {
-    if (!this.canvas || !this.ctx) return;
+    if (!this.canvas || !this.isReady()) return;
     const rect = this.canvas.getBoundingClientRect();
     this.width = Math.max(1, rect.width);
     this.height = Math.max(1, rect.height);
     this.dpr = this.forcedDpr ?? Math.min(this.maxDevicePixelRatio(), window.devicePixelRatio || 1);
-    this.canvas.width = Math.floor(this.width * this.dpr);
-    this.canvas.height = Math.floor(this.height * this.dpr);
-    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    this.resizeSurface();
     this.requestImmediateFrame();
   }
 

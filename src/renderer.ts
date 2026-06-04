@@ -9,10 +9,31 @@ export type { BrainRendererOptions } from "./render-core.ts";
 
 export class BrainRenderer extends RenderCore {
   private cloud: SurfacePoint[];
+  protected ctx: CanvasRenderingContext2D | null = null;
 
   constructor() {
     super();
     this.cloud = this.buildCloud();
+  }
+
+  protected acquireSurface(canvas: HTMLCanvasElement): boolean {
+    this.ctx = canvas.getContext("2d");
+    return !!this.ctx;
+  }
+
+  protected isReady(): boolean {
+    return !!this.ctx;
+  }
+
+  protected resizeSurface(): void {
+    if (!this.canvas || !this.ctx) return;
+    this.canvas.width = Math.floor(this.width * this.dpr);
+    this.canvas.height = Math.floor(this.height * this.dpr);
+    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+  }
+
+  protected releaseSurface(): void {
+    this.ctx = null;
   }
 
   protected drawScene(now: number): void {
@@ -34,16 +55,23 @@ export class BrainRenderer extends RenderCore {
     });
     const lobeMul = (lobe?: LobeName) => lobeVisibilityMultiplier(lobe, this.options.enabledLobes, this.highlightLobe);
 
+    // Signal spawning is state mutation (shared across passes), not a draw pass;
+    // keep it unconditional so the "signals" pass stays deterministic when gated.
     this.spawnSignals(now, graph, interLobeEdges);
 
-    const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(this.width, this.height) * 0.75);
-    bg.addColorStop(0, pal.bg);
-    bg.addColorStop(0.55, pal.bg);
-    bg.addColorStop(1, pal.bgFar);
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, this.width, this.height);
+    // Pass: background (radial gradient fill).
+    if (this.passEnabled("background")) {
+      const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(this.width, this.height) * 0.75);
+      bg.addColorStop(0, pal.bg);
+      bg.addColorStop(0.55, pal.bg);
+      bg.addColorStop(1, pal.bgFar);
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, this.width, this.height);
+    }
 
-    this.drawLobeHaze(ctx, project, scale, graph, lobeMul);
+    // Pass: haze (lobe glow gradients, additive).
+    if (this.passEnabled("haze")) this.drawLobeHaze(ctx, project, scale, graph, lobeMul);
+
     const cloudProj = this.cloud.map((p) => ({
       p,
       pr: project(p),
@@ -54,38 +82,63 @@ export class BrainRenderer extends RenderCore {
       .map((node) => ({ node, ...project(node._3dLobe as Vec3) }));
     const edgeProjs = this.projectEdges(graph, project);
 
-    ctx.globalCompositeOperation = "lighter";
-    for (const cp of cloudProj) {
-      if (cp.pr.z <= 0) continue;
-      this.drawCloudPoint(ctx, cp, true, graph, lobeMul);
-    }
-    ctx.globalCompositeOperation = "source-over";
-
-    for (const edge of edgeProjs.filter((e) => e.z > 0).sort((a, b) => b.z - a.z)) {
-      this.drawEdge(ctx, edge, true, graph, lobeMul);
-    }
-    for (const node of nodeProjs.filter((n) => n.z > 0).sort((a, b) => b.z - a.z)) {
-      this.drawNode(ctx, node, graph, lobeMul);
+    // Pass: cloud (far half, z > 0), additive.
+    if (this.passEnabled("cloud")) {
+      ctx.globalCompositeOperation = "lighter";
+      for (const cp of cloudProj) {
+        if (cp.pr.z <= 0) continue;
+        this.drawCloudPoint(ctx, cp, true, graph, lobeMul);
+      }
+      ctx.globalCompositeOperation = "source-over";
     }
 
-    ctx.globalCompositeOperation = "lighter";
-    for (const cp of cloudProj) {
-      if (cp.pr.z > 0) continue;
-      this.drawCloudPoint(ctx, cp, false, graph, lobeMul);
+    // Pass: edges (far half, z > 0).
+    if (this.passEnabled("edges")) {
+      for (const edge of edgeProjs.filter((e) => e.z > 0).sort((a, b) => b.z - a.z)) {
+        this.drawEdge(ctx, edge, true, graph, lobeMul);
+      }
     }
-    ctx.globalCompositeOperation = "source-over";
+    // Pass: nodes (far half, z > 0).
+    if (this.passEnabled("nodes")) {
+      for (const node of nodeProjs.filter((n) => n.z > 0).sort((a, b) => b.z - a.z)) {
+        this.drawNode(ctx, node, graph, lobeMul);
+      }
+    }
 
-    for (const edge of edgeProjs.filter((e) => e.z <= 0).sort((a, b) => b.z - a.z)) {
-      this.drawEdge(ctx, edge, false, graph, lobeMul);
-    }
-    for (const node of nodeProjs.filter((n) => n.z <= 0).sort((a, b) => b.z - a.z)) {
-      this.drawNode(ctx, node, graph, lobeMul);
+    // Pass: cloud (near half, z <= 0), additive.
+    if (this.passEnabled("cloud")) {
+      ctx.globalCompositeOperation = "lighter";
+      for (const cp of cloudProj) {
+        if (cp.pr.z > 0) continue;
+        this.drawCloudPoint(ctx, cp, false, graph, lobeMul);
+      }
+      ctx.globalCompositeOperation = "source-over";
     }
 
-    this.drawSignals(ctx, now, project, lobeMul);
-    if (this.options.showLobeLabels) this.drawLobeLabels(ctx, project, graph, lobeStats, lobeMul);
-    if (this.options.showLobeLabels) this.drawNodeLabels(ctx, nodeProjs, graph, lobeMul);
-    this.drawCompass(ctx, graph);
+    // Pass: edges (near half, z <= 0).
+    if (this.passEnabled("edges")) {
+      for (const edge of edgeProjs.filter((e) => e.z <= 0).sort((a, b) => b.z - a.z)) {
+        this.drawEdge(ctx, edge, false, graph, lobeMul);
+      }
+    }
+    // Pass: nodes (near half, z <= 0).
+    if (this.passEnabled("nodes")) {
+      for (const node of nodeProjs.filter((n) => n.z <= 0).sort((a, b) => b.z - a.z)) {
+        this.drawNode(ctx, node, graph, lobeMul);
+      }
+    }
+
+    // Pass: signals (additive particle trails).
+    if (this.passEnabled("signals")) this.drawSignals(ctx, now, project, lobeMul);
+
+    // Pass: labels (lobe labels + node labels).
+    if (this.passEnabled("labels")) {
+      if (this.options.showLobeLabels) this.drawLobeLabels(ctx, project, graph, lobeStats, lobeMul);
+      if (this.options.showLobeLabels) this.drawNodeLabels(ctx, nodeProjs, graph, lobeMul);
+    }
+
+    // Pass: compass (orientation gizmo).
+    if (this.passEnabled("compass")) this.drawCompass(ctx, graph);
   }
 
   private drawLobeHaze(
