@@ -281,6 +281,91 @@ test.describe("WebGL haze matches Canvas2D", () => {
   }
 });
 
+test.describe("WebGL cloud matches Canvas2D", () => {
+  let page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto(`file://${HARNESS_HTML}`);
+    await page.waitForFunction(() => typeof window.renderFrame === "function");
+  });
+
+  test.afterAll(async () => {
+    await page?.close();
+  });
+
+  // Cases: each palette at the default rotation, plus a rotated case (exercises
+  // the far/near hemisphere split — the two cloud draw passes) and a highlight
+  // case (exercises uLobeMul: highlighted lobe = 1, others = 0.16).
+  // background + haze + cloud are all enabled so the A/B covers the full layered
+  // composite the cloud accumulates onto.
+  const CLOUD_CASES = [
+    ...PALETTES.map((palette) => ({ palette, rot: { x: -0.15, y: 0.55 }, overrides: {} })),
+    // Rotated camera: a different rot shifts which points fall on each side of
+    // z = 0, exercising the FAR (z>0) and NEAR (z<=0) hemisphere passes.
+    { palette: "graphite", rot: { x: 0.3, y: 1.2 }, overrides: {} },
+    // Highlight: drives uLobeMul to 1 for "frontal", 0.16 for the rest.
+    { palette: "graphite", rot: { x: -0.15, y: 0.55 }, overrides: { highlightLobe: "frontal" } }
+  ];
+
+  for (const { palette, rot, overrides } of CLOUD_CASES) {
+    const caseName = [
+      `palette=${palette}`,
+      `rot=(${rot.x},${rot.y})`,
+      Object.entries(overrides)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(",") || "base"
+    ].join(" ");
+
+    test(caseName, async () => {
+      const base = {
+        palette,
+        rot,
+        zoom: 1,
+        dpr: 1,
+        now: 1000,
+        width: 480,
+        height: 360,
+        focusId: null,
+        hoverId: null,
+        highlightLobe: null,
+        enabledPasses: ["background", "haze", "cloud"],
+        ...overrides
+      };
+
+      const urlCanvas = await renderFrame(page, { ...base, renderer: "canvas2d" });
+      const urlGl = await renderFrame(page, { ...base, renderer: "webgl2" });
+
+      expect(urlCanvas).toBeTruthy();
+      expect(urlGl).toBeTruthy();
+
+      const imgA = decodePng(urlCanvas);
+      const imgB = decodePng(urlGl);
+      expect(imgA.width).toBe(imgB.width);
+      expect(imgA.height).toBe(imgB.height);
+
+      const { width, height } = imgA;
+      const mismatched = pixelmatch(imgA.data, imgB.data, null, width, height, { threshold: 0.1 });
+
+      // The cloud is ~1648 tiny additive dots (CSS radius 0.95 / 1.2). The WebGL
+      // path approximates Canvas2D's sub-pixel arc()+fill with an analytic ~1
+      // device-px coverage edge; on dots this small a handful of pixels can land
+      // 1/255 apart at the AA boundary. Measured mismatches across these cases
+      // are 0-18 px on a 480x360 (172800 px) frame — scattered, never regional;
+      // daylight and the highlight case are an exact 0. Budget < 0.05% of pixels
+      // (~86 px) leaves ~4.8x headroom over the worst case while still catching a
+      // real bug (projection, far/near hemisphere selection, twinkle, coverage),
+      // which would produce thousands of pixels / a whole half missing. Fix such
+      // a regression — do NOT inflate this budget.
+      const budget = Math.ceil(width * height * 0.0005);
+      expect(
+        mismatched,
+        `${caseName}: ${mismatched} mismatched pixels (budget ${budget})`
+      ).toBeLessThanOrEqual(budget);
+    });
+  }
+});
+
 test.describe("Canvas2D reactivity check", () => {
   let page;
 

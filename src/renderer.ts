@@ -3,6 +3,7 @@ import { lobeVisibilityMultiplier } from "./lobe-visibility.ts";
 import { displayNodeName } from "./node-display.ts";
 import type { BrainGraph, BrainNode, LobeName, ProjectedPoint, Vec3 } from "./types.ts";
 import type { SurfacePoint } from "./shape.ts";
+import { buildBrainCloud } from "./cloud.ts";
 import { RenderCore, type ProjectedNode, type ProjectedEdge } from "./render-core.ts";
 
 export type { BrainRendererOptions } from "./render-core.ts";
@@ -13,7 +14,7 @@ export class BrainRenderer extends RenderCore {
 
   constructor() {
     super();
-    this.cloud = this.buildCloud();
+    this.cloud = buildBrainCloud();
   }
 
   protected acquireSurface(canvas: HTMLCanvasElement): boolean {
@@ -501,34 +502,6 @@ export class BrainRenderer extends RenderCore {
     }
   }
 
-  private buildCloud(): SurfacePoint[] {
-    const surface = Brain3D.generateSurface(1400, 0.026).map((p, index) => ({
-      ...p,
-      lobe: Brain3D.lobeFor(p),
-      twPhase: (index * 0.731) % (Math.PI * 2),
-      twFreq: 0.4 + (index % 9) / 12
-    }));
-    const cerebellum: SurfacePoint[] = [];
-    const golden = Math.PI * (3 - Math.sqrt(5));
-    for (let index = 0; index < 220; index += 1) {
-      const t = (index + 0.5) / 220;
-      const phi = Math.asin(2 * t - 1);
-      const theta = (golden * index) % (Math.PI * 2);
-      cerebellum.push({
-        ...Brain3D.cerebellumPoint(theta, phi),
-        lobe: "cerebellum",
-        twPhase: (index * 0.91) % (Math.PI * 2),
-        twFreq: 0.5 + (index % 5) / 8
-      });
-    }
-    const stem: SurfacePoint[] = [];
-    for (let index = 0; index < 28; index += 1) {
-      const t = (index / 28) * 0.6;
-      const a = ((index * 1.31) % 1) - 0.5;
-      stem.push({ ...Brain3D.stemPoint(t, a), lobe: "stem", twPhase: index * 0.55, twFreq: 0.3 });
-    }
-    return [...surface, ...cerebellum, ...stem];
-  }
 }
 
 const LOBE_DESCRIPTIONS: Record<LobeName, { sub: string; role: string }> = {

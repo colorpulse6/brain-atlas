@@ -23,9 +23,23 @@ import { sceneProjection, projectPoint } from "./projection.ts";
 import type { ProjectionOpts } from "./projection.ts";
 import { hexToRgb01 } from "./color.ts";
 import { createProgram, getUniformLocations, createStaticBuffer } from "./programs.ts";
-import { BACKGROUND_VS, BACKGROUND_FS, HAZE_VS, HAZE_FS } from "./shaders.ts";
+import { BACKGROUND_VS, BACKGROUND_FS, HAZE_VS, HAZE_FS, CLOUD_VS, CLOUD_FS } from "./shaders.ts";
 import { LOBE_CENTERS } from "../shape.ts";
 import { lobeVisibilityMultiplier } from "../lobe-visibility.ts";
+import { buildBrainCloud } from "../cloud.ts";
+import { buildCloudBuffer, LOBE_INDEX } from "./buffers.ts";
+
+/**
+ * Lobe names ordered by their GPU LOBE_INDEX (0-5). Used to build the 6-entry
+ * uLobeMul / uLobeColors uniform arrays in index order.
+ */
+const LOBE_BY_INDEX: LobeName[] = (() => {
+  const arr: LobeName[] = new Array(6);
+  for (const name in LOBE_INDEX) {
+    arr[LOBE_INDEX[name as LobeName]] = name as LobeName;
+  }
+  return arr;
+})();
 
 interface BackgroundProgram {
   program: WebGLProgram;
@@ -41,6 +55,15 @@ interface HazeProgram {
   uniforms: Record<string, WebGLUniformLocation | null>;
 }
 
+interface CloudProgram {
+  program: WebGLProgram;
+  vertexBuffer: WebGLBuffer;
+  vao: WebGLVertexArrayObject;
+  uniforms: Record<string, WebGLUniformLocation | null>;
+  /** Total vertex count (cloud point count * 6 verts per quad). */
+  vertexCount: number;
+}
+
 export class BrainGLRenderer extends RenderCore {
   private gl: WebGL2RenderingContext | null = null;
   private overlay: HTMLCanvasElement | null = null;
@@ -49,6 +72,7 @@ export class BrainGLRenderer extends RenderCore {
   // Lazily created GL resources (created once, reused across frames).
   private bgProgram: BackgroundProgram | null = null;
   private hazeProgram: HazeProgram | null = null;
+  private cloudProgram: CloudProgram | null = null;
 
   protected acquireSurface(canvas: HTMLCanvasElement): boolean {
     const gl = canvas.getContext("webgl2", {
@@ -129,6 +153,12 @@ export class BrainGLRenderer extends RenderCore {
       gl.deleteProgram(this.hazeProgram.program);
     }
     this.hazeProgram = null;
+    if (gl && this.cloudProgram) {
+      gl.deleteVertexArray(this.cloudProgram.vao);
+      gl.deleteBuffer(this.cloudProgram.vertexBuffer);
+      gl.deleteProgram(this.cloudProgram.program);
+    }
+    this.cloudProgram = null;
     if (this.overlay && this.overlay.parentElement) {
       this.overlay.parentElement.removeChild(this.overlay);
     }
@@ -161,14 +191,32 @@ export class BrainGLRenderer extends RenderCore {
       this.drawHaze(gl, graph, proj);
     }
 
-    // ---- Pass: cloud (point sprites, additive, far then near halves) ---- TODO Task 8
-    // if (this.passEnabled("cloud")) { ... }
+    // Per-frame 6-entry uniform arrays (lobe visibility multiplier + lobe color),
+    // indexed by GPU lobeIndex. These depend only on enabledLobes / highlightLobe
+    // / activePalette — never on geometry — so they cost no buffer rebuild.
+    const lobeMul = new Float32Array(6);
+    const lobeColors = new Float32Array(18);
+    for (let i = 0; i < 6; i++) {
+      const lobe = LOBE_BY_INDEX[i];
+      lobeMul[i] = lobeVisibilityMultiplier(lobe, this.options.enabledLobes, this.highlightLobe);
+      const [r, g, b] = hexToRgb01(this.lobeColor(lobe, graph));
+      lobeColors[i * 3 + 0] = r;
+      lobeColors[i * 3 + 1] = g;
+      lobeColors[i * 3 + 2] = b;
+    }
 
-    // ---- Pass: edges (ribbons, source-over, far then near halves) ---- TODO Task 9
-    // if (this.passEnabled("edges")) { ... }
+    // Back-to-front, hemisphere-interleaved draw order (matches Canvas2D drawScene
+    // and leaves clean slots for the edges/nodes passes — Tasks 9-10).
+    //
+    // FAR hemisphere (projected z > 0), back of the scene:
+    if (this.passEnabled("cloud")) this.drawCloud(gl, proj, now, +1, lobeMul, lobeColors);
+    // if (this.passEnabled("edges")) { /* TODO Task 9: edges far (z > 0) */ }
+    // if (this.passEnabled("nodes")) { /* TODO Task 10: nodes far (z > 0) */ }
 
-    // ---- Pass: nodes (halo + core + white dot + hub ring/crosshair) ---- TODO Task 10
-    // if (this.passEnabled("nodes")) { ... }
+    // NEAR hemisphere (projected z <= 0), front of the scene:
+    if (this.passEnabled("cloud")) this.drawCloud(gl, proj, now, -1, lobeMul, lobeColors);
+    // if (this.passEnabled("edges")) { /* TODO Task 9: edges near (z <= 0) */ }
+    // if (this.passEnabled("nodes")) { /* TODO Task 10: nodes near (z <= 0) */ }
 
     // ---- Pass: signals (additive particle trails) ---- TODO Task 11
     // if (this.passEnabled("signals")) { ... }
@@ -353,6 +401,149 @@ export class BrainGLRenderer extends RenderCore {
 
     // Restore blend state: disable blend so subsequent opaque passes (if any)
     // are not affected. Each pass sets its own blend mode at its start.
+    gl.disable(gl.BLEND);
+  }
+
+  /**
+   * Lazily create + return the cloud program. Builds the STATIC point-sprite
+   * buffer once: each of the ~1648 cloud points is expanded into a quad (6
+   * vertices via 2 triangles), interleaving model xyz, lobeIndex, phase, freq,
+   * and a per-vertex [-1,1]² corner offset.
+   *
+   * The cloud points come from buildBrainCloud() — the SAME pure builder the
+   * Canvas2D renderer uses — so both renderers project byte-identical points.
+   */
+  private ensureCloudProgram(gl: WebGL2RenderingContext): CloudProgram {
+    if (this.cloudProgram) return this.cloudProgram;
+    const program = createProgram(gl, CLOUD_VS, CLOUD_FS);
+
+    const cloud = buildBrainCloud();
+    const buf = buildCloudBuffer(cloud);
+    const count = buf.count;
+
+    // 8 floats per vertex: [x, y, z, lobeIndex, phase, freq, cornerX, cornerY].
+    // 6 vertices per point (two triangles covering the [-1,1]² corner space).
+    const FLOATS_PER_VERT = 8;
+    const VERTS_PER_POINT = 6;
+    // Corner offsets matching the bg/haze quad winding (two triangles).
+    const corners = [
+      [-1, -1],
+      [ 1, -1],
+      [-1,  1],
+      [-1,  1],
+      [ 1, -1],
+      [ 1,  1]
+    ];
+    const vertexCount = count * VERTS_PER_POINT;
+    const data = new Float32Array(vertexCount * FLOATS_PER_VERT);
+    let o = 0;
+    for (let i = 0; i < count; i++) {
+      const x = buf.positions[i * 3 + 0];
+      const y = buf.positions[i * 3 + 1];
+      const z = buf.positions[i * 3 + 2];
+      const lobe = buf.lobeIndex[i];
+      const phase = buf.phase[i];
+      const freq = buf.freq[i];
+      for (let c = 0; c < VERTS_PER_POINT; c++) {
+        data[o++] = x;
+        data[o++] = y;
+        data[o++] = z;
+        data[o++] = lobe;
+        data[o++] = phase;
+        data[o++] = freq;
+        data[o++] = corners[c][0];
+        data[o++] = corners[c][1];
+      }
+    }
+
+    const vertexBuffer = createStaticBuffer(gl, data);
+
+    const aPosition = gl.getAttribLocation(program, "aPosition");
+    const aLobeIndex = gl.getAttribLocation(program, "aLobeIndex");
+    const aPhase = gl.getAttribLocation(program, "aPhase");
+    const aFreq = gl.getAttribLocation(program, "aFreq");
+    const aCorner = gl.getAttribLocation(program, "aCorner");
+
+    const vao = gl.createVertexArray();
+    if (!vao) throw new Error("Brain Atlas: failed to create cloud VAO.");
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+    const stride = FLOATS_PER_VERT * 4; // bytes
+    gl.enableVertexAttribArray(aPosition);
+    gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, stride, 0);
+    gl.enableVertexAttribArray(aLobeIndex);
+    gl.vertexAttribPointer(aLobeIndex, 1, gl.FLOAT, false, stride, 3 * 4);
+    gl.enableVertexAttribArray(aPhase);
+    gl.vertexAttribPointer(aPhase, 1, gl.FLOAT, false, stride, 4 * 4);
+    gl.enableVertexAttribArray(aFreq);
+    gl.vertexAttribPointer(aFreq, 1, gl.FLOAT, false, stride, 5 * 4);
+    gl.enableVertexAttribArray(aCorner);
+    gl.vertexAttribPointer(aCorner, 2, gl.FLOAT, false, stride, 6 * 4);
+    gl.bindVertexArray(null);
+
+    const uniforms = getUniformLocations(gl, program, [
+      "uResolution",
+      "uDpr",
+      "uRotX",
+      "uRotY",
+      "uSceneScale",
+      "uCx",
+      "uCy",
+      "uDist",
+      "uTime",
+      "uHemisphere",
+      "uLobeMul[0]",
+      "uLobeColors[0]"
+    ]);
+    this.cloudProgram = { program, vertexBuffer, vao, uniforms, vertexCount };
+    return this.cloudProgram;
+  }
+
+  /**
+   * Draw the cloud point-sprite pass for one hemisphere.
+   *
+   * hemisphere = +1 draws far points (projected z > 0); -1 draws near points
+   * (z <= 0). The vertex shader culls quads whose far-ness doesn't match, so a
+   * single static buffer serves both passes. This reproduces Canvas2D's two
+   * cloud loops (far cloud BEFORE the far edges/nodes slot, near cloud AFTER).
+   *
+   * Blend: additive (ONE, ONE) — matches Canvas2D "lighter". Additive is
+   * commutative, so accumulation order within a hemisphere is irrelevant.
+   */
+  private drawCloud(
+    gl: WebGL2RenderingContext,
+    proj: ProjectionOpts,
+    now: number,
+    hemisphere: 1 | -1,
+    lobeMul: Float32Array,
+    lobeColors: Float32Array
+  ): void {
+    const cp = this.ensureCloudProgram(gl);
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+
+    gl.useProgram(cp.program);
+    gl.bindVertexArray(cp.vao);
+
+    const wDpr = Math.floor(this.width * this.dpr);
+    const hDpr = Math.floor(this.height * this.dpr);
+    gl.uniform2f(cp.uniforms.uResolution, wDpr, hDpr);
+    gl.uniform1f(cp.uniforms.uDpr, this.dpr);
+    gl.uniform1f(cp.uniforms.uRotX, proj.rotX);
+    gl.uniform1f(cp.uniforms.uRotY, proj.rotY);
+    gl.uniform1f(cp.uniforms.uSceneScale, proj.scale);
+    gl.uniform1f(cp.uniforms.uCx, proj.cx);
+    gl.uniform1f(cp.uniforms.uCy, proj.cy);
+    gl.uniform1f(cp.uniforms.uDist, proj.dist);
+    gl.uniform1f(cp.uniforms.uTime, now);
+    gl.uniform1f(cp.uniforms.uHemisphere, hemisphere);
+    gl.uniform1fv(cp.uniforms["uLobeMul[0]"], lobeMul);
+    gl.uniform3fv(cp.uniforms["uLobeColors[0]"], lobeColors);
+
+    gl.drawArrays(gl.TRIANGLES, 0, cp.vertexCount);
+
+    gl.bindVertexArray(null);
     gl.disable(gl.BLEND);
   }
 }
