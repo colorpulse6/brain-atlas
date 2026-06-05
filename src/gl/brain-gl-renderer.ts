@@ -18,7 +18,7 @@
  */
 
 import { RenderCore } from "../render-core.ts";
-import type { BrainGraph, LobeName, Vec3 } from "../types.ts";
+import type { BrainGraph, BrainNode, LobeName, Vec3 } from "../types.ts";
 import { sceneProjection, projectPoint } from "./projection.ts";
 import type { ProjectionOpts } from "./projection.ts";
 import { hexToRgb01 } from "./color.ts";
@@ -27,8 +27,17 @@ import { BACKGROUND_VS, BACKGROUND_FS, HAZE_VS, HAZE_FS, CLOUD_VS, CLOUD_FS, EDG
 import { LOBE_CENTERS } from "../shape.ts";
 import { lobeVisibilityMultiplier } from "../lobe-visibility.ts";
 import { buildBrainCloud } from "../cloud.ts";
-import { buildCloudBuffer, buildEdgeRibbons, buildNodeBuffer, INDICES_PER_EDGE, LOBE_INDEX } from "./buffers.ts";
-import type { EdgeRibbonBuffer, NodeBuffer } from "./buffers.ts";
+import {
+  buildCloudBuffer,
+  buildEdgeRibbons,
+  buildNodeBuffer,
+  computeEdgePositionBlock,
+  incidentEdgeRanges,
+  INDICES_PER_EDGE,
+  LOBE_INDEX,
+  VERTS_PER_EDGE
+} from "./buffers.ts";
+import type { EdgePositionBlock, EdgeRibbonBuffer, NodeBuffer, VertexRange } from "./buffers.ts";
 import {
   drawLobeLabels as sharedDrawLobeLabels,
   drawNodeLabels as sharedDrawNodeLabels,
@@ -88,6 +97,30 @@ interface SignalProgram {
 /** Maximum number of signals × sub-sprites the buffer is pre-allocated for. */
 const MAX_SIGNAL_SPRITES = 64; // 10 signals × 6 sub-sprites + generous headroom
 
+/** Floats per vertex in the interleaved EDGE VBO (see ensureEdgeProgram layout). */
+const EDGE_FLOATS_PER_VERT = 25;
+/** Byte offsets (in floats) of the position-derived edge attributes. */
+const EDGE_POS_OFFSET = 0;        // aPosition  (3 floats)
+const EDGE_TANGENT_OFFSET = 3;    // aTangentRef (3 floats)
+const EDGE_SEGSTART_OFFSET = 6;   // aSegStartRef (3 floats)
+
+/** Floats per vertex in the interleaved NODE VBO (see ensureNodeProgram layout). */
+const NODE_FLOATS_PER_VERT = 13;
+/** Vertices per node quad in the node VBO. */
+const NODE_VERTS_PER_NODE = 6;
+/**
+ * Per-quad corner offsets (two triangles), shared by the node VBO build and the
+ * partial node-drag update so the rewritten block has identical winding.
+ */
+const NODE_CORNERS: ReadonlyArray<readonly [number, number]> = [
+  [-1, -1],
+  [ 1, -1],
+  [-1,  1],
+  [-1,  1],
+  [ 1, -1],
+  [ 1,  1]
+];
+
 interface BackgroundProgram {
   program: WebGLProgram;
   quadBuffer: WebGLBuffer;
@@ -135,6 +168,22 @@ interface EdgeProgram {
   sortScratch: Int32Array;
   /** Per-frame scratch: the sorted GLOBAL element indices uploaded each draw. */
   indexScratch: Uint32Array;
+  /**
+   * node-buffer-index → incident edges' vertex ranges. Built once alongside the
+   * edge buffer so a node drag can find exactly which edges to partially update
+   * (only the dragged node's incident edges, never the whole buffer).
+   */
+  incidentMap: Map<number, VertexRange[]>;
+  /**
+   * node-buffer-index → BrainNode, so the partial update can read each incident
+   * edge's CURRENT endpoint positions (_3dLobe) from the graph when recomputing
+   * its vertex block. The node-buffer index space is the same one nodeIdxA/B use.
+   */
+  bufIndexToNode: BrainNode[];
+  /** Reusable scratch for one edge's recomputed position-derived block (drag update). */
+  posBlockScratch: EdgePositionBlock;
+  /** Reusable scratch for uploading one edge's 26-vertex interleaved sub-block. */
+  edgeUploadScratch: Float32Array;
 }
 
 interface NodeProgram {
@@ -184,6 +233,8 @@ export class BrainGLRenderer extends RenderCore {
   /** Identity of the graph the node buffers were built from (rebuild on change). */
   private nodeGraph: BrainGraph | null = null;
   private signalProgram: SignalProgram | null = null;
+  /** Reusable scratch for uploading one node's 6-vertex interleaved block (drag update). */
+  private nodeUploadScratch = new Float32Array(NODE_VERTS_PER_NODE * NODE_FLOATS_PER_VERT);
 
   protected acquireSurface(canvas: HTMLCanvasElement): boolean {
     const gl = canvas.getContext("webgl2", {
@@ -707,6 +758,195 @@ export class BrainGLRenderer extends RenderCore {
   }
 
   /**
+   * Partial buffer update on node drag.
+   *
+   * moveNodeTo (RenderCore) has already mutated node._3dLobe on the SAME graph
+   * object, so the static node + edge VBOs (cached by graph identity) are stale
+   * for the dragged node and its incident edges. Rather than rebuild the whole
+   * geometry per pointermove, we recompute ONLY:
+   *   - the dragged node's 6-vertex block in the node VBO (position changes), and
+   *   - each INCIDENT edge's 26-vertex block in the edge VBO (an endpoint moved,
+   *     so its centerline / tangentRef / segStartRef change),
+   * and gl.bufferSubData just those byte ranges. The flat color/segment/node-index
+   * attributes are untouched (a move does not affect them). Cost scales with the
+   * dragged node's degree, NOT the total edge count — a hub drag updates only that
+   * hub's incident edges (a few dozen), never all ~4000.
+   *
+   * Dynamic per-frame state (signals buffer, projCache hit-test) already follows
+   * the drag because they re-read _3dLobe each frame; only these static VBOs need
+   * the explicit partial update.
+   */
+  protected onNodeMoved(nodeId: string): void {
+    const gl = this.gl;
+    const graph = this.getGraph?.();
+    if (!gl || !graph) return;
+
+    const bufIdx = this.nodeBufferIndexOf(graph, nodeId);
+    if (bufIdx < 0) return; // node has no _3dLobe / not in the buffer
+
+    const node = graph.idx[nodeId];
+    const pos = node?._3dLobe;
+    if (!pos) return;
+
+    // ---- Node VBO: rewrite the dragged node's 6-vertex block (position only) ----
+    // The node program may not have been built yet (first draw lazily builds it).
+    // If it exists, patch it; otherwise the first build will read the new _3dLobe.
+    const np = this.nodeProgram;
+    if (np && this.nodeGraph === graph && bufIdx < np.nodeCount) {
+      // Update the cached model center (used by the per-frame z-only sort).
+      np.centers[bufIdx * 3 + 0] = pos.x;
+      np.centers[bufIdx * 3 + 1] = pos.y;
+      np.centers[bufIdx * 3 + 2] = pos.z;
+      // Keep buf.positions consistent too (source of truth for any future rebuild path).
+      np.buf.positions[bufIdx * 3 + 0] = pos.x;
+      np.buf.positions[bufIdx * 3 + 1] = pos.y;
+      np.buf.positions[bufIdx * 3 + 2] = pos.z;
+
+      // Read the node's existing interleaved 6-vertex block, overwrite only the
+      // position floats (offset 0-2 of each vertex), upload that byte range.
+      const F = NODE_FLOATS_PER_VERT;
+      const block = this.nodeUploadScratch;
+      // Reconstruct the 6-vertex block from buf (all attrs are per-node constant).
+      const r = np.buf.radius[bufIdx];
+      const hub = np.buf.hub[bufIdx];
+      const status = np.buf.status[bufIdx];
+      const lobe = np.buf.lobeIndex[bufIdx];
+      const cr = np.buf.color[bufIdx * 3 + 0];
+      const cg = np.buf.color[bufIdx * 3 + 1];
+      const cb = np.buf.color[bufIdx * 3 + 2];
+      const nIdx = np.buf.nodeIndex[bufIdx];
+      // Corner offsets must match ensureNodeProgram's winding exactly.
+      const corners = NODE_CORNERS;
+      for (let c = 0; c < NODE_VERTS_PER_NODE; c++) {
+        let o = c * F;
+        block[o++] = pos.x;
+        block[o++] = pos.y;
+        block[o++] = pos.z;
+        block[o++] = r;
+        block[o++] = hub;
+        block[o++] = status;
+        block[o++] = lobe;
+        block[o++] = cr;
+        block[o++] = cg;
+        block[o++] = cb;
+        block[o++] = nIdx;
+        block[o++] = corners[c][0];
+        block[o++] = corners[c][1];
+      }
+      gl.bindBuffer(gl.ARRAY_BUFFER, np.vertexBuffer);
+      const byteOffset = bufIdx * NODE_VERTS_PER_NODE * F * 4;
+      gl.bufferSubData(gl.ARRAY_BUFFER, byteOffset, block);
+      gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    }
+
+    // ---- Edge VBO: rewrite each INCIDENT edge's 26-vertex block ----
+    const ep = this.edgeProgram;
+    if (ep && this.edgeGraph === graph) {
+      const incident = ep.incidentMap.get(bufIdx);
+      if (incident && incident.length > 0) {
+        for (const range of incident) {
+          this.updateEdgeBlock(gl, ep, range.start);
+        }
+      }
+    }
+
+    this.requestImmediateFrame();
+  }
+
+  /**
+   * Recompute and upload ONE incident edge's 26-vertex interleaved block after an
+   * endpoint moved. Reads the edge's two endpoint node-buffer indices from buf
+   * (constant per edge), pulls their CURRENT _3dLobe positions from the graph,
+   * recomputes the position-derived attributes (aPosition/tangentRef/segStartRef)
+   * via the shared computeEdgePositionBlock (same code the full build uses), and
+   * leaves every other attribute (colors, sameLobe, selectors, node/lobe indices)
+   * exactly as built. Also refreshes buf.positions/tangentRef/segStartRef and the
+   * cached centerline so the per-frame mean-z sort follows the move.
+   *
+   * @param start global vertex index where this edge's block begins.
+   */
+  private updateEdgeBlock(gl: WebGL2RenderingContext, ep: EdgeProgram, start: number): void {
+    const buf = ep.buf;
+    // The two endpoints' node-buffer indices are constant per edge; read from the
+    // first vertex of this edge's block.
+    const idxA = buf.nodeIdxA[start];
+    const idxB = buf.nodeIdxB[start];
+    const nodeA = ep.bufIndexToNode[idxA];
+    const nodeB = ep.bufIndexToNode[idxB];
+    const aPos = nodeA?._3dLobe;
+    const bPos = nodeB?._3dLobe;
+    if (!aPos || !bPos) return;
+
+    // Recompute the position-derived block from the CURRENT endpoint positions.
+    const block = computeEdgePositionBlock(aPos, bPos, ep.posBlockScratch);
+
+    const F = EDGE_FLOATS_PER_VERT;
+    const out = ep.edgeUploadScratch;
+    const edgeIdxBase = start / VERTS_PER_EDGE; // dense edge index (start is a multiple of 26)
+
+    for (let lv = 0; lv < VERTS_PER_EDGE; lv++) {
+      const gv = start + lv; // global vertex index
+      // Refresh the CPU-side source arrays (positions/tangent/segStart) so any
+      // later full rebuild or mean-z read sees the moved geometry.
+      buf.positions[gv * 3 + 0] = block.positions[lv * 3 + 0];
+      buf.positions[gv * 3 + 1] = block.positions[lv * 3 + 1];
+      buf.positions[gv * 3 + 2] = block.positions[lv * 3 + 2];
+      buf.tangentRef[gv * 3 + 0] = block.tangentRef[lv * 3 + 0];
+      buf.tangentRef[gv * 3 + 1] = block.tangentRef[lv * 3 + 1];
+      buf.tangentRef[gv * 3 + 2] = block.tangentRef[lv * 3 + 2];
+      buf.segStartRef[gv * 3 + 0] = block.segStartRef[lv * 3 + 0];
+      buf.segStartRef[gv * 3 + 1] = block.segStartRef[lv * 3 + 1];
+      buf.segStartRef[gv * 3 + 2] = block.segStartRef[lv * 3 + 2];
+
+      // Build the interleaved 25-float vertex: position-derived from the block,
+      // every other attribute copied unchanged from buf (a move never alters them).
+      let o = lv * F;
+      out[o + EDGE_POS_OFFSET + 0] = block.positions[lv * 3 + 0];
+      out[o + EDGE_POS_OFFSET + 1] = block.positions[lv * 3 + 1];
+      out[o + EDGE_POS_OFFSET + 2] = block.positions[lv * 3 + 2];
+      out[o + EDGE_TANGENT_OFFSET + 0] = block.tangentRef[lv * 3 + 0];
+      out[o + EDGE_TANGENT_OFFSET + 1] = block.tangentRef[lv * 3 + 1];
+      out[o + EDGE_TANGENT_OFFSET + 2] = block.tangentRef[lv * 3 + 2];
+      out[o + EDGE_SEGSTART_OFFSET + 0] = block.segStartRef[lv * 3 + 0];
+      out[o + EDGE_SEGSTART_OFFSET + 1] = block.segStartRef[lv * 3 + 1];
+      out[o + EDGE_SEGSTART_OFFSET + 2] = block.segStartRef[lv * 3 + 2];
+      // 9: side, 10-12: colorA, 13-15: colorB, 16-18: focusColor, 19: sameLobe,
+      // 20: colorSelector, 21: lobeIdxA, 22: lobeIdxB, 23: nodeIdxA, 24: nodeIdxB.
+      out[o + 9] = buf.sides[gv];
+      out[o + 10] = buf.colorA[gv * 3 + 0];
+      out[o + 11] = buf.colorA[gv * 3 + 1];
+      out[o + 12] = buf.colorA[gv * 3 + 2];
+      out[o + 13] = buf.colorB[gv * 3 + 0];
+      out[o + 14] = buf.colorB[gv * 3 + 1];
+      out[o + 15] = buf.colorB[gv * 3 + 2];
+      out[o + 16] = buf.focusColor[gv * 3 + 0];
+      out[o + 17] = buf.focusColor[gv * 3 + 1];
+      out[o + 18] = buf.focusColor[gv * 3 + 2];
+      out[o + 19] = buf.sameLobe[gv];
+      out[o + 20] = buf.colorSelector[gv];
+      out[o + 21] = buf.lobeIdxA[gv];
+      out[o + 22] = buf.lobeIdxB[gv];
+      out[o + 23] = buf.nodeIdxA[gv];
+      out[o + 24] = buf.nodeIdxB[gv];
+    }
+
+    // Refresh the cached centerline (13 side=-1 points) used by the mean-z sort.
+    const cl = ep.centerline;
+    for (let j = 0; j < 13; j++) {
+      const lv = j * 2; // side=-1 vertex of tIdx j
+      const c = (edgeIdxBase * 13 + j) * 3;
+      cl[c + 0] = block.positions[lv * 3 + 0];
+      cl[c + 1] = block.positions[lv * 3 + 1];
+      cl[c + 2] = block.positions[lv * 3 + 2];
+    }
+
+    // Upload only this edge's 26-vertex byte range.
+    gl.bindBuffer(gl.ARRAY_BUFFER, ep.vertexBuffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, start * F * 4, out);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  }
+
+  /**
    * Node-buffer index of `id` (the index space the edge buffer's nodeIdxA/B use:
    * position among graph.nodes that have _3dLobe, 0-based). Returns -1 if absent.
    * Matches the nodeBufferIdx map built in buildEdgeRibbons / buildNodeBuffer.
@@ -862,7 +1102,13 @@ export class BrainGLRenderer extends RenderCore {
       edgeCount,
       meanZ: new Float32Array(edgeCount),
       sortScratch: new Int32Array(edgeCount),
-      indexScratch: new Uint32Array(buf.indices.length)
+      indexScratch: new Uint32Array(buf.indices.length),
+      // node-buffer-index → incident edge vertex ranges, built once so a drag
+      // touches only the dragged node's incident edges (not all edges).
+      incidentMap: incidentEdgeRanges(graph, buf.edgeRanges),
+      bufIndexToNode: graph.nodes.filter((node) => !!node._3dLobe),
+      posBlockScratch: computeEdgePositionBlock({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }),
+      edgeUploadScratch: new Float32Array(VERTS_PER_EDGE * EDGE_FLOATS_PER_VERT)
     };
     this.edgeGraph = graph;
     return this.edgeProgram;
@@ -1009,14 +1255,9 @@ export class BrainGLRenderer extends RenderCore {
     const F = 13;
     const VERTS_PER_NODE = 6;
     // Corner offsets matching the cloud/bg/haze quad winding (two triangles).
-    const corners = [
-      [-1, -1],
-      [ 1, -1],
-      [-1,  1],
-      [-1,  1],
-      [ 1, -1],
-      [ 1,  1]
-    ];
+    // Shared with the partial node-drag update (NODE_CORNERS) so the rewritten
+    // block winding can never diverge from the build.
+    const corners = NODE_CORNERS;
     const vertexCount = nodeCount * VERTS_PER_NODE;
     const data = new Float32Array(vertexCount * F);
     let o = 0;

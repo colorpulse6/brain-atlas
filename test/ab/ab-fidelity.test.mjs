@@ -918,3 +918,165 @@ test.describe("WebGL full scene showLobeLabels=false — labels absent on both r
     ).toBeLessThanOrEqual(budget);
   });
 });
+
+test.describe("WebGL drag partial-update matches full render", () => {
+  let page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto(`file://${HARNESS_HTML}`);
+    await page.waitForFunction(() => typeof window.renderFrame === "function");
+  });
+
+  test.afterAll(async () => {
+    await page?.close();
+  });
+
+  // The dragged node + its incident edges must follow the drag in WebGL via a
+  // PARTIAL bufferSubData (onNodeMoved), producing the SAME image a full rebuild
+  // at the moved position produces. We render the WebGL renderer two ways and
+  // assert pixel-identity (within the established node+edge AA budget; partial
+  // and full use the SAME computeEdgePositionBlock so the geometry is byte-equal):
+  //   Path A (full build): node _3dLobe is set to the MOVED position BEFORE start,
+  //     so the initial static buffer build already includes it (presetPositions).
+  //   Path B (partial update): node starts at its ORIGINAL position; after an
+  //     initial render builds the static buffers, moveNodeForTest applies the move,
+  //     firing onNodeMoved → partial node + incident-edge bufferSubData (moves).
+  //
+  // We test a HUB (22 incident edges — exercises the incident-edge map at scale)
+  // and a NON-HUB (3 incident edges). edges + nodes passes both enabled so both
+  // the moved node sprite AND its incident edge ribbons are compared.
+  const DRAG_CASES = [
+    {
+      label: "hub (projectHub, 22 incident edges)",
+      id: FIXTURE_NODE_IDS.projectHub,
+      moved: { x: 0.30, y: 0.05, z: 0.50 }
+    },
+    {
+      label: "non-hub (nonHub, 3 incident edges)",
+      id: FIXTURE_NODE_IDS.nonHub,
+      moved: { x: 0.25, y: 0.40, z: 0.10 }
+    }
+  ];
+
+  for (const { label, id, moved } of DRAG_CASES) {
+    test(`${label}: partial update == full build`, async () => {
+      const base = {
+        renderer: "webgl2",
+        palette: "graphite",
+        rot: { x: -0.15, y: 0.55 },
+        zoom: 1,
+        dpr: 1,
+        now: 1000,
+        width: 480,
+        height: 360,
+        focusId: null,
+        hoverId: null,
+        highlightLobe: null,
+        enabledPasses: ["background", "haze", "cloud", "edges", "nodes"]
+      };
+
+      // Path A: full build with the node already at the moved position.
+      const urlFull = await renderFrame(page, {
+        ...base,
+        presetPositions: { [id]: moved }
+      });
+      // Path B: build at original position, then apply the move (partial update).
+      const urlPartial = await renderFrame(page, {
+        ...base,
+        moves: [{ id, position: moved }]
+      });
+
+      expect(urlFull).toBeTruthy();
+      expect(urlPartial).toBeTruthy();
+
+      const imgA = decodePng(urlFull);
+      const imgB = decodePng(urlPartial);
+      expect(imgA.width).toBe(imgB.width);
+      expect(imgA.height).toBe(imgB.height);
+
+      const { width, height } = imgA;
+      const mismatched = pixelmatch(imgA.data, imgB.data, null, width, height, { threshold: 0.1 });
+
+      // Partial and full produce byte-identical model geometry (same builder), so
+      // the only possible diff is GPU nondeterminism — effectively 0. We allow a
+      // tiny budget (< 0.02% of pixels, ~35 px) for any AA-boundary float jitter
+      // between two separate GL contexts. A real partial-update bug (node/edges
+      // left at the old position, missing incident edges, wrong block offset)
+      // shows the dragged node + its edges in TWO places → thousands of mismatched
+      // pixels. Do NOT inflate this budget.
+      const budget = Math.ceil(width * height * 0.0002);
+      expect(
+        mismatched,
+        `${label}: partial vs full = ${mismatched} mismatched pixels (budget ${budget})`
+      ).toBeLessThanOrEqual(budget);
+    });
+  }
+});
+
+test.describe("WebGL moved-node matches Canvas2D (cross-renderer drag fidelity)", () => {
+  let page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto(`file://${HARNESS_HTML}`);
+    await page.waitForFunction(() => typeof window.renderFrame === "function");
+  });
+
+  test.afterAll(async () => {
+    await page?.close();
+  });
+
+  // After a drag, the WebGL partial update must still match Canvas2D (which
+  // re-projects from _3dLobe every frame). We move the SAME node in BOTH
+  // renderers via moveNodeForTest and compare across renderers, within the
+  // established node+edge geometry budget. This guards against the WebGL drag
+  // diverging from the Canvas2D ground truth.
+  const CASES = [
+    { label: "hub (projectHub)", id: FIXTURE_NODE_IDS.projectHub, moved: { x: 0.30, y: 0.05, z: 0.50 } },
+    { label: "non-hub (nonHub)", id: FIXTURE_NODE_IDS.nonHub, moved: { x: 0.25, y: 0.40, z: 0.10 } }
+  ];
+
+  for (const { label, id, moved } of CASES) {
+    test(`${label}: webgl drag matches canvas2d`, async () => {
+      const base = {
+        palette: "graphite",
+        rot: { x: -0.15, y: 0.55 },
+        zoom: 1,
+        dpr: 1,
+        now: 1000,
+        width: 480,
+        height: 360,
+        focusId: null,
+        hoverId: null,
+        highlightLobe: null,
+        enabledPasses: ["background", "haze", "cloud", "edges", "nodes"],
+        moves: [{ id, position: moved }]
+      };
+
+      const urlCanvas = await renderFrame(page, { ...base, renderer: "canvas2d" });
+      const urlGl = await renderFrame(page, { ...base, renderer: "webgl2" });
+
+      expect(urlCanvas).toBeTruthy();
+      expect(urlGl).toBeTruthy();
+
+      const imgA = decodePng(urlCanvas);
+      const imgB = decodePng(urlGl);
+      expect(imgA.width).toBe(imgB.width);
+      expect(imgA.height).toBe(imgB.height);
+
+      const { width, height } = imgA;
+      const mismatched = pixelmatch(imgA.data, imgB.data, null, width, height, { threshold: 0.1 });
+
+      // Same class of difference as the nodes + edges A/B (thin-line/circle AA at
+      // the moved position). Budget = union of the edges (0.25%) and nodes (0.15%)
+      // per-pass budgets ≈ 0.4% of pixels. A real drag bug (WebGL node/edges at the
+      // wrong position vs Canvas2D) is thousands of px / regional — fix it.
+      const budget = Math.ceil(width * height * 0.004);
+      expect(
+        mismatched,
+        `${label}: webgl-vs-canvas2d after move = ${mismatched} mismatched pixels (budget ${budget})`
+      ).toBeLessThanOrEqual(budget);
+    });
+  }
+});

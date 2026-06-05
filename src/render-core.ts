@@ -263,6 +263,15 @@ export abstract class RenderCore {
   setHoverForTest(id: string | null): void { this.hoverId = id; this.requestImmediateFrame(); }
   /** Test-only: inject a fixed signal list so the signals pass is deterministic and comparable. */
   setSignalsForTest(signals: SignalParticle[]): void { this.signals = signals; this.requestImmediateFrame(); }
+  /**
+   * Test-only: drive moveNodeTo (the same path a node drag fires on every
+   * pointermove) so the A/B harness can verify the partial buffer update without
+   * synthesizing pointer events. Triggers onNodeMoved on the subclass.
+   */
+  moveNodeForTest(nodeId: string, position: PinnedNodePosition): void {
+    this.moveNodeTo(nodeId, position);
+    this.requestImmediateFrame();
+  }
   renderOnceForTest(now: number): void {
     this.draw(now);
     // draw() schedules a follow-up RAF; cancel it so the harness gets exactly one clean frame.
@@ -507,7 +516,20 @@ export abstract class RenderCore {
     const node = graph?.idx[nodeId];
     if (!node) return;
     node._3dLobe = { ...position };
+    // Notify the subclass so it can react to the moved node. Canvas2D re-projects
+    // from _3dLobe every frame so it leaves this a no-op; the WebGL renderer
+    // overrides it to perform a partial buffer update (the dragged node's vertex
+    // block + its incident edges' vertex blocks) instead of a full rebuild.
+    this.onNodeMoved(nodeId);
   }
+
+  /**
+   * Called after a node's _3dLobe is mutated by moveNodeTo (i.e. during a drag).
+   * Default no-op: the Canvas2D renderer re-projects from _3dLobe each frame, so
+   * the drag is already correct there. The WebGL renderer overrides this to push
+   * a partial bufferSubData update (only the moved node + its incident edges).
+   */
+  protected onNodeMoved(_nodeId: string): void {}
 
   protected cameraRight(): Vec3 {
     return { x: Math.cos(this.rot.y), y: 0, z: Math.sin(this.rot.y) };

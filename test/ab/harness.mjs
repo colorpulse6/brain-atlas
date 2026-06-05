@@ -20,6 +20,14 @@
  *   signals:  Array<{aId, bId, born, dur, colA, colB}> | undefined
  *             Signal descriptors. aId/bId are node IDs in the fixture graph.
  *             Injected via setSignalsForTest so the signal pass is deterministic.
+ *   presetPositions: Record<string, {x,y,z}> | undefined
+ *             Node _3dLobe overrides applied BEFORE the first render (so the
+ *             initial static buffer build already includes the moved position).
+ *             Used for the "full build" reference path of the drag-equality test.
+ *   moves:    Array<{id, position:{x,y,z}}> | undefined
+ *             Node moves applied via moveNodeForTest AFTER an initial render has
+ *             built the static buffers — this exercises the partial bufferSubData
+ *             node-drag update path (onNodeMoved) rather than a full rebuild.
  */
 
 import { BrainRenderer } from "../../src/renderer.ts";
@@ -47,7 +55,9 @@ window.renderFrame = function renderFrame(cfg) {
     now = 1000,
     enabledPasses = undefined,
     signals = undefined,
-    showLobeLabels = true
+    showLobeLabels = true,
+    presetPositions = undefined,
+    moves = undefined
   } = cfg;
 
   if (renderer !== "canvas2d" && renderer !== "webgl2") {
@@ -56,6 +66,19 @@ window.renderFrame = function renderFrame(cfg) {
 
   // Build a fresh graph for this palette (fully deterministic, no shared state).
   const graph = buildFixtureGraph(palette);
+
+  // presetPositions: override node _3dLobe BEFORE start() so the initial static
+  // buffer build already includes the moved position (the "full build" reference
+  // path of the drag-equality test). Lobe positions must be assigned first so the
+  // override survives ensureLobePositions (which only assigns if any node lacks it).
+  if (presetPositions) {
+    assignLobePositions(graph.nodes);
+    for (const [id, p] of Object.entries(presetPositions)) {
+      const node = graph.idx[id];
+      if (!node) throw new Error(`harness: presetPositions id not found: ${id}`);
+      node._3dLobe = { x: p.x, y: p.y, z: p.z };
+    }
+  }
 
   // A container gives the canvas a parent element so the WebGL renderer can
   // append its overlay canvas as a sibling. The container is positioned so the
@@ -124,6 +147,19 @@ window.renderFrame = function renderFrame(cfg) {
       };
     });
     r.setSignalsForTest(particleList);
+  }
+
+  // moves: exercise the partial node-drag buffer update. We must render ONCE
+  // first so the static node + edge VBOs are built (cached by graph identity),
+  // THEN apply moveNodeForTest (which fires onNodeMoved → partial bufferSubData),
+  // so the final frame reflects the partial update rather than a fresh full build.
+  if (moves && moves.length > 0) {
+    assignLobePositions(graph.nodes); // ensure positions exist before the build render
+    r.renderOnceForTest(now);         // build static buffers at ORIGINAL positions
+    for (const m of moves) {
+      if (!graph.idx[m.id]) throw new Error(`harness: move id not found: ${m.id}`);
+      r.moveNodeForTest(m.id, m.position); // partial update path
+    }
   }
 
   // Render exactly one frame synchronously at the injected timestamp.

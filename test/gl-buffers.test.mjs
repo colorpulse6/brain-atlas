@@ -43,6 +43,7 @@ import {
   buildNodeBuffer,
   incidentEdgeRanges,
   edgeLocalIndices,
+  computeEdgePositionBlock,
   LOBE_INDEX,
   VERTS_PER_EDGE,
   INDICES_PER_EDGE
@@ -676,4 +677,69 @@ test("incidentEdgeRanges: each range matches an edgeRange from edgeRanges", () =
   const starts = nodeARanges.map((r) => r.start).sort((a, b) => a - b);
   assert.equal(starts[0], 0, "nodeA range 0 starts at 0");
   assert.equal(starts[1], VERTS_PER_EDGE, `nodeA range 1 starts at ${VERTS_PER_EDGE}`);
+});
+
+// ---- computeEdgePositionBlock tests ----
+// This is the shared per-edge position-derived block builder used by BOTH the
+// full build (buildEdgeRibbons) and the partial node-drag update (onNodeMoved).
+// Verifying it matches the full build for an edge guarantees a partially-updated
+// edge is byte-identical to a freshly-built one.
+
+test("computeEdgePositionBlock: positions/tangentRef/segStartRef match buildEdgeRibbons for edge 0", () => {
+  const result = buildEdgeRibbons(GRAPH);
+  // Edge 0 is A–B; its block starts at vertex 0.
+  const block = computeEdgePositionBlock(nodeA._3dLobe, nodeB._3dLobe);
+  for (let v = 0; v < VERTS_PER_EDGE * 3; v++) {
+    assert.equal(block.positions[v], result.positions[v], `positions[${v}]`);
+    assert.equal(block.tangentRef[v], result.tangentRef[v], `tangentRef[${v}]`);
+    assert.equal(block.segStartRef[v], result.segStartRef[v], `segStartRef[${v}]`);
+  }
+});
+
+test("computeEdgePositionBlock: matches buildEdgeRibbons for edge 1 (start = VERTS_PER_EDGE)", () => {
+  const result = buildEdgeRibbons(GRAPH);
+  // Edge 1 is A–C; its block starts at global vertex VERTS_PER_EDGE.
+  const block = computeEdgePositionBlock(nodeA._3dLobe, nodeC._3dLobe);
+  const base = VERTS_PER_EDGE * 3;
+  for (let v = 0; v < VERTS_PER_EDGE * 3; v++) {
+    assert.equal(block.positions[v], result.positions[base + v], `positions[${v}]`);
+    assert.equal(block.tangentRef[v], result.tangentRef[base + v], `tangentRef[${v}]`);
+    assert.equal(block.segStartRef[v], result.segStartRef[base + v], `segStartRef[${v}]`);
+  }
+});
+
+test("computeEdgePositionBlock: control point is (A+B)*0.35 (centerline endpoints == A and B)", () => {
+  const block = computeEdgePositionBlock(nodeA._3dLobe, nodeC._3dLobe);
+  // tIdx 0 (verts 0,1) == A; tIdx 12 (verts 24,25) == C.
+  const EPS = 1e-6;
+  for (const v of [0, 1]) {
+    assert.ok(Math.abs(block.positions[v * 3 + 0] - nodeA._3dLobe.x) < EPS);
+    assert.ok(Math.abs(block.positions[v * 3 + 1] - nodeA._3dLobe.y) < EPS);
+    assert.ok(Math.abs(block.positions[v * 3 + 2] - nodeA._3dLobe.z) < EPS);
+  }
+  for (const v of [24, 25]) {
+    assert.ok(Math.abs(block.positions[v * 3 + 0] - nodeC._3dLobe.x) < EPS);
+    assert.ok(Math.abs(block.positions[v * 3 + 1] - nodeC._3dLobe.y) < EPS);
+    assert.ok(Math.abs(block.positions[v * 3 + 2] - nodeC._3dLobe.z) < EPS);
+  }
+  // Midpoint tIdx 6 (vert 12) is the Bézier value at t=0.5 with control (A+C)*0.35.
+  const ctrl = {
+    x: (nodeA._3dLobe.x + nodeC._3dLobe.x) * 0.35,
+    y: (nodeA._3dLobe.y + nodeC._3dLobe.y) * 0.35,
+    z: (nodeA._3dLobe.z + nodeC._3dLobe.z) * 0.35
+  };
+  const mid = bezier(nodeA._3dLobe, ctrl, nodeC._3dLobe, 0.5);
+  assert.ok(Math.abs(block.positions[12 * 3 + 0] - mid.x) < EPS, "mid.x");
+  assert.ok(Math.abs(block.positions[12 * 3 + 1] - mid.y) < EPS, "mid.y");
+  assert.ok(Math.abs(block.positions[12 * 3 + 2] - mid.z) < EPS, "mid.z");
+});
+
+test("computeEdgePositionBlock: writes into a provided out block (reused scratch)", () => {
+  const out = computeEdgePositionBlock({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 });
+  const same = computeEdgePositionBlock(nodeA._3dLobe, nodeB._3dLobe, out);
+  assert.equal(same, out, "returns the same out reference");
+  const fresh = computeEdgePositionBlock(nodeA._3dLobe, nodeB._3dLobe);
+  for (let v = 0; v < VERTS_PER_EDGE * 3; v++) {
+    assert.equal(out.positions[v], fresh.positions[v], `positions[${v}]`);
+  }
 });

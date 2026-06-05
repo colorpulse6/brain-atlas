@@ -148,6 +148,94 @@ export function edgeLocalIndices(): Uint32Array {
   return out;
 }
 
+/** 13 Bézier sample points = SAMPLES (12) + 1. */
+const EDGE_SAMPLES = 12;
+const EDGE_POINTS = EDGE_SAMPLES + 1; // 13
+const EDGE_SIDES = 2;                 // -1, +1
+
+/**
+ * The three POSITION-DERIVED edge attributes for one edge's 26-vertex block.
+ * These (and only these) change when an endpoint moves, so the partial node-drag
+ * update recomputes them via computeEdgePositionBlock and uploads only this block.
+ * The flat color/segment/node-index attributes are unaffected by a move.
+ */
+export interface EdgePositionBlock {
+  /** Model xyz per vertex (this centerline point). Length = 26*3. */
+  positions: Float32Array;
+  /** Model xyz of the NEXT centerline point (tangent reference). Length = 26*3. */
+  tangentRef: Float32Array;
+  /** Model xyz of the provoked segment's START point. Length = 26*3. */
+  segStartRef: Float32Array;
+}
+
+/**
+ * Compute the position-derived vertex block (positions / tangentRef / segStartRef)
+ * for ONE edge from its two model-space endpoints.
+ *
+ * This is the single source of truth for the edge centerline geometry: the full
+ * builder (buildEdgeRibbons) and the partial node-drag update both call it so a
+ * single moved edge is recomputed byte-identically to a full rebuild.
+ *
+ * Centerline: 13 points sampled on the quadratic Bézier with control = (A+B)*0.35.
+ * Each centerline point becomes 2 vertices (side=-1, side=+1).
+ *   tangentRef[tIdx] = centerline[tIdx+1]  (last point falls back to tIdx-1)
+ *   segStartRef[tIdx] = centerline[max(0, tIdx-1)]
+ *
+ * @param a   Endpoint A model position (_3dLobe).
+ * @param b   Endpoint B model position (_3dLobe).
+ * @param out Optional preallocated block to write into (reused across edges).
+ */
+export function computeEdgePositionBlock(
+  a: { x: number; y: number; z: number },
+  b: { x: number; y: number; z: number },
+  out?: EdgePositionBlock
+): EdgePositionBlock {
+  const block = out ?? {
+    positions: new Float32Array(VERTS_PER_EDGE * 3),
+    tangentRef: new Float32Array(VERTS_PER_EDGE * 3),
+    segStartRef: new Float32Array(VERTS_PER_EDGE * 3)
+  };
+
+  const ctrlX = (a.x + b.x) * 0.35;
+  const ctrlY = (a.y + b.y) * 0.35;
+  const ctrlZ = (a.z + b.z) * 0.35;
+
+  // Precompute all 13 centerline points so tangentRef/segStartRef are lookups.
+  const cx = new Float64Array(EDGE_POINTS);
+  const cy = new Float64Array(EDGE_POINTS);
+  const cz = new Float64Array(EDGE_POINTS);
+  for (let j = 0; j < EDGE_POINTS; j++) {
+    const t = j / EDGE_SAMPLES;
+    const mt = 1 - t;
+    cx[j] = mt * mt * a.x + 2 * mt * t * ctrlX + t * t * b.x;
+    cy[j] = mt * mt * a.y + 2 * mt * t * ctrlY + t * t * b.y;
+    cz[j] = mt * mt * a.z + 2 * mt * t * ctrlZ + t * t * b.z;
+  }
+
+  const { positions, tangentRef, segStartRef } = block;
+  for (let tIdx = 0; tIdx < EDGE_POINTS; tIdx++) {
+    const px = cx[tIdx];
+    const py = cy[tIdx];
+    const pz = cz[tIdx];
+    const tRefIdx = tIdx < EDGE_POINTS - 1 ? tIdx + 1 : tIdx - 1;
+    const sRefIdx = tIdx > 0 ? tIdx - 1 : 0;
+    for (let s = 0; s < EDGE_SIDES; s++) {
+      const v = tIdx * EDGE_SIDES + s;
+      positions[v * 3 + 0] = px;
+      positions[v * 3 + 1] = py;
+      positions[v * 3 + 2] = pz;
+      tangentRef[v * 3 + 0] = cx[tRefIdx];
+      tangentRef[v * 3 + 1] = cy[tRefIdx];
+      tangentRef[v * 3 + 2] = cz[tRefIdx];
+      segStartRef[v * 3 + 0] = cx[sRefIdx];
+      segStartRef[v * 3 + 1] = cy[sRefIdx];
+      segStartRef[v * 3 + 2] = cz[sRefIdx];
+    }
+  }
+
+  return block;
+}
+
 /** Canonical lobe indices (0-5). These are the indices used in GPU buffers. */
 export const LOBE_INDEX: Record<LobeName, number> = {
   frontal: 0,
@@ -368,6 +456,8 @@ export function buildEdgeRibbons(graph: BrainGraph): EdgeRibbonBuffer {
   const edgeRanges: EdgeRange[] = [];
   const indices = new Uint32Array(validEdges.length * INDICES_PER_EDGE);
   const localIndices = edgeLocalIndices();
+  // Reusable position-block scratch (positions/tangentRef/segStartRef for one edge).
+  const posBlock = computeEdgePositionBlock({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0 });
   let vBase = 0; // vertex offset for the current edge
 
   for (let vi = 0; vi < validEdges.length; vi++) {
@@ -386,36 +476,16 @@ export function buildEdgeRibbons(graph: BrainGraph): EdgeRibbonBuffer {
     const nIdxA = nodeBufferIdx.get(A.id) ?? 0;
     const nIdxB = nodeBufferIdx.get(B.id) ?? 0;
 
-    const ctrl = {
-      x: (A._3dLobe!.x + B._3dLobe!.x) * 0.35,
-      y: (A._3dLobe!.y + B._3dLobe!.y) * 0.35,
-      z: (A._3dLobe!.z + B._3dLobe!.z) * 0.35
-    };
-
-    // Precompute all 13 centerline model points so tangentRef (next point) and
-    // segStartRef (previous point) can be looked up without recomputing the Bézier.
-    const cx = new Float64Array(POINTS);
-    const cy = new Float64Array(POINTS);
-    const cz = new Float64Array(POINTS);
-    for (let j = 0; j < POINTS; j++) {
-      const t = j / SAMPLES;
-      const mt = 1 - t;
-      cx[j] = mt * mt * A._3dLobe!.x + 2 * mt * t * ctrl.x + t * t * B._3dLobe!.x;
-      cy[j] = mt * mt * A._3dLobe!.y + 2 * mt * t * ctrl.y + t * t * B._3dLobe!.y;
-      cz[j] = mt * mt * A._3dLobe!.z + 2 * mt * t * ctrl.z + t * t * B._3dLobe!.z;
-    }
+    // Compute the position-derived block (positions / tangentRef / segStartRef)
+    // via the shared helper — the SAME code path the partial node-drag update
+    // uses, so a single moved edge is recomputed byte-identically to this build.
+    computeEdgePositionBlock(A._3dLobe!, B._3dLobe!, posBlock);
+    const blockPos = posBlock.positions;
+    const blockTan = posBlock.tangentRef;
+    const blockSeg = posBlock.segStartRef;
 
     // Sample the Bézier at POINTS = 13 values of t
     for (let tIdx = 0; tIdx < POINTS; tIdx++) {
-      const px = cx[tIdx];
-      const py = cy[tIdx];
-      const pz = cz[tIdx];
-
-      // tangentRef = next centerline point (tIdx+1); last point falls back to tIdx-1.
-      const tRefIdx = tIdx < POINTS - 1 ? tIdx + 1 : tIdx - 1;
-      // segStartRef = segment-START point for the segment this vertex provokes (tIdx-1, clamped).
-      const sRefIdx = tIdx > 0 ? tIdx - 1 : 0;
-
       // PROVOKING-VERTEX CONVENTION (WebGL2 fixed at LAST_VERTEX_CONVENTION):
       // In a TRIANGLE_STRIP, segment k (between tIdx k and k+1) is drawn by two triangles
       // whose last (provoking) vertices are both at tIdx = k+1. A `flat` attribute for
@@ -442,19 +512,20 @@ export function buildEdgeRibbons(graph: BrainGraph): EdgeRibbonBuffer {
       // Emit two vertices: side=-1 and side=+1
       for (let s = 0; s < SIDES; s++) {
         const side = s === 0 ? -1 : 1;
-        const v = vBase + tIdx * SIDES + s;
+        const lv = tIdx * SIDES + s; // local vertex index (0-25) within this edge
+        const v = vBase + lv;
 
-        positions[v * 3 + 0] = px;
-        positions[v * 3 + 1] = py;
-        positions[v * 3 + 2] = pz;
+        positions[v * 3 + 0] = blockPos[lv * 3 + 0];
+        positions[v * 3 + 1] = blockPos[lv * 3 + 1];
+        positions[v * 3 + 2] = blockPos[lv * 3 + 2];
 
-        tangentRef[v * 3 + 0] = cx[tRefIdx];
-        tangentRef[v * 3 + 1] = cy[tRefIdx];
-        tangentRef[v * 3 + 2] = cz[tRefIdx];
+        tangentRef[v * 3 + 0] = blockTan[lv * 3 + 0];
+        tangentRef[v * 3 + 1] = blockTan[lv * 3 + 1];
+        tangentRef[v * 3 + 2] = blockTan[lv * 3 + 2];
 
-        segStartRef[v * 3 + 0] = cx[sRefIdx];
-        segStartRef[v * 3 + 1] = cy[sRefIdx];
-        segStartRef[v * 3 + 2] = cz[sRefIdx];
+        segStartRef[v * 3 + 0] = blockSeg[lv * 3 + 0];
+        segStartRef[v * 3 + 1] = blockSeg[lv * 3 + 1];
+        segStartRef[v * 3 + 2] = blockSeg[lv * 3 + 2];
 
         sides[v] = side;
 
