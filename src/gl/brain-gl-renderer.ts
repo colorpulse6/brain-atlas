@@ -45,6 +45,14 @@ import {
 } from "../overlay-labels.ts";
 
 /**
+ * Grace period after a WebGL context loss before giving up and handing off to
+ * the Canvas2D fallback. Generous on purpose: most losses (GPU reset, driver
+ * hiccup, sleep/wake) restore within a few seconds, so we wait long enough to
+ * recover to WebGL instead of permanently downgrading on a transient hiccup.
+ */
+const CONTEXT_LOST_FALLBACK_MS = 10000;
+
+/**
  * Lobe names ordered by their GPU LOBE_INDEX (0-5). Used to build the 6-entry
  * uLobeMul / uLobeColors uniform arrays in index order.
  */
@@ -236,6 +244,86 @@ export class BrainGLRenderer extends RenderCore {
   /** Reusable scratch for uploading one node's 6-vertex interleaved block (drag update). */
   private nodeUploadScratch = new Float32Array(NODE_VERTS_PER_NODE * NODE_FLOATS_PER_VERT);
 
+  // ---- Context-loss state ----
+  /** True between webglcontextlost and webglcontextrestored (or permanent loss). */
+  private contextLost = false;
+  /**
+   * Timer started on context loss. If webglcontextrestored hasn't fired within
+   * ~1.5 s we treat the loss as permanent and call onRendererUnavailable().
+   */
+  private contextLostTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Guard: once unavailable is called we never call it again (re-entrancy safety). */
+  private unavailableCalled = false;
+
+  // Bound event handlers so we can remove the exact same function references on
+  // releaseSurface (avoiding duplicate handlers across onHide→onShow cycles).
+  private readonly onContextLost = (event: Event): void => {
+    // REQUIRED: without preventDefault the browser will NOT fire contextrestored.
+    event.preventDefault();
+    this.contextLost = true;
+
+    // Stop the render loop so drawScene never runs against a dead context.
+    if (this.raf != null) { cancelAnimationFrame(this.raf); this.raf = null; }
+    if (this.frameTimeout != null) { clearTimeout(this.frameTimeout); this.frameTimeout = null; }
+
+    // Start a generous fallback timer. Most context losses (GPU reset, driver
+    // hiccup, laptop sleep/wake) restore within a few seconds, so we wait long
+    // enough to recover to WebGL rather than prematurely (and permanently)
+    // dropping to Canvas2D. Only a genuinely permanent loss reaches this timeout
+    // and hands off to the view's Canvas2D fallback.
+    if (this.contextLostTimer != null) clearTimeout(this.contextLostTimer);
+    this.contextLostTimer = setTimeout(() => {
+      this.contextLostTimer = null;
+      // Still lost after the grace period → treat as permanent.
+      if (this.contextLost) this.callUnavailable();
+    }, CONTEXT_LOST_FALLBACK_MS);
+  };
+
+  private readonly onContextRestored = (): void => {
+    // Cancel the fallback timer — restore arrived in time.
+    if (this.contextLostTimer != null) {
+      clearTimeout(this.contextLostTimer);
+      this.contextLostTimer = null;
+    }
+
+    // Null out every cached program and buffer-cache identity so they rebuild
+    // lazily on the next drawScene. DO NOT call gl.deleteXxx here — the context
+    // was lost, so all GL objects are already invalid; the browser discards them.
+    // DO NOT call getContext again — the same context object is reused after restore.
+    this.bgProgram = null;
+    this.hazeProgram = null;
+    this.cloudProgram = null;
+    this.edgeProgram = null;
+    this.edgeGraph = null;
+    this.nodeProgram = null;
+    this.nodeGraph = null;
+    this.signalProgram = null;
+
+    this.contextLost = false;
+
+    // Re-apply viewport from the current canvas dimensions.
+    try {
+      if (this.gl && this.canvas) {
+        this.resizeSurface();
+      }
+      // Resume the render loop.
+      this.requestImmediateFrame();
+    } catch {
+      // Resource rebuild failed on restore — treat as permanent loss.
+      this.callUnavailable();
+    }
+  };
+
+  /**
+   * Invoke the onRendererUnavailable callback (at most once, re-entrancy-safe).
+   * Called when context loss is permanent (timer expires) or restore fails.
+   */
+  private callUnavailable(): void {
+    if (this.unavailableCalled) return;
+    this.unavailableCalled = true;
+    this.options.onRendererUnavailable?.();
+  }
+
   protected acquireSurface(canvas: HTMLCanvasElement): boolean {
     const gl = canvas.getContext("webgl2", {
       alpha: false,
@@ -244,6 +332,17 @@ export class BrainGLRenderer extends RenderCore {
     });
     if (!gl) return false;
     this.gl = gl;
+
+    // Reset the unavailable-called guard so a fresh start (after stop+start) can
+    // invoke the callback again if a new loss occurs on the new context.
+    this.unavailableCalled = false;
+    this.contextLost = false;
+
+    // Register context-loss/restore listeners. Store bound method references so
+    // releaseSurface can remove the EXACT same functions (no duplicate handlers
+    // across onHide→onShow restart cycles).
+    canvas.addEventListener("webglcontextlost", this.onContextLost);
+    canvas.addEventListener("webglcontextrestored", this.onContextRestored);
 
     // Create the overlay canvas as a sibling that exactly overlaps the WebGL
     // canvas. It sits above the WebGL canvas and ignores pointer events so the
@@ -264,7 +363,7 @@ export class BrainGLRenderer extends RenderCore {
   }
 
   protected isReady(): boolean {
-    return !!this.gl;
+    return !!this.gl && !this.contextLost;
   }
 
   /**
@@ -273,6 +372,34 @@ export class BrainGLRenderer extends RenderCore {
    */
   getOverlayCanvasForTest(): HTMLCanvasElement | null {
     return this.overlay;
+  }
+
+  /**
+   * Test-only: simulate a WebGL context loss via the WEBGL_lose_context extension.
+   * Fires the real webglcontextlost event asynchronously (browser-driven), which
+   * causes the renderer to stop drawing and start the 1.5 s fallback timer.
+   * Must call restoreContextForTest() afterwards to bring the context back.
+   */
+  loseContextForTest(): void {
+    const ext = this.gl?.getExtension("WEBGL_lose_context");
+    ext?.loseContext();
+  }
+
+  /**
+   * Test-only: restore a context previously lost via loseContextForTest().
+   * Fires the real webglcontextrestored event asynchronously (browser-driven),
+   * which triggers lazy resource rebuild and resumes the render loop.
+   */
+  restoreContextForTest(): void {
+    const ext = this.gl?.getExtension("WEBGL_lose_context");
+    ext?.restoreContext();
+  }
+
+  /**
+   * Test-only: read the current contextLost flag without triggering any side effects.
+   */
+  isContextLostForTest(): boolean {
+    return this.contextLost;
   }
 
   protected resizeSurface(): void {
@@ -302,59 +429,80 @@ export class BrainGLRenderer extends RenderCore {
   }
 
   protected releaseSurface(): void {
+    // Remove context-loss/restore listeners before any other cleanup to avoid
+    // a spurious restore handler firing after we've deliberately stopped.
+    if (this.canvas) {
+      this.canvas.removeEventListener("webglcontextlost", this.onContextLost);
+      this.canvas.removeEventListener("webglcontextrestored", this.onContextRestored);
+    }
+
+    // Clear the fallback timer (stop any pending permanent-loss notification).
+    if (this.contextLostTimer != null) {
+      clearTimeout(this.contextLostTimer);
+      this.contextLostTimer = null;
+    }
+
     const gl = this.gl;
-    if (gl && this.bgProgram) {
-      gl.deleteVertexArray(this.bgProgram.vao);
-      gl.deleteBuffer(this.bgProgram.quadBuffer);
-      gl.deleteProgram(this.bgProgram.program);
+    // Only delete GL objects if the context is NOT currently lost. When the
+    // context is lost these handles are already invalid; calling delete on a
+    // lost context is a no-op or may error, so we skip it safely.
+    if (gl && !this.contextLost) {
+      if (this.bgProgram) {
+        gl.deleteVertexArray(this.bgProgram.vao);
+        gl.deleteBuffer(this.bgProgram.quadBuffer);
+        gl.deleteProgram(this.bgProgram.program);
+      }
+      if (this.hazeProgram) {
+        gl.deleteVertexArray(this.hazeProgram.vao);
+        gl.deleteBuffer(this.hazeProgram.quadBuffer);
+        gl.deleteProgram(this.hazeProgram.program);
+      }
+      if (this.cloudProgram) {
+        gl.deleteVertexArray(this.cloudProgram.vao);
+        gl.deleteBuffer(this.cloudProgram.vertexBuffer);
+        gl.deleteProgram(this.cloudProgram.program);
+      }
+      if (this.edgeProgram) {
+        gl.deleteVertexArray(this.edgeProgram.vao);
+        gl.deleteBuffer(this.edgeProgram.vertexBuffer);
+        gl.deleteBuffer(this.edgeProgram.indexBuffer);
+        gl.deleteProgram(this.edgeProgram.program);
+      }
+      if (this.nodeProgram) {
+        gl.deleteVertexArray(this.nodeProgram.vao);
+        gl.deleteBuffer(this.nodeProgram.vertexBuffer);
+        gl.deleteBuffer(this.nodeProgram.indexBuffer);
+        gl.deleteProgram(this.nodeProgram.program);
+      }
+      if (this.signalProgram) {
+        gl.deleteVertexArray(this.signalProgram.vao);
+        gl.deleteBuffer(this.signalProgram.vertexBuffer);
+        gl.deleteProgram(this.signalProgram.program);
+      }
     }
     this.bgProgram = null;
-    if (gl && this.hazeProgram) {
-      gl.deleteVertexArray(this.hazeProgram.vao);
-      gl.deleteBuffer(this.hazeProgram.quadBuffer);
-      gl.deleteProgram(this.hazeProgram.program);
-    }
     this.hazeProgram = null;
-    if (gl && this.cloudProgram) {
-      gl.deleteVertexArray(this.cloudProgram.vao);
-      gl.deleteBuffer(this.cloudProgram.vertexBuffer);
-      gl.deleteProgram(this.cloudProgram.program);
-    }
     this.cloudProgram = null;
-    if (gl && this.edgeProgram) {
-      gl.deleteVertexArray(this.edgeProgram.vao);
-      gl.deleteBuffer(this.edgeProgram.vertexBuffer);
-      gl.deleteBuffer(this.edgeProgram.indexBuffer);
-      gl.deleteProgram(this.edgeProgram.program);
-    }
     this.edgeProgram = null;
     this.edgeGraph = null;
-    if (gl && this.nodeProgram) {
-      gl.deleteVertexArray(this.nodeProgram.vao);
-      gl.deleteBuffer(this.nodeProgram.vertexBuffer);
-      gl.deleteBuffer(this.nodeProgram.indexBuffer);
-      gl.deleteProgram(this.nodeProgram.program);
-    }
     this.nodeProgram = null;
     this.nodeGraph = null;
-    if (gl && this.signalProgram) {
-      gl.deleteVertexArray(this.signalProgram.vao);
-      gl.deleteBuffer(this.signalProgram.vertexBuffer);
-      gl.deleteProgram(this.signalProgram.program);
-    }
     this.signalProgram = null;
+
     if (this.overlay && this.overlay.parentElement) {
       this.overlay.parentElement.removeChild(this.overlay);
     }
     this.overlay = null;
     this.overlayCtx = null;
     this.gl = null;
+    this.contextLost = false;
   }
 
   protected drawScene(now: number): void {
     const gl = this.gl;
     const graph = this.getGraph?.();
-    if (!gl || !graph) return;
+    // Guard against drawing on a lost or missing context.
+    if (!gl || !graph || this.contextLost || gl.isContextLost()) return;
 
     // Scene projection opts — shared by every geometry pass. For Task 6 only
     // proj.cx / proj.cy feed the background; later tasks use the full opts.

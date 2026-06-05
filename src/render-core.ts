@@ -58,6 +58,12 @@ export interface BrainRendererOptions {
   mobileMode: boolean;
   onChange?: () => void;
   onPinNode?: (node: BrainNode, position: PinnedNodePosition) => void;
+  /**
+   * Called when the WebGL renderer determines it cannot recover (context
+   * permanently lost or resource rebuild failed). The view should fall back
+   * to Canvas2D in response.
+   */
+  onRendererUnavailable?: () => void;
 }
 
 export const MIN_ZOOM = 0.55;

@@ -42,6 +42,8 @@ export class BrainAtlasView extends ItemView {
   private canvasContextKind: "2d" | "webgl2" | null = null;
   /** True after a successful renderer.start() call, false after stop(). */
   private rendererStarted = false;
+  /** Re-entrancy guard: true while fallbackToCanvas2D() is executing. */
+  private fallingBack = false;
 
   constructor(leaf: WorkspaceLeaf, plugin: BrainAtlasPluginHost) {
     super(leaf);
@@ -126,7 +128,8 @@ export class BrainAtlasView extends ItemView {
       performancePreset: this.plugin.settings.performancePreset,
       mobileMode: this.isMobileRuntime(),
       onPinNode: (node, position) => this.pinNode(node, position),
-      onChange: this.syncOverlays
+      onChange: this.syncOverlays,
+      onRendererUnavailable: () => this.fallbackToCanvas2D()
     };
   }
 
@@ -138,6 +141,56 @@ export class BrainAtlasView extends ItemView {
       return new BrainGLRenderer();
     }
     return new BrainRenderer();
+  }
+
+  /**
+   * Called when the WebGL renderer signals permanent context loss. Stops the
+   * WebGL renderer, recreates the canvas (the lost context taints the current
+   * one), constructs a Canvas2D renderer, and starts it seamlessly. Guards
+   * against re-entrancy so a lost context during the fallback itself can't loop.
+   */
+  private fallbackToCanvas2D(): void {
+    // Re-entrancy guard: if we're already falling back, do nothing.
+    if (this.fallingBack) return;
+    // If we're already on Canvas2D there's nothing to fall back to.
+    if (!(this.renderer instanceof BrainGLRenderer)) return;
+    if (!this.canvas || !this.rootEl) return;
+
+    this.fallingBack = true;
+    try {
+      this.renderer.stop();
+      this.rendererStarted = false;
+      // The WebGL canvas's context is lost/tainted — use recreateCanvas() so the
+      // Canvas2D renderer gets a clean canvas.
+      this.recreateCanvas();
+      const getGraph = (): BrainGraph => this.graph ?? emptyGraph(this.plugin.settings);
+      const options = this.rendererOptions();
+      const fallback = new BrainRenderer();
+      try {
+        fallback.start(this.canvas!, getGraph, options);
+        this.renderer = fallback;
+        this.canvasContextKind = "2d";
+        this.rendererStarted = true;
+      } catch {
+        // Canvas2D also failed — show the no-renderer error state.
+        this.showNoRendererError();
+      }
+    } finally {
+      this.fallingBack = false;
+    }
+  }
+
+  /**
+   * Show the empty-state overlay with an error message when no renderer could
+   * be started. Reuses emptyEl; the normal empty-state message is restored by
+   * onOpen (which reinitialises the element) or a successful subsequent start.
+   */
+  private showNoRendererError(): void {
+    if (!this.emptyEl) return;
+    this.emptyEl.setText(
+      "Brain Atlas couldn’t start a renderer (WebGL2 and Canvas2D both unavailable)."
+    );
+    this.emptyEl.addClass("is-visible");
   }
 
   /**
@@ -212,7 +265,9 @@ export class BrainAtlasView extends ItemView {
           this.canvasContextKind = "2d";
           this.rendererStarted = true;
         } catch {
-          // Canvas2D start also failed; renderer stays stopped but view is intact.
+          // Canvas2D start also failed; both renderers are unavailable.
+          // Show a visible error state so the user sees the view isn't blank by accident.
+          this.showNoRendererError();
         }
       }
     }

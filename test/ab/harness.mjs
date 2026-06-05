@@ -37,6 +37,152 @@ import { buildFixtureGraph } from "./fixture-graph.mjs";
 import { assignLobePositions } from "../../src/shape.ts";
 
 /**
+ * Expose the last created WebGL renderer for context-loss testing.
+ * Populated by renderFrame when renderer="webgl2"; cleared to null otherwise.
+ * @type {import("../../src/gl/brain-gl-renderer.ts").BrainGLRenderer | null}
+ */
+window._lastGLRenderer = null;
+
+/**
+ * Context-loss test session state. A persistent WebGL renderer that lives
+ * across multiple page.evaluate calls so Playwright can drive lose/restore.
+ */
+window._contextLossSession = null;
+
+/**
+ * Start a persistent WebGL renderer session for context-loss testing.
+ * Returns the initial rendered image as a PNG data URL (image A).
+ * The session lives until contextLossSessionStop() is called.
+ *
+ * @param {object} cfg - subset of renderFrame config (palette, rot, zoom, dpr, width, height, now)
+ * @returns {string} PNG data URL
+ */
+window.contextLossSessionStart = function contextLossSessionStart(cfg) {
+  const {
+    palette = "graphite",
+    rot = { x: -0.15, y: 0.55 },
+    zoom = 1,
+    dpr = 1,
+    width = 480,
+    height = 360,
+    now = 1000
+  } = cfg;
+
+  const graph = buildFixtureGraph(palette);
+  assignLobePositions(graph.nodes);
+
+  const container = document.createElement("div");
+  container.style.position = "absolute";
+  container.style.left = "0";
+  container.style.top = "0";
+  container.style.width = `${width}px`;
+  container.style.height = `${height}px`;
+  document.body.appendChild(container);
+
+  const canvas = document.createElement("canvas");
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  canvas.width = Math.floor(width * dpr);
+  canvas.height = Math.floor(height * dpr);
+  container.appendChild(canvas);
+
+  const r = new BrainGLRenderer();
+  r.start(canvas, () => graph, {
+    idleAutoRotate: false,
+    showLobeLabels: false,
+    enabledLobes: allLobesEnabled(),
+    performancePreset: "smooth",
+    mobileMode: false
+  });
+  r.setDeterministic(true);
+  r.setView({ rot, zoom, dpr });
+  r.renderOnceForTest(now);
+  if (r.raf != null) { cancelAnimationFrame(r.raf); r.raf = null; }
+
+  // Capture image A (before any context loss).
+  const result = document.createElement("canvas");
+  result.width = canvas.width;
+  result.height = canvas.height;
+  const rctx = result.getContext("2d");
+  rctx.drawImage(canvas, 0, 0);
+  const overlay = r.getOverlayCanvasForTest();
+  if (overlay) rctx.drawImage(overlay, 0, 0);
+  const imageA = result.toDataURL("image/png");
+
+  window._contextLossSession = { r, canvas, container, graph, rot, zoom, dpr, now };
+  return imageA;
+};
+
+/**
+ * Read whether the session renderer's context is currently marked as lost.
+ * Use with page.waitForFunction to poll after loseContextForTest().
+ * @returns {boolean}
+ */
+window.contextLossSessionIsLost = function contextLossSessionIsLost() {
+  return window._contextLossSession?.r?.isContextLostForTest() ?? false;
+};
+
+/**
+ * Read whether the session renderer has recovered (contextLost = false, isReady).
+ * Use with page.waitForFunction to poll after restoreContextForTest().
+ * @returns {boolean}
+ */
+window.contextLossSessionIsRestored = function contextLossSessionIsRestored() {
+  const s = window._contextLossSession;
+  if (!s) return false;
+  return !s.r.isContextLostForTest();
+};
+
+/**
+ * Trigger context loss on the session renderer via WEBGL_lose_context.
+ */
+window.contextLossSessionLose = function contextLossSessionLose() {
+  window._contextLossSession?.r?.loseContextForTest();
+};
+
+/**
+ * Trigger context restore on the session renderer via WEBGL_lose_context.
+ */
+window.contextLossSessionRestore = function contextLossSessionRestore() {
+  window._contextLossSession?.r?.restoreContextForTest();
+};
+
+/**
+ * Render a fresh frame after context restore and return the image as PNG data URL.
+ * Call this after waitForFunction(contextLossSessionIsRestored).
+ * @returns {string} PNG data URL
+ */
+window.contextLossSessionCaptureB = function contextLossSessionCaptureB() {
+  const s = window._contextLossSession;
+  if (!s) throw new Error("no active context-loss session");
+  const { r, canvas } = s;
+
+  // Cancel any pending RAF from the restore handler before our forced render.
+  if (r.raf != null) { cancelAnimationFrame(r.raf); r.raf = null; }
+  r.renderOnceForTest(s.now);
+
+  const result = document.createElement("canvas");
+  result.width = canvas.width;
+  result.height = canvas.height;
+  const rctx = result.getContext("2d");
+  rctx.drawImage(canvas, 0, 0);
+  const overlay = r.getOverlayCanvasForTest();
+  if (overlay) rctx.drawImage(overlay, 0, 0);
+  return result.toDataURL("image/png");
+};
+
+/**
+ * Stop and clean up the context-loss session.
+ */
+window.contextLossSessionStop = function contextLossSessionStop() {
+  const s = window._contextLossSession;
+  if (!s) return;
+  s.r.stop();
+  if (s.container.parentElement) document.body.removeChild(s.container);
+  window._contextLossSession = null;
+};
+
+/**
  * @param {object} cfg
  * @returns {string} PNG data URL
  */
@@ -102,6 +248,8 @@ window.renderFrame = function renderFrame(cfg) {
   container.appendChild(canvas);
 
   const r = renderer === "webgl2" ? new BrainGLRenderer() : new BrainRenderer();
+  // Expose the GL renderer for context-loss tests; clear for non-GL renders.
+  window._lastGLRenderer = renderer === "webgl2" ? r : null;
   r.start(canvas, () => graph, {
     idleAutoRotate: true,
     showLobeLabels,
