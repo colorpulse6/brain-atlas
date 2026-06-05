@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-03
 **Issue:** [#2 — Stunning 3D view! (But it's cooking my CPU)](https://github.com/colorpulse6/brain-atlas/issues/2)
-**Status:** Approved design (revised after adversarial review panel), pending implementation plan
+**Status:** Implemented in 0.2.0. Describes the renderer architecture and the fidelity strategy that keeps WebGL2 output identical to the Canvas2D reference.
 
 ## Problem
 
