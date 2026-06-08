@@ -1,240 +1,51 @@
-import { assignLobePositions, Brain3D, KIND_TO_LOBE, LOBE_CENTERS, type SurfacePoint } from "./shape.ts";
-import { allLobesEnabled, lobeVisibilityMultiplier, type LobeVisibility } from "./lobe-visibility.ts";
-import { displayNodeName } from "./node-display.ts";
-import { clampPinnedNodePosition, type PerformancePreset, type PinnedNodePosition } from "./settings.ts";
-import type { BrainEdge, BrainGraph, BrainNode, LobeName, ProjectedPoint, Vec3 } from "./types.ts";
+import { Brain3D, LOBE_CENTERS } from "./shape.ts";
+import { lobeVisibilityMultiplier } from "./lobe-visibility.ts";
+import type { BrainGraph, BrainNode, LobeName, ProjectedPoint, Vec3 } from "./types.ts";
+import type { SurfacePoint } from "./shape.ts";
+import { buildBrainCloud } from "./cloud.ts";
+import { RenderCore, type ProjectedNode, type ProjectedEdge } from "./render-core.ts";
+import {
+  drawLobeLabels as sharedDrawLobeLabels,
+  drawNodeLabels as sharedDrawNodeLabels,
+  drawCompass as sharedDrawCompass
+} from "./overlay-labels.ts";
 
-interface SignalParticle {
-  id: number;
-  a: BrainNode;
-  b: BrainNode;
-  born: number;
-  dur: number;
-  colA: string;
-  colB: string;
-}
+export type { BrainRendererOptions } from "./render-core.ts";
 
-interface ProjectedNode extends ProjectedPoint {
-  node: BrainNode;
-}
-
-interface ProjectedEdge {
-  e: BrainEdge;
-  A: BrainNode;
-  B: BrainNode;
-  pts: ProjectedPoint[];
-  z: number;
-  sameLobe: boolean;
-}
-
-interface RotateDragState {
-  mode: "rotate";
-  startX: number;
-  startY: number;
-  rotX: number;
-  rotY: number;
-  moved: boolean;
-  pointerId: number;
-}
-
-interface NodeDragState {
-  mode: "node";
-  startX: number;
-  startY: number;
-  nodeId: string;
-  nodeStart: PinnedNodePosition;
-  screenScale: number;
-  latestPosition?: PinnedNodePosition;
-  moved: boolean;
-  pointerId: number;
-}
-
-type DragState = RotateDragState | NodeDragState;
-
-export interface BrainRendererOptions {
-  idleAutoRotate: boolean;
-  showLobeLabels: boolean;
-  enabledLobes: LobeVisibility;
-  performancePreset: PerformancePreset;
-  onChange?: () => void;
-  onPinNode?: (node: BrainNode, position: PinnedNodePosition) => void;
-}
-
-const LOBE_KIND: Record<LobeName, string> = {
-  frontal: "project",
-  parietal: "concept",
-  temporal: "person",
-  occipital: "source",
-  cerebellum: "dailyNote",
-  stem: "index"
-};
-
-const LOBE_DESCRIPTIONS: Record<LobeName, { sub: string; role: string }> = {
-  frontal: { sub: "Projects - Decisions - Questions", role: "EXECUTIVE" },
-  parietal: { sub: "Concepts - Tools - Threads", role: "INTEGRATION" },
-  temporal: { sub: "People - Organizations", role: "SOCIAL" },
-  occipital: { sub: "Sources - Repos", role: "PERCEPTION" },
-  cerebellum: { sub: "Daily notes - Incidents", role: "TEMPORAL MEMORY" },
-  stem: { sub: "Index - Routing", role: "ROUTING" }
-};
-
-const MIN_ZOOM = 0.55;
-const MAX_ZOOM = 6;
-const PERFORMANCE_FRAME_DELAYS: Record<PerformancePreset, number> = {
-  smooth: 0,
-  balanced: 1000 / 30,
-  batterySaver: 1000 / 20
-};
-
-export class BrainRenderer {
-  private canvas: HTMLCanvasElement | null = null;
-  private ctx: CanvasRenderingContext2D | null = null;
-  private getGraph: (() => BrainGraph) | null = null;
-  private options: BrainRendererOptions = {
-    idleAutoRotate: true,
-    showLobeLabels: true,
-    enabledLobes: allLobesEnabled(),
-    performancePreset: "smooth"
-  };
-  private raf: number | null = null;
-  private frameTimeout: number | null = null;
-  private resizeObserver: ResizeObserver | null = null;
-  private rot = { x: -0.15, y: 0.55 };
-  private zoom = 1;
-  private drag: DragState | null = null;
-  private lastUserAt = 0;
-  private suppressClickUntil = 0;
-  private projCache: Record<string, ProjectedNode> = {};
-  private signals: SignalParticle[] = [];
-  private lastSpawn = 0;
-  private hoverId: string | null = null;
-  private focusId: string | null = null;
-  private highlightLobe: LobeName | null = null;
-  private width = 1;
-  private height = 1;
-  private dpr = 1;
+export class BrainRenderer extends RenderCore {
   private cloud: SurfacePoint[];
+  protected ctx: CanvasRenderingContext2D | null = null;
 
   constructor() {
-    this.cloud = this.buildCloud();
+    super();
+    this.cloud = buildBrainCloud();
   }
 
-  start(canvas: HTMLCanvasElement, getGraph: () => BrainGraph, options: Partial<BrainRendererOptions> = {}): void {
-    this.stop();
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("Brain Atlas requires Canvas 2D support.");
-    this.canvas = canvas;
-    this.ctx = ctx;
-    this.getGraph = getGraph;
-    this.options = { ...this.options, ...options };
-    this.lastUserAt = performance.now();
-
-    canvas.addEventListener("pointerdown", this.onPointerDown);
-    canvas.addEventListener("pointermove", this.onPointerMove);
-    canvas.addEventListener("pointerup", this.onPointerUp);
-    canvas.addEventListener("pointercancel", this.onPointerUp);
-    canvas.addEventListener("pointerleave", this.onPointerLeave);
-    canvas.addEventListener("wheel", this.onWheel, { passive: false });
-    canvas.addEventListener("contextmenu", this.onContextMenu);
-
-    this.resizeObserver = new ResizeObserver(() => this.resize());
-    this.resizeObserver.observe(canvas);
-    this.resize();
-    this.scheduleNextFrame(0);
+  protected acquireSurface(canvas: HTMLCanvasElement): boolean {
+    this.ctx = canvas.getContext("2d");
+    return !!this.ctx;
   }
 
-  stop(): void {
-    if (this.raf != null) cancelAnimationFrame(this.raf);
-    this.raf = null;
-    if (this.frameTimeout != null) window.clearTimeout(this.frameTimeout);
-    this.frameTimeout = null;
-    this.resizeObserver?.disconnect();
-    this.resizeObserver = null;
-    if (this.canvas) {
-      this.canvas.removeEventListener("pointerdown", this.onPointerDown);
-      this.canvas.removeEventListener("pointermove", this.onPointerMove);
-      this.canvas.removeEventListener("pointerup", this.onPointerUp);
-      this.canvas.removeEventListener("pointercancel", this.onPointerUp);
-      this.canvas.removeEventListener("pointerleave", this.onPointerLeave);
-      this.canvas.removeEventListener("wheel", this.onWheel);
-      this.canvas.removeEventListener("contextmenu", this.onContextMenu);
-    }
-    this.canvas = null;
+  protected isReady(): boolean {
+    return !!this.ctx;
+  }
+
+  protected resizeSurface(): void {
+    if (!this.canvas || !this.ctx) return;
+    this.canvas.width = Math.floor(this.width * this.dpr);
+    this.canvas.height = Math.floor(this.height * this.dpr);
+    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+  }
+
+  protected releaseSurface(): void {
     this.ctx = null;
-    this.getGraph = null;
-    this.drag = null;
   }
 
-  setOptions(options: Partial<BrainRendererOptions>): void {
-    this.options = { ...this.options, ...options };
-    this.requestImmediateFrame();
-  }
-
-  setHighlightLobe(lobe: LobeName | null): void {
-    this.highlightLobe = lobe;
-    this.requestImmediateFrame();
-  }
-
-  getHoveredNode(): BrainNode | null {
-    const graph = this.getGraph?.();
-    return this.hoverId && graph ? graph.idx[this.hoverId] ?? null : null;
-  }
-
-  getFocusedNode(): BrainNode | null {
-    const graph = this.getGraph?.();
-    return this.focusId && graph ? graph.idx[this.focusId] ?? null : null;
-  }
-
-  getLobeStats(): Record<LobeName, number> {
-    const stats = this.emptyLobeStats();
-    const graph = this.getGraph?.();
-    if (!graph) return stats;
-    for (const node of graph.nodes) {
-      const lobe = node._lobeName ?? KIND_TO_LOBE[node.kind] ?? "parietal";
-      stats[lobe] += 1;
-    }
-    return stats;
-  }
-
-  hitTest(x: number, y: number): BrainNode | null {
-    return this.hitTestProjected(x, y)?.node ?? null;
-  }
-
-  consumeSuppressedClick(): boolean {
-    if (!this.suppressClickUntil || performance.now() > this.suppressClickUntil) {
-      this.suppressClickUntil = 0;
-      return false;
-    }
-    this.suppressClickUntil = 0;
-    return true;
-  }
-
-  private hitTestProjected(x: number, y: number): ProjectedNode | null {
-    let best: ProjectedNode | null = null;
-    let bestDistance = this.hitTolerance();
-    for (const id in this.projCache) {
-      const projected = this.projCache[id];
-      if (projected.z > 0.4) continue;
-      const distance = Math.hypot(x - projected.sx, y - projected.sy);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        best = projected;
-      }
-    }
-    return best;
-  }
-
-  private draw = (now: number): void => {
-    this.raf = null;
+  protected drawScene(now: number): void {
     const canvas = this.canvas;
     const ctx = this.ctx;
     const graph = this.getGraph?.();
     if (!canvas || !ctx || !graph) return;
-
-    this.ensureLobePositions(graph.nodes);
-    if (!this.drag && this.options.idleAutoRotate && now - this.lastUserAt > 1800) {
-      this.rot.y += 0.00065;
-    }
 
     const pal = graph.activePalette;
     const scale = Math.min(this.width, this.height) * 0.32 * this.zoom;
@@ -249,16 +60,23 @@ export class BrainRenderer {
     });
     const lobeMul = (lobe?: LobeName) => lobeVisibilityMultiplier(lobe, this.options.enabledLobes, this.highlightLobe);
 
+    // Signal spawning is state mutation (shared across passes), not a draw pass;
+    // keep it unconditional so the "signals" pass stays deterministic when gated.
     this.spawnSignals(now, graph, interLobeEdges);
 
-    const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(this.width, this.height) * 0.75);
-    bg.addColorStop(0, pal.bg);
-    bg.addColorStop(0.55, pal.bg);
-    bg.addColorStop(1, pal.bgFar);
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, this.width, this.height);
+    // Pass: background (radial gradient fill).
+    if (this.passEnabled("background")) {
+      const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(this.width, this.height) * 0.75);
+      bg.addColorStop(0, pal.bg);
+      bg.addColorStop(0.55, pal.bg);
+      bg.addColorStop(1, pal.bgFar);
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, this.width, this.height);
+    }
 
-    this.drawLobeHaze(ctx, project, scale, graph, lobeMul);
+    // Pass: haze (lobe glow gradients, additive).
+    if (this.passEnabled("haze")) this.drawLobeHaze(ctx, project, scale, graph, lobeMul);
+
     const cloudProj = this.cloud.map((p) => ({
       p,
       pr: project(p),
@@ -267,71 +85,65 @@ export class BrainRenderer {
     const nodeProjs = graph.nodes
       .filter((node) => node._3dLobe)
       .map((node) => ({ node, ...project(node._3dLobe as Vec3) }));
-    this.projCache = Object.fromEntries(nodeProjs.map((node) => [node.node.id, node]));
     const edgeProjs = this.projectEdges(graph, project);
 
-    ctx.globalCompositeOperation = "lighter";
-    for (const cp of cloudProj) {
-      if (cp.pr.z <= 0) continue;
-      this.drawCloudPoint(ctx, cp, true, graph, lobeMul);
-    }
-    ctx.globalCompositeOperation = "source-over";
-
-    for (const edge of edgeProjs.filter((e) => e.z > 0).sort((a, b) => b.z - a.z)) {
-      this.drawEdge(ctx, edge, true, graph, lobeMul);
-    }
-    for (const node of nodeProjs.filter((n) => n.z > 0).sort((a, b) => b.z - a.z)) {
-      this.drawNode(ctx, node, graph, lobeMul);
+    // Pass: cloud (far half, z > 0), additive.
+    if (this.passEnabled("cloud")) {
+      ctx.globalCompositeOperation = "lighter";
+      for (const cp of cloudProj) {
+        if (cp.pr.z <= 0) continue;
+        this.drawCloudPoint(ctx, cp, true, graph, lobeMul);
+      }
+      ctx.globalCompositeOperation = "source-over";
     }
 
-    ctx.globalCompositeOperation = "lighter";
-    for (const cp of cloudProj) {
-      if (cp.pr.z > 0) continue;
-      this.drawCloudPoint(ctx, cp, false, graph, lobeMul);
+    // Pass: edges (far half, z > 0).
+    if (this.passEnabled("edges")) {
+      for (const edge of edgeProjs.filter((e) => e.z > 0).sort((a, b) => b.z - a.z)) {
+        this.drawEdge(ctx, edge, true, graph, lobeMul);
+      }
     }
-    ctx.globalCompositeOperation = "source-over";
-
-    for (const edge of edgeProjs.filter((e) => e.z <= 0).sort((a, b) => b.z - a.z)) {
-      this.drawEdge(ctx, edge, false, graph, lobeMul);
-    }
-    for (const node of nodeProjs.filter((n) => n.z <= 0).sort((a, b) => b.z - a.z)) {
-      this.drawNode(ctx, node, graph, lobeMul);
+    // Pass: nodes (far half, z > 0).
+    if (this.passEnabled("nodes")) {
+      for (const node of nodeProjs.filter((n) => n.z > 0).sort((a, b) => b.z - a.z)) {
+        this.drawNode(ctx, node, graph, lobeMul);
+      }
     }
 
-    this.drawSignals(ctx, now, project, lobeMul);
-    if (this.options.showLobeLabels) this.drawLobeLabels(ctx, project, graph, lobeStats, lobeMul);
-    if (this.options.showLobeLabels) this.drawNodeLabels(ctx, nodeProjs, graph, lobeMul);
-    this.drawCompass(ctx, graph);
-
-    this.scheduleNextFrame(this.nextFrameDelay(now));
-  };
-
-  private nextFrameDelay(now: number): number {
-    if (this.options.performancePreset === "smooth") return 0;
-    if (this.drag || now - this.lastUserAt < 700) return 0;
-    return PERFORMANCE_FRAME_DELAYS[this.options.performancePreset] ?? 0;
-  }
-
-  private scheduleNextFrame(delay: number): void {
-    if (!this.canvas || this.raf != null || this.frameTimeout != null) return;
-    if (delay <= 0) {
-      this.raf = requestAnimationFrame(this.draw);
-      return;
+    // Pass: cloud (near half, z <= 0), additive.
+    if (this.passEnabled("cloud")) {
+      ctx.globalCompositeOperation = "lighter";
+      for (const cp of cloudProj) {
+        if (cp.pr.z > 0) continue;
+        this.drawCloudPoint(ctx, cp, false, graph, lobeMul);
+      }
+      ctx.globalCompositeOperation = "source-over";
     }
-    this.frameTimeout = window.setTimeout(() => {
-      this.frameTimeout = null;
-      if (!this.canvas) return;
-      this.raf = requestAnimationFrame(this.draw);
-    }, delay);
-  }
 
-  private requestImmediateFrame(): void {
-    if (!this.canvas) return;
-    if (this.frameTimeout != null) {
-      window.clearTimeout(this.frameTimeout);
-      this.frameTimeout = null;
+    // Pass: edges (near half, z <= 0).
+    if (this.passEnabled("edges")) {
+      for (const edge of edgeProjs.filter((e) => e.z <= 0).sort((a, b) => b.z - a.z)) {
+        this.drawEdge(ctx, edge, false, graph, lobeMul);
+      }
     }
-    if (this.raf == null) this.raf = requestAnimationFrame(this.draw);
+    // Pass: nodes (near half, z <= 0).
+    if (this.passEnabled("nodes")) {
+      for (const node of nodeProjs.filter((n) => n.z <= 0).sort((a, b) => b.z - a.z)) {
+        this.drawNode(ctx, node, graph, lobeMul);
+      }
+    }
+
+    // Pass: signals (additive particle trails).
+    if (this.passEnabled("signals")) this.drawSignals(ctx, now, project, lobeMul);
+
+    // Pass: labels (lobe labels + node labels).
+    if (this.passEnabled("labels")) {
+      if (this.options.showLobeLabels) this.drawLobeLabels(ctx, project, graph, lobeStats, lobeMul);
+      if (this.options.showLobeLabels) this.drawNodeLabels(ctx, nodeProjs, graph, lobeMul);
+    }
+
+    // Pass: compass (orientation gizmo).
+    if (this.passEnabled("compass")) this.drawCompass(ctx, graph);
   }
 
   private drawLobeHaze(
@@ -552,59 +364,7 @@ export class BrainRenderer {
     stats: Record<LobeName, number>,
     lobeMul: (lobe?: LobeName) => number
   ): void {
-    ctx.textBaseline = "middle";
-    for (const rawLobe in LOBE_CENTERS) {
-      const lobe = rawLobe as LobeName;
-      const center = LOBE_CENTERS[lobe];
-      const projected = project(center.c);
-      if (projected.z > 0.6) continue;
-      const color = this.lobeColor(lobe, graph);
-      const alpha = (1 - Math.max(0, projected.depth - 0.2)) * lobeMul(lobe);
-      if (alpha < 0.15) continue;
-      this.drawLobeLabel(ctx, projected, color, alpha, center.label, `${LOBE_DESCRIPTIONS[lobe].role} - ${stats[lobe] ?? 0} nodes`);
-      if (center.mirror) {
-        const mirror = project({ x: -center.c.x, y: center.c.y, z: center.c.z });
-        if (mirror.z < 0.6) this.drawLobeDot(ctx, mirror, color, alpha);
-      }
-    }
-  }
-
-  private drawLobeLabel(
-    ctx: CanvasRenderingContext2D,
-    projected: ProjectedPoint,
-    color: string,
-    alpha: number,
-    label: string,
-    subtitle: string
-  ): void {
-    this.drawLobeDot(ctx, projected, color, alpha);
-    const leadX = projected.sx + 22;
-    const leadY = projected.sy - 22;
-    ctx.strokeStyle = hexA(color, 0.8 * alpha);
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(projected.sx + 2.8, projected.sy - 2.8);
-    ctx.lineTo(leadX - 4, leadY + 6);
-    ctx.stroke();
-    ctx.font = "600 11px 'JetBrains Mono', monospace";
-    ctx.textAlign = "left";
-    ctx.fillStyle = hexA(color, alpha);
-    ctx.fillText(label, leadX, leadY);
-    ctx.font = "9px 'JetBrains Mono', monospace";
-    ctx.fillStyle = hexA(color, 0.62 * alpha);
-    ctx.fillText(subtitle, leadX, leadY + 12);
-  }
-
-  private drawLobeDot(ctx: CanvasRenderingContext2D, projected: ProjectedPoint, color: string, alpha: number): void {
-    ctx.strokeStyle = hexA(color, 0.8 * alpha);
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(projected.sx, projected.sy, 4, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.fillStyle = hexA(color, 0.4 * alpha);
-    ctx.beginPath();
-    ctx.arc(projected.sx, projected.sy, 4, 0, Math.PI * 2);
-    ctx.fill();
+    sharedDrawLobeLabels(ctx, project, graph, stats, lobeMul, (lobe) => this.lobeColor(lobe, graph));
   }
 
   private drawNodeLabels(
@@ -613,334 +373,21 @@ export class BrainRenderer {
     graph: BrainGraph,
     lobeMul: (lobe?: LobeName) => number
   ): void {
-    ctx.font = "10px 'JetBrains Mono', monospace";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "top";
-    const labels = new Set(this.automaticLabelIds(graph, nodeProjs));
-    if (this.hoverId) labels.add(this.hoverId);
-    if (this.focusId) {
-      labels.add(this.focusId);
-      const focusNeighborLabelLimit = Math.max(8, Math.min(30, Math.round(8 * this.zoom)));
-      for (const id of (graph.adj[this.focusId] ?? []).slice(0, focusNeighborLabelLimit)) labels.add(id);
-    }
-    for (const projected of nodeProjs) {
-      if (!labels.has(projected.node.id)) continue;
-      if (projected.z > 0.25 && !projected.node.hub) continue;
-      const radius = nodeRadius(projected.node) * Math.max(0.6, projected.scale);
-      const alpha = Math.max(0.2, 1 - projected.depth * 0.7) * lobeMul(projected.node._lobeName);
-      if (alpha < 0.1) continue;
-      const label = displayNodeName(projected.node);
-      const width = ctx.measureText(label).width;
-      ctx.fillStyle = `rgba(0,0,0,${0.5 * alpha})`;
-      ctx.fillRect(projected.sx - width / 2 - 4, projected.sy + radius + 4, width + 8, 13);
-      ctx.fillStyle = projected.node.id === this.focusId ? `rgba(255,255,255,${alpha})` : hexA(projected.node.color, 0.95 * alpha);
-      ctx.fillText(label, projected.sx, projected.sy + radius + 5);
-    }
-  }
-
-  private automaticLabelIds(graph: BrainGraph, nodeProjs: ProjectedNode[]): Set<string> {
-    const maxAutomaticLabels = this.maxAutomaticLabels(graph.nodes.length);
-    return new Set(
-      nodeProjs
-        .filter((projected) => projected.node.hub && projected.z <= 0.45)
-        .sort((a, b) => b.node.degree - a.node.degree || a.node.id.localeCompare(b.node.id))
-        .slice(0, maxAutomaticLabels)
-        .map((projected) => projected.node.id)
-    );
-  }
-
-  private maxAutomaticLabels(totalNodes: number): number {
-    const viewportCap = Math.max(6, Math.floor(this.width / 80));
-    const zoomCap = this.zoom >= 3 ? 34 : this.zoom >= 2 ? 24 : 14;
-    const densityCap = totalNodes > 1000 ? 10 : totalNodes > 500 ? 14 : zoomCap;
-    return Math.min(viewportCap, zoomCap, densityCap);
-  }
-
-  private drawCompass(ctx: CanvasRenderingContext2D, graph: BrainGraph): void {
-    const cx = this.width - 50;
-    const cy = this.height - 50;
-    const radius = 22;
-    ctx.strokeStyle = hexA(graph.activePalette.hud, 0.25);
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.stroke();
-    const project = Brain3D.makeProjector({ rotX: this.rot.x, rotY: this.rot.y, scale: radius * 4.5, cx, cy, dist: 4 });
-    const axes = [
-      { name: "L", v: { x: 1, y: 0, z: 0 } },
-      { name: "S", v: { x: 0, y: 1, z: 0 } },
-      { name: "A", v: { x: 0, y: 0, z: 1 } }
-    ];
-    for (const axis of axes) {
-      const projected = project(axis.v);
-      const front = 1 - (projected.z + 1.5) / 3;
-      ctx.strokeStyle = hexA(graph.activePalette.hud, 0.30 + front * 0.55);
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(projected.sx, projected.sy);
-      ctx.stroke();
-      ctx.fillStyle = hexA(graph.activePalette.hud, 0.5 + front * 0.4);
-      ctx.font = "8px 'JetBrains Mono', monospace";
-      ctx.textAlign = "left";
-      ctx.textBaseline = "middle";
-      ctx.fillText(axis.name, projected.sx + 3, projected.sy);
-    }
-  }
-
-  private spawnSignals(now: number, graph: BrainGraph, interLobeEdges: BrainEdge[]): void {
-    if (interLobeEdges.length && now - this.lastSpawn > 900) {
-      this.lastSpawn = now;
-      const edge = interLobeEdges[Math.floor(Math.random() * interLobeEdges.length)];
-      const forward = Math.random() < 0.5;
-      const A = graph.idx[forward ? edge.a : edge.b];
-      const B = graph.idx[forward ? edge.b : edge.a];
-      if (A && B) {
-        this.signals.push({
-          id: Math.random(),
-          a: A,
-          b: B,
-          born: now,
-          dur: 2400 + Math.random() * 1100,
-          colA: A.color,
-          colB: B.color
-        });
-      }
-    }
-    for (let index = this.signals.length - 1; index >= 0; index -= 1) {
-      if (now - this.signals[index].born > this.signals[index].dur) this.signals.splice(index, 1);
-    }
-  }
-
-  private onPointerDown = (event: PointerEvent): void => {
-    if (!this.canvas || event.button !== 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const point = this.localPoint(event);
-    const hit = this.hitTestProjected(point.x, point.y);
-    if (hit?.node._3dLobe) {
-      const nodeStart = clampPinnedNodePosition(hit.node._3dLobe);
-      this.drag = {
-        mode: "node",
-        startX: event.clientX,
-        startY: event.clientY,
-        nodeId: hit.node.id,
-        nodeStart,
-        screenScale: Math.max(80, this.currentProjectionScale() * Math.max(0.4, hit.scale)),
-        moved: false,
-        pointerId: event.pointerId
-      };
-      this.focusId = hit.node.id;
-      this.hoverId = hit.node.id;
-      this.options.onChange?.();
-    } else {
-      this.drag = {
-        mode: "rotate",
-        startX: event.clientX,
-        startY: event.clientY,
-        rotX: this.rot.x,
-        rotY: this.rot.y,
-        moved: false,
-        pointerId: event.pointerId
-      };
-    }
-    this.lastUserAt = performance.now();
-    this.canvas.setPointerCapture(event.pointerId);
-    this.requestImmediateFrame();
-  };
-
-  private onPointerMove = (event: PointerEvent): void => {
-    if (!this.canvas) return;
-    event.stopPropagation();
-    if (this.drag) {
-      event.preventDefault();
-      const screenDx = event.clientX - this.drag.startX;
-      const screenDy = event.clientY - this.drag.startY;
-      this.drag.moved = this.drag.moved || Math.hypot(screenDx, screenDy) > 3;
-      if (this.drag.mode === "node") {
-        const next = this.draggedNodePosition(this.drag, screenDx, screenDy);
-        this.drag.latestPosition = next;
-        this.moveNodeTo(this.drag.nodeId, next);
-        this.focusId = this.drag.nodeId;
-        this.hoverId = this.drag.nodeId;
-        this.options.onChange?.();
-      } else {
-        const dx = screenDx / 180;
-        const dy = screenDy / 180;
-        this.rot.y = this.drag.rotY + dx;
-        this.rot.x = Math.max(-1.4, Math.min(1.4, this.drag.rotX + dy));
-      }
-      this.lastUserAt = performance.now();
-      this.requestImmediateFrame();
-      return;
-    }
-
-    const point = this.localPoint(event);
-    const hit = this.hitTest(point.x, point.y);
-    if ((hit?.id ?? null) !== this.hoverId) {
-      this.hoverId = hit?.id ?? null;
-      this.options.onChange?.();
-      this.requestImmediateFrame();
-    }
-  };
-
-  private onPointerUp = (event: PointerEvent): void => {
-    event.stopPropagation();
-    const activeDrag = this.drag;
-    this.drag = null;
-    if (!activeDrag) return;
-    try {
-      this.canvas?.releasePointerCapture(activeDrag.pointerId);
-    } catch {
-      // Obsidian can release capture when panes change during interaction.
-    }
-    if (activeDrag.mode === "node" && activeDrag.moved && activeDrag.latestPosition) {
-      const graph = this.getGraph?.();
-      const node = graph?.idx[activeDrag.nodeId];
-      if (node) this.options.onPinNode?.(node, activeDrag.latestPosition);
-      this.suppressClickUntil = performance.now() + 600;
-      this.options.onChange?.();
-      this.requestImmediateFrame();
-      return;
-    }
-    if (activeDrag.moved) {
-      this.suppressClickUntil = performance.now() + 600;
-      return;
-    }
-    const point = this.localPoint(event);
-    const hit = this.hitTest(point.x, point.y);
-    this.focusId = hit?.id ?? null;
-    this.options.onChange?.();
-    this.requestImmediateFrame();
-  };
-
-  private onPointerLeave = (): void => {
-    if (this.drag) return;
-    if (this.hoverId) {
-      this.hoverId = null;
-      this.options.onChange?.();
-      this.requestImmediateFrame();
-    }
-  };
-
-  private onWheel = (event: WheelEvent): void => {
-    event.preventDefault();
-    event.stopPropagation();
-    this.zoom *= 1 - event.deltaY * 0.0012;
-    this.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, this.zoom));
-    this.lastUserAt = performance.now();
-    this.requestImmediateFrame();
-  };
-
-  private onContextMenu = (event: MouseEvent): void => {
-    event.preventDefault();
-    event.stopPropagation();
-    this.rot = { x: -0.15, y: 0.55 };
-    this.zoom = 1;
-    this.lastUserAt = performance.now();
-    this.requestImmediateFrame();
-  };
-
-  private localPoint(event: MouseEvent | PointerEvent): { x: number; y: number } {
-    const rect = this.canvas?.getBoundingClientRect();
-    if (!rect) return { x: 0, y: 0 };
-    return {
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top
-    };
-  }
-
-  private draggedNodePosition(drag: NodeDragState, screenDx: number, screenDy: number): PinnedNodePosition {
-    const right = this.cameraRight();
-    const up = this.cameraUp();
-    const dx = screenDx / drag.screenScale;
-    const dy = screenDy / drag.screenScale;
-    return clampPinnedNodePosition({
-      x: drag.nodeStart.x + right.x * dx - up.x * dy,
-      y: drag.nodeStart.y + right.y * dx - up.y * dy,
-      z: drag.nodeStart.z + right.z * dx - up.z * dy
+    sharedDrawNodeLabels(ctx, nodeProjs, graph, lobeMul, {
+      hoverId: this.hoverId,
+      focusId: this.focusId,
+      zoom: this.zoom,
+      width: this.width,
+      mobile: this.effectivePerformancePreset() === "mobile"
     });
   }
 
-  private moveNodeTo(nodeId: string, position: PinnedNodePosition): void {
-    const graph = this.getGraph?.();
-    const node = graph?.idx[nodeId];
-    if (!node) return;
-    node._3dLobe = { ...position };
+  private drawCompass(ctx: CanvasRenderingContext2D, graph: BrainGraph): void {
+    sharedDrawCompass(ctx, this.rot, graph, this.width, this.height);
   }
 
-  private cameraRight(): Vec3 {
-    return { x: Math.cos(this.rot.y), y: 0, z: Math.sin(this.rot.y) };
-  }
-
-  private cameraUp(): Vec3 {
-    return {
-      x: Math.sin(this.rot.y) * Math.sin(this.rot.x),
-      y: Math.cos(this.rot.x),
-      z: -Math.cos(this.rot.y) * Math.sin(this.rot.x)
-    };
-  }
-
-  private currentProjectionScale(): number {
-    return Math.min(this.width, this.height) * 0.32 * this.zoom;
-  }
-
-  private hitTolerance(): number {
-    return Math.max(7, 18 / Math.sqrt(this.zoom));
-  }
-
-  private resize(): void {
-    if (!this.canvas || !this.ctx) return;
-    const rect = this.canvas.getBoundingClientRect();
-    this.width = Math.max(1, rect.width);
-    this.height = Math.max(1, rect.height);
-    this.dpr = Math.min(2, window.devicePixelRatio || 1);
-    this.canvas.width = Math.floor(this.width * this.dpr);
-    this.canvas.height = Math.floor(this.height * this.dpr);
-    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    this.requestImmediateFrame();
-  }
-
-  private ensureLobePositions(nodes: BrainNode[]): void {
-    if (nodes.some((node) => !node._3dLobe)) assignLobePositions(nodes);
-  }
-
-  private buildCloud(): SurfacePoint[] {
-    const surface = Brain3D.generateSurface(1400, 0.026).map((p, index) => ({
-      ...p,
-      lobe: Brain3D.lobeFor(p),
-      twPhase: (index * 0.731) % (Math.PI * 2),
-      twFreq: 0.4 + (index % 9) / 12
-    }));
-    const cerebellum: SurfacePoint[] = [];
-    const golden = Math.PI * (3 - Math.sqrt(5));
-    for (let index = 0; index < 220; index += 1) {
-      const t = (index + 0.5) / 220;
-      const phi = Math.asin(2 * t - 1);
-      const theta = (golden * index) % (Math.PI * 2);
-      cerebellum.push({
-        ...Brain3D.cerebellumPoint(theta, phi),
-        lobe: "cerebellum",
-        twPhase: (index * 0.91) % (Math.PI * 2),
-        twFreq: 0.5 + (index % 5) / 8
-      });
-    }
-    const stem: SurfacePoint[] = [];
-    for (let index = 0; index < 28; index += 1) {
-      const t = (index / 28) * 0.6;
-      const a = ((index * 1.31) % 1) - 0.5;
-      stem.push({ ...Brain3D.stemPoint(t, a), lobe: "stem", twPhase: index * 0.55, twFreq: 0.3 });
-    }
-    return [...surface, ...cerebellum, ...stem];
-  }
-
-  private emptyLobeStats(): Record<LobeName, number> {
-    return { frontal: 0, parietal: 0, temporal: 0, occipital: 0, cerebellum: 0, stem: 0 };
-  }
-
-  private lobeColor(lobe: LobeName, graph: BrainGraph): string {
-    return graph.activePalette.kinds[LOBE_KIND[lobe] ?? "concept"] ?? graph.activePalette.hud;
-  }
 }
+
 
 function nodeRadius(node: BrainNode): number {
   if (node.hub) return 6.5;

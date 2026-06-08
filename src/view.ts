@@ -1,8 +1,10 @@
-import { App, ItemView, TFile, WorkspaceLeaf } from "obsidian";
+import { App, ItemView, Platform, TFile, WorkspaceLeaf } from "obsidian";
 import { buildGraph } from "./adapter.ts";
 import { LOBES, setAllLobes, setLobeEnabled } from "./lobe-visibility.ts";
 import { displayNodeName, displayNodePath } from "./node-display.ts";
 import { BrainRenderer } from "./renderer.ts";
+import { RenderCore, type BrainRendererOptions } from "./render-core.ts";
+import { BrainGLRenderer } from "./gl/brain-gl-renderer.ts";
 import { LOBE_CENTERS } from "./shape.ts";
 import type { BrainAtlasSettings, PinnedNodePosition } from "./settings.ts";
 import type { BrainGraph, BrainNode, LobeName } from "./types.ts";
@@ -18,7 +20,7 @@ export interface BrainAtlasPluginHost {
 
 export class BrainAtlasView extends ItemView {
   private plugin: BrainAtlasPluginHost;
-  private renderer = new BrainRenderer();
+  private renderer: RenderCore = new BrainRenderer();
   private graph: BrainGraph | null = null;
   private rootEl: HTMLDivElement | null = null;
   private canvas: HTMLCanvasElement | null = null;
@@ -36,6 +38,12 @@ export class BrainAtlasView extends ItemView {
   private showInfo = false;
   private pendingOpenNodeId: string | null = null;
   private pendingOpenAt = 0;
+  /** Context kind that was successfully bound to this.canvas (null = no context yet). */
+  private canvasContextKind: "2d" | "webgl2" | null = null;
+  /** True after a successful renderer.start() call, false after stop(). */
+  private rendererStarted = false;
+  /** Re-entrancy guard: true while fallbackToCanvas2D() is executing. */
+  private fallingBack = false;
 
   constructor(leaf: WorkspaceLeaf, plugin: BrainAtlasPluginHost) {
     super(leaf);
@@ -73,52 +81,205 @@ export class BrainAtlasView extends ItemView {
 
     this.canvas.addEventListener("click", this.onCanvasClick);
     this.rebuild();
-    this.renderer.start(this.canvas, () => this.graph ?? emptyGraph(this.plugin.settings), {
-      idleAutoRotate: this.plugin.settings.idleAutoRotate,
-      showLobeLabels: this.plugin.settings.showLobeLabels,
-      enabledLobes: this.plugin.settings.enabledLobes,
-      performancePreset: this.plugin.settings.performancePreset,
-      onPinNode: (node, position) => this.pinNode(node, position),
-      onChange: this.syncOverlays
-    });
   }
 
   async onClose(): Promise<void> {
     this.canvas?.removeEventListener("click", this.onCanvasClick);
     this.renderer.stop();
+    this.rendererStarted = false;
     this.rootEl = null;
+    this.canvas = null;
+    this.canvasContextKind = null;
     this.graph = null;
   }
 
   onShow(): void {
     if (this.canvas && this.graph) {
-      this.renderer.start(this.canvas, () => this.graph ?? emptyGraph(this.plugin.settings), {
-        idleAutoRotate: this.plugin.settings.idleAutoRotate,
-        showLobeLabels: this.plugin.settings.showLobeLabels,
-        enabledLobes: this.plugin.settings.enabledLobes,
-        performancePreset: this.plugin.settings.performancePreset,
-        onPinNode: (node, position) => this.pinNode(node, position),
-        onChange: this.syncOverlays
-      });
+      this.startRenderer();
     }
   }
 
   onHide(): void {
     this.renderer.stop();
+    this.rendererStarted = false;
   }
 
   rebuild(): void {
     this.graph = buildGraph(this.plugin.app, this.plugin.settings);
     this.syncPaletteClass();
-    this.renderer.setOptions({
+    const wantsGL = this.plugin.settings.rendererMode === "webgl2" ||
+      (this.plugin.settings.rendererMode === "auto" && !this.isMobileRuntime());
+    const hasGL = this.renderer instanceof BrainGLRenderer;
+    if (!this.rendererStarted || wantsGL !== hasGL) {
+      // Not yet started, or renderer kind changed (mode switch): start/restart.
+      this.startRenderer();
+    } else {
+      this.renderer.setOptions(this.rendererOptions());
+    }
+    this.syncOverlays();
+  }
+
+  /** Build the renderer options object from current settings. Single source of truth. */
+  private rendererOptions(): BrainRendererOptions {
+    return {
       idleAutoRotate: this.plugin.settings.idleAutoRotate,
       showLobeLabels: this.plugin.settings.showLobeLabels,
       enabledLobes: this.plugin.settings.enabledLobes,
       performancePreset: this.plugin.settings.performancePreset,
+      mobileMode: this.isMobileRuntime(),
       onPinNode: (node, position) => this.pinNode(node, position),
-      onChange: this.syncOverlays
-    });
-    this.syncOverlays();
+      onChange: this.syncOverlays,
+      onRendererUnavailable: () => this.fallbackToCanvas2D()
+    };
+  }
+
+  /** Select the desired renderer kind based on rendererMode + mobile detection. */
+  private selectRenderer(): RenderCore {
+    const mode = this.plugin.settings.rendererMode;
+    if (mode === "canvas2d") return new BrainRenderer();
+    if (mode === "webgl2" || (mode === "auto" && !this.isMobileRuntime())) {
+      return new BrainGLRenderer();
+    }
+    return new BrainRenderer();
+  }
+
+  /**
+   * Called when the WebGL renderer signals permanent context loss. Stops the
+   * WebGL renderer, recreates the canvas (the lost context taints the current
+   * one), constructs a Canvas2D renderer, and starts it seamlessly. Guards
+   * against re-entrancy so a lost context during the fallback itself can't loop.
+   */
+  private fallbackToCanvas2D(): void {
+    // Re-entrancy guard: if we're already falling back, do nothing.
+    if (this.fallingBack) return;
+    // If we're already on Canvas2D there's nothing to fall back to.
+    if (!(this.renderer instanceof BrainGLRenderer)) return;
+    if (!this.canvas || !this.rootEl) return;
+
+    this.fallingBack = true;
+    try {
+      this.renderer.stop();
+      this.rendererStarted = false;
+      // The WebGL canvas's context is lost/tainted — use recreateCanvas() so the
+      // Canvas2D renderer gets a clean canvas.
+      this.recreateCanvas();
+      const getGraph = (): BrainGraph => this.graph ?? emptyGraph(this.plugin.settings);
+      const options = this.rendererOptions();
+      const fallback = new BrainRenderer();
+      try {
+        fallback.start(this.canvas!, getGraph, options);
+        this.renderer = fallback;
+        this.canvasContextKind = "2d";
+        this.rendererStarted = true;
+      } catch {
+        // Canvas2D also failed — show the no-renderer error state.
+        this.showNoRendererError();
+      }
+    } finally {
+      this.fallingBack = false;
+    }
+  }
+
+  /**
+   * Show the empty-state overlay with an error message when no renderer could
+   * be started. Reuses emptyEl; the normal empty-state message is restored by
+   * onOpen (which reinitialises the element) or a successful subsequent start.
+   */
+  private showNoRendererError(): void {
+    if (!this.emptyEl) return;
+    this.emptyEl.setText(
+      "Brain Atlas couldn’t start a renderer (WebGL2 and Canvas2D both unavailable)."
+    );
+    this.emptyEl.addClass("is-visible");
+  }
+
+  /**
+   * Destroy the current canvas and replace it with a fresh one, re-attaching
+   * the click listener. Call this when the canvas context KIND must change
+   * (e.g. webgl2 → 2d) because a canvas's context type is permanently locked
+   * after the first successful getContext() call.
+   */
+  private recreateCanvas(): void {
+    if (!this.rootEl) return;
+    this.canvas?.removeEventListener("click", this.onCanvasClick);
+    this.canvas?.remove();
+    const fresh = this.rootEl.createEl("canvas", { cls: "brain-atlas-canvas" });
+    // Insert before any existing first child so the canvas sits UNDER the HUD,
+    // controls, and legend in the stacking order.
+    this.rootEl.prepend(fresh);
+    fresh.addEventListener("click", this.onCanvasClick);
+    this.canvas = fresh;
+    this.canvasContextKind = null;
+  }
+
+  /**
+   * Stop the current renderer, construct the desired one, and start it on
+   * this.canvas. Recreates the canvas when the context KIND changes (webgl2 ↔
+   * 2d), because a canvas's context type is permanently locked after the first
+   * successful getContext() call. Falls back to Canvas2D if the desired
+   * renderer throws (e.g. WebGL2 unavailable), so the view never breaks.
+   */
+  private startRenderer(): void {
+    if (!this.canvas || !this.rootEl) return;
+    const getGraph = (): BrainGraph => this.graph ?? emptyGraph(this.plugin.settings);
+    const options = this.rendererOptions();
+
+    this.renderer.stop();
+    this.rendererStarted = false;
+
+    const desired = this.selectRenderer();
+    const desiredKind: "webgl2" | "2d" = desired instanceof BrainGLRenderer ? "webgl2" : "2d";
+
+    // If the existing canvas is locked to a DIFFERENT context kind, we must
+    // replace it. When canvasContextKind is null no context has been
+    // successfully created yet, so the current canvas is still usable.
+    if (this.canvasContextKind !== null && this.canvasContextKind !== desiredKind) {
+      this.recreateCanvas();
+    }
+
+    const canvas = this.canvas!;
+
+    try {
+      desired.start(canvas, getGraph, options);
+      this.renderer = desired;
+      this.canvasContextKind = desiredKind;
+      this.rendererStarted = true;
+    } catch {
+      // WebGL2 context creation failed — fall back to Canvas2D so the view
+      // always renders even when WebGL is unavailable or disabled.
+      // If getContext("webgl2") returned null the canvas is NOT tainted, so
+      // Canvas2D can bind to it directly. If for some reason it IS tainted
+      // (should not happen on a null return), recreate first.
+      const fallback = new BrainRenderer();
+      try {
+        fallback.start(canvas, getGraph, options);
+        this.renderer = fallback;
+        this.canvasContextKind = "2d";
+        this.rendererStarted = true;
+      } catch {
+        // Canvas still tainted from a previous kind — recreate and retry once.
+        this.recreateCanvas();
+        try {
+          fallback.start(this.canvas!, getGraph, options);
+          this.renderer = fallback;
+          this.canvasContextKind = "2d";
+          this.rendererStarted = true;
+        } catch {
+          // Canvas2D start also failed; both renderers are unavailable.
+          // Show a visible error state so the user sees the view isn't blank by accident.
+          this.showNoRendererError();
+        }
+      }
+    }
+  }
+
+  private isMobileRuntime(): boolean {
+    if (Platform.isMobile) return true;
+    if (typeof window === "undefined") return false;
+    return window.innerWidth <= 700 || (
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(pointer: coarse)").matches
+    );
   }
 
   private createHud(root: HTMLElement): void {
@@ -271,7 +432,8 @@ export class BrainAtlasView extends ItemView {
   private onCanvasClick = (event: MouseEvent): void => {
     if (!this.canvas) return;
     if (this.renderer.consumeSuppressedClick()) return;
-    const rect = this.canvas.getBoundingClientRect();
+    const interactionTarget = this.renderer.getInteractionTarget() ?? this.canvas;
+    const rect = interactionTarget.getBoundingClientRect();
     const hit = this.renderer.hitTest(event.clientX - rect.left, event.clientY - rect.top);
     if (!hit) return;
     if (this.shouldPreviewBeforeOpen(hit)) return;

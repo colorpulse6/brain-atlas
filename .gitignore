@@ -3,9 +3,12 @@ main.js
 .playwright-cli/
 demo/brain-atlas-demo.js
 assets/brain-atlas-spin-frames/
+test/ab/harness.bundle.js
 *.map
 dist
 test-vaults/
+test-results/
+playwright-report/
 .DS_Store
 .env
 .env.*

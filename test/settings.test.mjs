@@ -68,11 +68,11 @@ test("normalizeSettings validates palette and performance settings", () => {
   const settings = normalizeSettings({
     ...DEFAULT_SETTINGS,
     palette: "daylight",
-    performancePreset: "batterySaver"
+    performancePreset: "mobile"
   });
 
   assert.equal(settings.palette, "daylight");
-  assert.equal(settings.performancePreset, "batterySaver");
+  assert.equal(settings.performancePreset, "mobile");
 
   const fallback = normalizeSettings({
     ...DEFAULT_SETTINGS,

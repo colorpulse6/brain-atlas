@@ -4,11 +4,22 @@
 
 Brain Atlas is an Obsidian plugin that renders your vault as an animated 3D anatomical brain. Notes become nodes, links become neural pathways, and note types are grouped into brain regions.
 
+Brain Atlas is designed primarily for desktop Obsidian. Mobile support is experimental and depends heavily on vault size, device GPU, and Obsidian's mobile canvas performance. On phones and tablets, use the `Mobile` preset to cap rendering load, reduce label density, and keep touch interaction more predictable.
+
 The animated preview below uses synthetic demo vault data.
 
 ![Brain Atlas rotating as an animated 3D anatomical brain](assets/brain-atlas-spin.gif)
 
 ![Brain Atlas vault graph rendered as a 3D anatomical brain](assets/brain-atlas-screenshot.jpg)
+
+## What's New in 0.2.0
+
+This release replaces the Canvas2D path on desktop with a hand-rolled WebGL2 renderer, cutting idle-rotation CPU usage by roughly 70%. Canvas2D remains available as an automatic fallback on mobile, when WebGL2 is unavailable, or after a context loss event. A new `Renderer` setting lets you force either backend.
+
+- GPU-accelerated WebGL2 renderer on desktop — ~70% lower CPU at idle, fixing issue #2.
+- Automatic Canvas2D fallback on mobile and unsupported devices; no configuration needed.
+- New `Renderer` setting: `Auto` (default), `WebGL2`, or `Canvas2D`.
+- Pixel output verified identical between backends by an A/B pixel-diff CI gate.
 
 ## What's New in 0.1.5
 
@@ -24,6 +35,7 @@ This release focuses on making Brain Atlas work with real vault taxonomies inste
 ## Features
 
 - Animated 3D brain view inside Obsidian.
+- Renders the 3D scene on the GPU via WebGL2 on desktop for much lower CPU usage, with an automatic Canvas2D fallback on mobile or unsupported devices.
 - Vault-native graph data from `app.metadataCache`; no separate app or export step.
 - Region mapping for projects, people, concepts, sources, daily notes, indexes, and related note kinds.
 - Editable categorization settings for frontmatter keys, frontmatter value mappings, tag mappings, folder mappings, link inference, and the default category.
@@ -32,7 +44,7 @@ This release focuses on making Brain Atlas work with real vault taxonomies inste
 - Region toggles for dimming or restoring anatomical lobes.
 - Label toggle and density guardrails for hiding labels or preventing dense label piles.
 - Light `Daylight` palette for users who prefer a brighter workspace.
-- Optional performance presets for reducing idle animation frame rate on machines that run hot.
+- Optional performance presets, including a `Mobile preset`, for reducing idle animation frame rate on machines that run hot or small touch devices.
 - Click a node to open the backing note.
 - Drag a node to pin its position in the atlas.
 - Local-only rendering. Brain Atlas does not send vault data to a server.
@@ -96,8 +108,9 @@ Controls:
 
 Settings:
 
+- `Renderer` selects the rendering backend. `Auto` (default) uses WebGL2 on desktop and Canvas2D on mobile. Force `WebGL2` or `Canvas2D` for testing or if WebGL has issues. WebGL2 is GPU-accelerated and uses much less CPU; Canvas2D is the universal fallback.
 - `Theme palette` includes the light `DAYLIGHT` palette.
-- `Performance preset` defaults to `Smooth (current)`. `Balanced` and `Battery saver` keep interactions responsive while reducing idle redraw rate.
+- `Performance preset` defaults to `Smooth (current)` on desktop. `Mobile`, `Balanced`, and `Battery saver` keep interactions responsive while reducing idle redraw rate.
 - `Classification report` explains how notes were grouped and suggests mappings for unknown frontmatter values.
 - `Frontmatter value mappings` let existing vault metadata drive categories without renaming fields or values.
 - `Folder region mappings` help folder-heavy vaults spread notes across anatomical regions.
@@ -174,7 +187,7 @@ Default lobe mapping:
 
 ## Privacy
 
-Brain Atlas reads Obsidian's local vault metadata and renders it in a local canvas view. It enumerates Markdown files in the vault with Obsidian's vault API, then uses each note's path, basename, frontmatter, tags, links, and embeds from Obsidian's metadata cache to build the graph. It does not read full note contents, make network requests, upload vault data, or require an account.
+Brain Atlas reads Obsidian's local vault metadata and renders it in a local canvas view. It enumerates Markdown files in the vault with Obsidian's vault API, then uses each note's path, basename, frontmatter, tags, links, and embeds from Obsidian's metadata cache to build the graph. It does not read full note contents, make network requests, upload vault data, or require an account. The WebGL2 renderer executes entirely on the local GPU; no vault data or render output leaves the device.
 
 Because note names and paths appear visually in the graph when labels are enabled, use the `Labels` toggle before screensharing if your vault contains private note titles.
 
@@ -204,13 +217,13 @@ Release assets are built and attested by GitHub Actions. Do not upload locally b
 4. Create and push a semver tag that matches `manifest.json`, for example:
 
    ```bash
-   git tag 0.1.5
-   git push origin 0.1.5
+   git tag 0.2.0
+   git push origin 0.2.0
    ```
 
 5. The `Release` workflow creates or updates the GitHub release, uploads `manifest.json`, `main.js`, and `styles.css`, and generates artifact attestations for those assets.
 
-For an existing release that needs assets rebuilt or re-attested, run the `Release` workflow manually with the `version` input set to the release tag, for example `0.1.3`.
+For an existing release that needs assets rebuilt or re-attested, run the `Release` workflow manually with the `version` input set to the release tag, for example `0.1.5`.
 
 To verify release asset provenance locally:
 
