@@ -29,6 +29,12 @@
   cursor: grabbing;
 }
 
+.brain-atlas-gl-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
 .brain-atlas-hud,
 .brain-atlas-help,
 .brain-atlas-legend,
@@ -333,12 +339,6 @@
 
 .brain-atlas-settings-report p {
   margin: 0 0 8px;
-}
-
-.brain-atlas-settings-report h4 {
-  margin: 10px 0 6px;
-  color: var(--text-normal);
-  font-size: var(--font-ui-small);
 }
 
 .brain-atlas-settings-report ul {

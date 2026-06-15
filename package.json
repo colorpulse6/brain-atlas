@@ -5,6 +5,7 @@
   "main": "main.js",
   "scripts": {
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "lint": "eslint main.ts \"src/**/*.ts\"",
     "demo:build": "node scripts/build-demo.mjs",
     "dev": "node esbuild.config.mjs",
     "test-vaults:seed": "node scripts/seed-test-vaults.mjs",
@@ -29,12 +30,16 @@
   },
   "license": "MIT",
   "devDependencies": {
+    "@eslint/js": "^9.39.4",
     "@playwright/test": "^1.60.0",
     "@types/node": "^20.11.30",
     "esbuild": "^0.21.5",
+    "eslint": "^9.39.4",
+    "eslint-plugin-obsidianmd": "^0.3.0",
     "obsidian": "^1.5.12",
     "pixelmatch": "^7.2.0",
     "pngjs": "^7.0.0",
-    "typescript": "^5.4.5"
+    "typescript": "^5.4.5",
+    "typescript-eslint": "^8.61.0"
   }
 }

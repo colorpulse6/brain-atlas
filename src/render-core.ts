@@ -224,7 +224,7 @@ export abstract class RenderCore {
   }
 
   stop(): void {
-    if (this.raf != null) cancelAnimationFrame(this.raf);
+    if (this.raf != null) window.cancelAnimationFrame(this.raf);
     this.raf = null;
     if (this.frameTimeout != null) window.clearTimeout(this.frameTimeout);
     this.frameTimeout = null;
@@ -281,7 +281,7 @@ export abstract class RenderCore {
   renderOnceForTest(now: number): void {
     this.draw(now);
     // draw() schedules a follow-up RAF; cancel it so the harness gets exactly one clean frame.
-    if (this.raf != null) { cancelAnimationFrame(this.raf); this.raf = null; }
+    if (this.raf != null) { window.cancelAnimationFrame(this.raf); this.raf = null; }
   }
 
   getHoveredNode(): BrainNode | null {
@@ -348,13 +348,13 @@ export abstract class RenderCore {
   protected scheduleNextFrame(delay: number): void {
     if (!this.canvas || this.raf != null || this.frameTimeout != null) return;
     if (delay <= 0) {
-      this.raf = requestAnimationFrame(this.draw);
+      this.raf = window.requestAnimationFrame(this.draw);
       return;
     }
     this.frameTimeout = window.setTimeout(() => {
       this.frameTimeout = null;
       if (!this.canvas) return;
-      this.raf = requestAnimationFrame(this.draw);
+      this.raf = window.requestAnimationFrame(this.draw);
     }, delay);
   }
 
@@ -364,7 +364,7 @@ export abstract class RenderCore {
       window.clearTimeout(this.frameTimeout);
       this.frameTimeout = null;
     }
-    if (this.raf == null) this.raf = requestAnimationFrame(this.draw);
+    if (this.raf == null) this.raf = window.requestAnimationFrame(this.draw);
   }
 
   protected onPointerDown = (event: PointerEvent): void => {

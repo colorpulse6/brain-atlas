@@ -140,10 +140,12 @@ test("renderer options are factored into a single rendererOptions() helper", () 
 });
 
 test("WebGL2 renderer overlay is pointer-transparent and sits above the WebGL canvas", () => {
-  // overlay is pointer-events:none so clicks fall through to the WebGL canvas
-  assert.match(glRendererSource, /pointerEvents.*none|pointer-events.*none/);
+  // overlay styling lives in a dedicated CSS class (Obsidian no-static-styles policy)
+  assert.match(glRendererSource, /brain-atlas-gl-overlay/);
+  // the overlay class is pointer-events:none so clicks fall through to the WebGL canvas
+  assert.match(stylesSource, /\.brain-atlas-gl-overlay[\s\S]*?pointer-events:\s*none/);
   // overlay is absolutely positioned to cover the WebGL canvas
-  assert.match(glRendererSource, /position.*absolute|absolute.*position/);
+  assert.match(stylesSource, /\.brain-atlas-gl-overlay[\s\S]*?position:\s*absolute/);
   // .brain-atlas-root is position:relative so absolute children are contained
   assert.match(stylesSource, /\.brain-atlas-root[\s\S]*?position:\s*relative/);
 });

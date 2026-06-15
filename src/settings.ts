@@ -254,7 +254,9 @@ function frontmatterValues(value: unknown): string[] {
 }
 
 function normalizeFrontmatterScalar(value: unknown): string | null {
-  if (value == null) return null;
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+    return null;
+  }
   const normalized = String(value).replace(/^#/, "").trim().toLowerCase();
   return normalized || null;
 }

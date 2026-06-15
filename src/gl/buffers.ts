@@ -462,8 +462,8 @@ export function buildEdgeRibbons(graph: BrainGraph): EdgeRibbonBuffer {
 
   for (let vi = 0; vi < validEdges.length; vi++) {
     const { edgeIdx, A, B } = validEdges[vi];
-    const aLobe = (A._lobeName ?? "parietal") as LobeName;
-    const bLobe = (B._lobeName ?? "parietal") as LobeName;
+    const aLobe = A._lobeName ?? "parietal";
+    const bLobe = B._lobeName ?? "parietal";
     const sameLobeVal = aLobe === bLobe ? 1 : 0;
 
     const cA = lobeColor(aLobe, graph);
@@ -605,7 +605,7 @@ export function buildCloudBuffer(cloud: SurfacePoint[]): CloudBuffer {
     positions[i * 3 + 1] = p.y;
     positions[i * 3 + 2] = p.z;
 
-    const lobe = (p.lobe ?? "parietal") as LobeName;
+    const lobe = p.lobe ?? "parietal";
     lobeIndex[i] = LOBE_INDEX[lobe] ?? 1;
 
     phase[i] = p.twPhase ?? 0;
@@ -637,7 +637,7 @@ export function buildNodeBuffer(nodes: BrainNode[]): NodeBuffer {
 
   for (let i = 0; i < count; i++) {
     const node = valid[i];
-    const lobe = (node._lobeName ?? "parietal") as LobeName;
+    const lobe = node._lobeName ?? "parietal";
 
     positions[i * 3 + 0] = node._3dLobe!.x;
     positions[i * 3 + 1] = node._3dLobe!.y;

@@ -57,7 +57,7 @@ const CONTEXT_LOST_FALLBACK_MS = 10000;
  * uLobeMul / uLobeColors uniform arrays in index order.
  */
 const LOBE_BY_INDEX: LobeName[] = (() => {
-  const arr: LobeName[] = new Array(6);
+  const arr: LobeName[] = new Array<LobeName>(6);
   for (const name in LOBE_INDEX) {
     arr[LOBE_INDEX[name as LobeName]] = name as LobeName;
   }
@@ -251,7 +251,7 @@ export class BrainGLRenderer extends RenderCore {
    * Timer started on context loss. If webglcontextrestored hasn't fired within
    * ~1.5 s we treat the loss as permanent and call onRendererUnavailable().
    */
-  private contextLostTimer: ReturnType<typeof setTimeout> | null = null;
+  private contextLostTimer: number | null = null;
   /** Guard: once unavailable is called we never call it again (re-entrancy safety). */
   private unavailableCalled = false;
 
@@ -263,16 +263,16 @@ export class BrainGLRenderer extends RenderCore {
     this.contextLost = true;
 
     // Stop the render loop so drawScene never runs against a dead context.
-    if (this.raf != null) { cancelAnimationFrame(this.raf); this.raf = null; }
-    if (this.frameTimeout != null) { clearTimeout(this.frameTimeout); this.frameTimeout = null; }
+    if (this.raf != null) { window.cancelAnimationFrame(this.raf); this.raf = null; }
+    if (this.frameTimeout != null) { window.clearTimeout(this.frameTimeout); this.frameTimeout = null; }
 
     // Start a generous fallback timer. Most context losses (GPU reset, driver
     // hiccup, laptop sleep/wake) restore within a few seconds, so we wait long
     // enough to recover to WebGL rather than prematurely (and permanently)
     // dropping to Canvas2D. Only a genuinely permanent loss reaches this timeout
     // and hands off to the view's Canvas2D fallback.
-    if (this.contextLostTimer != null) clearTimeout(this.contextLostTimer);
-    this.contextLostTimer = setTimeout(() => {
+    if (this.contextLostTimer != null) window.clearTimeout(this.contextLostTimer);
+    this.contextLostTimer = window.setTimeout(() => {
       this.contextLostTimer = null;
       // Still lost after the grace period → treat as permanent.
       if (this.contextLost) this.callUnavailable();
@@ -282,7 +282,7 @@ export class BrainGLRenderer extends RenderCore {
   private readonly onContextRestored = (): void => {
     // Cancel the fallback timer — restore arrived in time.
     if (this.contextLostTimer != null) {
-      clearTimeout(this.contextLostTimer);
+      window.clearTimeout(this.contextLostTimer);
       this.contextLostTimer = null;
     }
 
@@ -347,10 +347,10 @@ export class BrainGLRenderer extends RenderCore {
     // Create the overlay canvas as a sibling that exactly overlaps the WebGL
     // canvas. It sits above the WebGL canvas and ignores pointer events so the
     // WebGL canvas remains the interaction target.
-    const overlay = document.createElement("canvas");
-    overlay.style.position = "absolute";
-    overlay.style.inset = "0";
-    overlay.style.pointerEvents = "none";
+    const overlay = canvas.ownerDocument.createElement("canvas");
+    // Positioning/pointer styles live in styles.css (.brain-atlas-gl-overlay)
+    // per Obsidian's no-static-styles policy.
+    overlay.classList.add("brain-atlas-gl-overlay");
     const parent = canvas.parentElement;
     if (parent) {
       // Append after the WebGL canvas so it renders on top in DOM order.
@@ -438,7 +438,7 @@ export class BrainGLRenderer extends RenderCore {
 
     // Clear the fallback timer (stop any pending permanent-loss notification).
     if (this.contextLostTimer != null) {
-      clearTimeout(this.contextLostTimer);
+      window.clearTimeout(this.contextLostTimer);
       this.contextLostTimer = null;
     }
 
@@ -1740,8 +1740,8 @@ export class BrainGLRenderer extends RenderCore {
         lobeVisibilityMultiplier(signal.b._lobeName, this.options.enabledLobes, this.highlightLobe)
       );
 
-      const aLobe = signal.a._3dLobe as Vec3;
-      const bLobe = signal.b._3dLobe as Vec3;
+      const aLobe = signal.a._3dLobe;
+      const bLobe = signal.b._3dLobe;
       const ctrl: Vec3 = {
         x: (aLobe.x + bLobe.x) * 0.35,
         y: (aLobe.y + bLobe.y) * 0.35,

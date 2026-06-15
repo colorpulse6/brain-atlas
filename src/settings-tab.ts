@@ -26,9 +26,6 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    new Setting(containerEl)
-      .setName("Brain Atlas")
-      .setHeading();
 
     new Setting(containerEl)
       .setName("Theme palette")
@@ -104,7 +101,7 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
       .setDesc(`${Object.keys(this.plugin.settings.pinnedNodePositions).length} nodes pinned by dragging.`)
       .addButton((button) => button
         .setButtonText("Reset")
-        .onClick(() => this.update({ pinnedNodePositions: {} })));
+        .onClick(() => void this.update({ pinnedNodePositions: {} })));
 
     new Setting(containerEl)
       .setName("Visible regions")
@@ -167,7 +164,7 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         text.setValue(kindMapToText(this.plugin.settings.frontmatterKindValueMap));
         text.inputEl.rows = 6;
         text.inputEl.placeholder = "type:wiki=source\ntype:person=person\nclass:meeting=workThread";
-        text.inputEl.addEventListener("blur", () => this.update({
+        text.inputEl.addEventListener("blur", () => void this.update({
           frontmatterKindValueMap: parseFrontmatterKindValueMapText(text.getValue())
         }));
       });
@@ -178,7 +175,7 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
       .addTextArea((text) => {
         text.setValue(kindMapToText(this.plugin.settings.tagKindMap));
         text.inputEl.rows = 8;
-        text.inputEl.addEventListener("blur", () => this.update({
+        text.inputEl.addEventListener("blur", () => void this.update({
           tagKindMap: parseKindMapText(text.getValue(), true)
         }));
       });
@@ -189,7 +186,7 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
       .addTextArea((text) => {
         text.setValue(kindMapToText(this.plugin.settings.folderKindMap));
         text.inputEl.rows = 8;
-        text.inputEl.addEventListener("blur", () => this.update({
+        text.inputEl.addEventListener("blur", () => void this.update({
           folderKindMap: parseKindMapText(text.getValue(), false)
         }));
       });
@@ -219,7 +216,7 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         text.setValue(lobeMapToText(this.plugin.settings.frontmatterRegionValueMap));
         text.inputEl.rows = 6;
         text.inputEl.placeholder = "type:wiki=occipital\ntype:person=temporal";
-        text.inputEl.addEventListener("blur", () => this.update({
+        text.inputEl.addEventListener("blur", () => void this.update({
           frontmatterRegionValueMap: parseFrontmatterLobeValueMapText(text.getValue())
         }));
       });
@@ -231,7 +228,7 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         text.setValue(lobeMapToText(this.plugin.settings.tagRegionMap));
         text.inputEl.rows = 6;
         text.inputEl.placeholder = "client=temporal\nresearch=occipital\nroadmap=frontal";
-        text.inputEl.addEventListener("blur", () => this.update({
+        text.inputEl.addEventListener("blur", () => void this.update({
           tagRegionMap: parseLobeMapText(text.getValue(), true)
         }));
       });
@@ -243,7 +240,7 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         text.setValue(lobeMapToText(this.plugin.settings.folderRegionMap));
         text.inputEl.rows = 6;
         text.inputEl.placeholder = "Channels=frontal\nWiki=occipital\nInbox=stem";
-        text.inputEl.addEventListener("blur", () => this.update({
+        text.inputEl.addEventListener("blur", () => void this.update({
           folderRegionMap: parseLobeMapText(text.getValue(), false)
         }));
       });
@@ -255,7 +252,7 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         text.setValue(lobeMapToText(this.plugin.settings.noteRegionMap));
         text.inputEl.rows = 6;
         text.inputEl.placeholder = "Projects/Big Idea.md=frontal\nPeople/Ada.md=temporal";
-        text.inputEl.addEventListener("blur", () => this.update({
+        text.inputEl.addEventListener("blur", () => void this.update({
           noteRegionMap: parseLobeMapText(text.getValue(), false)
         }));
       });
@@ -285,13 +282,17 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
       text: `Sources: frontmatter ${report.sourceCounts.frontmatter}, tags ${report.sourceCounts.tag}, folders ${report.sourceCounts.folder}, filenames ${report.sourceCounts.filename}, link behavior ${report.sourceCounts.linkBehavior}, default ${report.sourceCounts.default}.`
     });
 
-    reportEl.createEl("h4", { text: "Unmapped frontmatter values" });
+    new Setting(containerEl)
+      .setName("Unmapped frontmatter values")
+      .setHeading();
+
+    const unmappedEl = containerEl.createDiv({ cls: "brain-atlas-settings-report" });
     if (!report.unmappedFrontmatterValues.length) {
-      reportEl.createEl("p", { text: "No unmapped frontmatter values found." });
+      unmappedEl.createEl("p", { text: "No unmapped frontmatter values found." });
       return;
     }
 
-    const list = reportEl.createEl("ul");
+    const list = unmappedEl.createEl("ul");
     for (const item of report.unmappedFrontmatterValues.slice(0, 8)) {
       list.createEl("li", {
         text: `${item.key} - ${item.count} notes. Try ${item.suggestedKindMapping} or ${item.suggestedRegionMapping}.`

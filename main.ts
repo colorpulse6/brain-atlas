@@ -7,7 +7,8 @@ export default class BrainAtlasPlugin extends Plugin {
   settings: BrainAtlasSettings = normalizeSettings(null);
 
   async onload(): Promise<void> {
-    this.settings = normalizeSettings(await this.loadData());
+    const data = (await this.loadData()) as Partial<BrainAtlasSettings> | null;
+    this.settings = normalizeSettings(data);
 
     this.registerView(BRAIN_ATLAS_VIEW_TYPE, (leaf: WorkspaceLeaf) => new BrainAtlasView(leaf, this));
     this.addCommand({
@@ -31,8 +32,10 @@ export default class BrainAtlasPlugin extends Plugin {
 
   async activateView(): Promise<void> {
     const leaf = this.app.workspace.getLeaf(true);
+    // A new main-area leaf set active is already shown; revealLeaf (Obsidian
+    // 1.7.2+) is only needed to expand collapsed sidebars, so we skip it to
+    // keep minAppVersion at 1.5.0.
     await leaf.setViewState({ type: BRAIN_ATLAS_VIEW_TYPE, active: true });
-    this.app.workspace.revealLeaf(leaf);
   }
 
   refreshActiveBrainViews(): void {
@@ -53,9 +56,9 @@ export default class BrainAtlasPlugin extends Plugin {
 }
 
 function debounce(callback: () => void, delay: number): () => void {
-  let timeout: ReturnType<typeof setTimeout> | null = null;
+  let timeout: number | null = null;
   return () => {
-    if (timeout) clearTimeout(timeout);
-    timeout = setTimeout(callback, delay);
+    if (timeout !== null) window.clearTimeout(timeout);
+    timeout = window.setTimeout(callback, delay);
   };
 }

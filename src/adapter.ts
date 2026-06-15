@@ -109,7 +109,7 @@ function toFileLike(file: TFile): FileLike {
 }
 
 function toCacheLike(cache: CachedMetadata | null): NoteInput["cache"] {
-  const frontmatterTags = cache?.frontmatter?.tags;
+  const frontmatterTags: unknown = cache?.frontmatter?.tags;
   const tags = [
     ...(cache?.tags?.map((tag) => tag.tag) ?? []),
     ...frontmatterTagList(frontmatterTags)
