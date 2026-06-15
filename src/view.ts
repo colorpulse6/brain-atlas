@@ -167,7 +167,7 @@ export class BrainAtlasView extends ItemView {
       const options = this.rendererOptions();
       const fallback = new BrainRenderer();
       try {
-        fallback.start(this.canvas!, getGraph, options);
+        fallback.start(this.canvas, getGraph, options);
         this.renderer = fallback;
         this.canvasContextKind = "2d";
         this.rendererStarted = true;
@@ -237,7 +237,7 @@ export class BrainAtlasView extends ItemView {
       this.recreateCanvas();
     }
 
-    const canvas = this.canvas!;
+    const canvas = this.canvas;
 
     try {
       desired.start(canvas, getGraph, options);
@@ -260,7 +260,7 @@ export class BrainAtlasView extends ItemView {
         // Canvas still tainted from a previous kind — recreate and retry once.
         this.recreateCanvas();
         try {
-          fallback.start(this.canvas!, getGraph, options);
+          fallback.start(this.canvas, getGraph, options);
           this.renderer = fallback;
           this.canvasContextKind = "2d";
           this.rendererStarted = true;
@@ -458,7 +458,7 @@ export class BrainAtlasView extends ItemView {
   private openNode(node: BrainNode): void {
     const file = this.plugin.app.vault.getAbstractFileByPath(node.id);
     if (!(file instanceof TFile)) return;
-    this.plugin.app.workspace.getLeaf(this.plugin.settings.clickAction === "new-pane").openFile(file);
+    void this.plugin.app.workspace.getLeaf(this.plugin.settings.clickAction === "new-pane").openFile(file);
   }
 
   private pinNode(node: BrainNode, position: PinnedNodePosition): void {

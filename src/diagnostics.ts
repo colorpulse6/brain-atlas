@@ -1,4 +1,4 @@
-import type { App, CachedMetadata, TFile } from "obsidian";
+import type { App, CachedMetadata } from "obsidian";
 import { classifyNoteDetailed, normalizeKind, resolveLobeOverride } from "./classify.ts";
 import type { NoteInput } from "./adapter.ts";
 import { KIND_TO_LOBE } from "./shape.ts";
@@ -135,7 +135,7 @@ function emptyOverrideCounts(): Record<LobeOverrideSource, number> {
 }
 
 function toCacheLike(cache: CachedMetadata | null): NoteInput["cache"] {
-  const frontmatterTags = cache?.frontmatter?.tags;
+  const frontmatterTags: unknown = cache?.frontmatter?.tags;
   const tags = [
     ...(cache?.tags?.map((tag) => tag.tag) ?? []),
     ...frontmatterTagList(frontmatterTags)
