@@ -1,6 +1,6 @@
 {
   "name": "brain-atlas",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Render an Obsidian vault as an animated 3D anatomical brain.",
   "main": "main.js",
   "scripts": {
