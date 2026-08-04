@@ -50,6 +50,35 @@ export interface NodeDragState {
 
 export type DragState = RotateDragState | NodeDragState;
 
+/** Pointer travel, in CSS pixels, that maps to one radian of rotation. */
+export const DRAG_PIXELS_PER_RADIAN = 180;
+
+/** Vertical rotation limit, keeping the volume from tumbling past its poles. */
+export const MAX_ROT_X = 1.4;
+
+/**
+ * Map a canvas drag onto camera rotation.
+ *
+ * Both deltas are subtracted, not added. The projector's +z runs away from the
+ * camera, so adding them rotates the volume as though the pointer had grabbed
+ * its FAR surface: the near side then travels against the cursor and the brain
+ * reads as inside-out, with no way to tell which nodes are closest. Subtracting
+ * puts the near surface under the cursor, matching node dragging (which already
+ * follows the pointer) and every other orbit control.
+ */
+export function rotationFromDrag(
+  start: { x: number; y: number },
+  screenDx: number,
+  screenDy: number
+): { x: number; y: number } {
+  const dx = screenDx / DRAG_PIXELS_PER_RADIAN;
+  const dy = screenDy / DRAG_PIXELS_PER_RADIAN;
+  return {
+    x: Math.max(-MAX_ROT_X, Math.min(MAX_ROT_X, start.x - dy)),
+    y: start.y - dx
+  };
+}
+
 export interface BrainRendererOptions {
   idleAutoRotate: boolean;
   showLobeLabels: boolean;
@@ -420,10 +449,9 @@ export abstract class RenderCore {
         this.hoverId = this.drag.nodeId;
         this.options.onChange?.();
       } else {
-        const dx = screenDx / 180;
-        const dy = screenDy / 180;
-        this.rot.y = this.drag.rotY + dx;
-        this.rot.x = Math.max(-1.4, Math.min(1.4, this.drag.rotX + dy));
+        const next = rotationFromDrag({ x: this.drag.rotX, y: this.drag.rotY }, screenDx, screenDy);
+        this.rot.x = next.x;
+        this.rot.y = next.y;
       }
       this.lastUserAt = performance.now();
       this.requestImmediateFrame();
