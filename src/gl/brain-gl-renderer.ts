@@ -513,6 +513,16 @@ export class BrainGLRenderer extends RenderCore {
       this.overlayCtx.clearRect(0, 0, this.width, this.height);
     }
 
+    const interLobeEdges = graph.edges.filter((edge) => {
+      const a = graph.idx[edge.a];
+      const b = graph.idx[edge.b];
+      return a && b && a._lobeName !== b._lobeName;
+    });
+
+    // Signal spawning is state mutation (shared across passes), not a draw pass;
+    // keep it unconditional so the "signals" pass stays deterministic when gated.
+    this.spawnSignals(now, graph, interLobeEdges);
+
     // ---- Pass: background (radial gradient, opaque full-screen quad) ----
     if (this.passEnabled("background")) {
       this.drawBackground(gl, graph, proj.cx, proj.cy);
