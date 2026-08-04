@@ -1,4 +1,4 @@
-import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
+import { Notice, Plugin, type EventRef, type Vault, type WorkspaceLeaf } from "obsidian";
 import { normalizeSettings, type BrainAtlasSettings } from "./src/settings.ts";
 import { BrainAtlasSettingTab } from "./src/settings-tab.ts";
 import { BRAIN_ATLAS_VIEW_TYPE, BrainAtlasView } from "./src/view.ts";
@@ -24,6 +24,30 @@ export default class BrainAtlasPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("create", () => this.debouncedRefresh()));
     this.registerEvent(this.app.vault.on("delete", () => this.debouncedRefresh()));
     this.registerEvent(this.app.vault.on("rename", () => this.debouncedRefresh()));
+    this.registerConfigChangeRefresh();
+  }
+
+  /**
+   * Editing Settings > Files & Links > Excluded files changes which notes belong in
+   * the atlas, but it touches no file, so none of the vault/metadata events above
+   * fire and an open view keeps showing the excluded notes until something else
+   * happens to trigger a rebuild.
+   *
+   * Obsidian signals app-config writes through an internal "config-changed" Vault
+   * event, which is not in the public typings. If a future release drops it the
+   * listener simply never fires and we fall back to the previous behaviour — the
+   * view refreshes on the next note edit — so this can only add responsiveness.
+   */
+  private registerConfigChangeRefresh(): void {
+    const vault = this.app.vault as Vault & {
+      on?: (name: "config-changed", callback: () => unknown) => EventRef;
+    };
+    try {
+      const ref = vault.on?.("config-changed", () => this.debouncedRefresh());
+      if (ref) this.registerEvent(ref);
+    } catch (error) {
+      console.warn("Brain Atlas: could not subscribe to Obsidian config changes.", error);
+    }
   }
 
   async saveSettings(): Promise<void> {
