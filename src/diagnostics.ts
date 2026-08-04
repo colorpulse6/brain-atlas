@@ -1,6 +1,6 @@
 import type { App, CachedMetadata } from "obsidian";
 import { classifyNoteDetailed, normalizeKind, resolveLobeOverride } from "./classify.ts";
-import type { NoteInput } from "./adapter.ts";
+import { isUserIgnored, type NoteInput } from "./adapter.ts";
 import { KIND_TO_LOBE } from "./shape.ts";
 import {
   frontmatterValueKeys,
@@ -29,10 +29,13 @@ export interface ClassificationReport {
 }
 
 export function buildClassificationReport(app: App, settings: BrainAtlasSettings): ClassificationReport {
-  const notes = app.vault.getMarkdownFiles().map((file) => ({
-    file: { path: file.path, basename: file.basename },
-    cache: toCacheLike(app.metadataCache.getFileCache(file))
-  }));
+  const notes = app.vault
+    .getMarkdownFiles()
+    .filter((file) => !isUserIgnored(app, file.path))
+    .map((file) => ({
+      file: { path: file.path, basename: file.basename },
+      cache: toCacheLike(app.metadataCache.getFileCache(file))
+    }));
   return buildClassificationReportFromFiles(notes, settings);
 }
 

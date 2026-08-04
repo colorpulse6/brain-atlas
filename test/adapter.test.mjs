@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildGraphFromFiles } from "../src/adapter.ts";
+import { buildGraph, buildGraphFromFiles, isUserIgnored } from "../src/adapter.ts";
 import { DEFAULT_SETTINGS } from "../src/settings.ts";
 
 function note(path, cache = {}) {
@@ -145,4 +145,33 @@ test("buildGraphFromFiles limits hubs to the configured top percentage when degr
   const graph = buildGraphFromFiles(notes, { ...DEFAULT_SETTINGS, hubThresholdPercent: 10 });
 
   assert.equal(graph.nodes.filter((node) => node.hub).length, 2);
+});
+
+function fakeApp(files, ignoredPaths = []) {
+  const ignored = new Set(ignoredPaths);
+  return {
+    vault: {
+      getMarkdownFiles: () => files
+    },
+    metadataCache: {
+      getFileCache: () => ({}),
+      isUserIgnored: (path) => ignored.has(path)
+    }
+  };
+}
+
+test("buildGraph drops notes that live under Obsidian's Excluded files patterns", () => {
+  const files = [
+    { path: "Projects/Keep.md", basename: "Keep" },
+    { path: "Archive/Skip.md", basename: "Skip" }
+  ];
+  const app = fakeApp(files, ["Archive/Skip.md"]);
+
+  const graph = buildGraph(app, DEFAULT_SETTINGS);
+
+  assert.deepEqual(graph.nodes.map((node) => node.id), ["Projects/Keep.md"]);
+});
+
+test("isUserIgnored treats a missing internal API as not-ignored", () => {
+  assert.equal(isUserIgnored({ metadataCache: {} }, "Anything.md"), false);
 });
