@@ -113,12 +113,40 @@ export function buildGraph(app: App, settings: BrainAtlasSettings): BrainGraph {
  * explorer, quick switcher, search, core graph, etc). Plugins that walk the vault
  * themselves have to re-check each path against it, via the internal (undocumented)
  * `MetadataCache.isUserIgnored`, or ignored folders leak back into the atlas.
+ *
+ * Because that API carries no compatibility contract, neither a missing method nor a
+ * throwing one may take the whole atlas down with it: `buildGraph` runs from
+ * `BrainAtlasView.rebuild()` and `buildClassificationReport` from the settings tab,
+ * both without a local catch, so an exception here would render a blank view instead
+ * of a graph. Either failure degrades to "nothing is ignored" — the pre-0.2.2 behaviour.
  */
 export function isUserIgnored(app: App, path: string): boolean {
   const metadataCache = app.metadataCache as App["metadataCache"] & {
     isUserIgnored?: (path: string) => boolean;
   };
-  return metadataCache.isUserIgnored?.(path) ?? false;
+  try {
+    return metadataCache.isUserIgnored?.(path) ?? false;
+  } catch (error) {
+    warnUserIgnoredUnavailable(error);
+    return false;
+  }
+}
+
+let warnedUserIgnoredUnavailable = false;
+
+/** Report the first failure only — this runs once per markdown file per rebuild. */
+function warnUserIgnoredUnavailable(error: unknown): void {
+  if (warnedUserIgnoredUnavailable) return;
+  warnedUserIgnoredUnavailable = true;
+  console.warn(
+    "Brain Atlas: MetadataCache.isUserIgnored threw, so the Excluded files setting is being ignored for this session.",
+    error
+  );
+}
+
+/** Test-only: clear the warn-once latch so each test observes a fresh session. */
+export function resetUserIgnoredWarningForTest(): void {
+  warnedUserIgnoredUnavailable = false;
 }
 
 function toFileLike(file: TFile): FileLike {

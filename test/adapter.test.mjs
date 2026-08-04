@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildGraph, buildGraphFromFiles, isUserIgnored } from "../src/adapter.ts";
+import {
+  buildGraph,
+  buildGraphFromFiles,
+  isUserIgnored,
+  resetUserIgnoredWarningForTest
+} from "../src/adapter.ts";
 import { DEFAULT_SETTINGS } from "../src/settings.ts";
 
 function note(path, cache = {}) {
@@ -174,4 +179,51 @@ test("buildGraph drops notes that live under Obsidian's Excluded files patterns"
 
 test("isUserIgnored treats a missing internal API as not-ignored", () => {
   assert.equal(isUserIgnored({ metadataCache: {} }, "Anything.md"), false);
+});
+
+test("isUserIgnored treats a throwing internal API as not-ignored", () => {
+  resetUserIgnoredWarningForTest();
+  const warnings = [];
+  const realWarn = console.warn;
+  console.warn = (...args) => warnings.push(args);
+  try {
+    const app = {
+      metadataCache: {
+        isUserIgnored: () => {
+          throw new TypeError("isUserIgnored is not a function");
+        }
+      }
+    };
+    assert.equal(isUserIgnored(app, "Anything.md"), false);
+    assert.equal(isUserIgnored(app, "Another.md"), false);
+    assert.equal(warnings.length, 1, "the warning is reported once per session, not once per note");
+  } finally {
+    console.warn = realWarn;
+  }
+});
+
+test("a throwing internal API leaves the graph intact rather than blanking the view", () => {
+  resetUserIgnoredWarningForTest();
+  const realWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const files = [
+      { path: "Projects/Keep.md", basename: "Keep" },
+      { path: "Archive/Skip.md", basename: "Skip" }
+    ];
+    const app = fakeApp(files);
+    app.metadataCache.isUserIgnored = () => {
+      throw new Error("internal API changed shape");
+    };
+
+    const graph = buildGraph(app, DEFAULT_SETTINGS);
+
+    assert.deepEqual(
+      graph.nodes.map((node) => node.id).sort(),
+      ["Archive/Skip.md", "Projects/Keep.md"],
+      "both notes survive — a broken internal API means nothing is excluded, not that the graph is empty"
+    );
+  } finally {
+    console.warn = realWarn;
+  }
 });
