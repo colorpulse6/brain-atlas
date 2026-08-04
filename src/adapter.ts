@@ -97,11 +97,28 @@ export function buildGraphFromFiles(notes: NoteInput[], settings: BrainAtlasSett
 }
 
 export function buildGraph(app: App, settings: BrainAtlasSettings): BrainGraph {
-  const notes = app.vault.getMarkdownFiles().map((file) => ({
-    file: toFileLike(file),
-    cache: toCacheLike(app.metadataCache.getFileCache(file))
-  }));
+  const notes = app.vault
+    .getMarkdownFiles()
+    .filter((file) => !isUserIgnored(app, file.path))
+    .map((file) => ({
+      file: toFileLike(file),
+      cache: toCacheLike(app.metadataCache.getFileCache(file))
+    }));
   return buildGraphFromFiles(notes, settings);
+}
+
+/**
+ * Obsidian never filters `Vault.getMarkdownFiles()` by the user's "Excluded files"
+ * setting (Settings > Files & Links) - that list only hides files from the UI (file
+ * explorer, quick switcher, search, core graph, etc). Plugins that walk the vault
+ * themselves have to re-check each path against it, via the internal (undocumented)
+ * `MetadataCache.isUserIgnored`, or ignored folders leak back into the atlas.
+ */
+export function isUserIgnored(app: App, path: string): boolean {
+  const metadataCache = app.metadataCache as App["metadataCache"] & {
+    isUserIgnored?: (path: string) => boolean;
+  };
+  return metadataCache.isUserIgnored?.(path) ?? false;
 }
 
 function toFileLike(file: TFile): FileLike {
