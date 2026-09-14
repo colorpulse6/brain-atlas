@@ -5,6 +5,7 @@ import { displayNodeName, displayNodePath } from "./node-display.ts";
 import { BrainRenderer } from "./renderer.ts";
 import { RenderCore, type BrainRendererOptions } from "./render-core.ts";
 import { BrainGLRenderer } from "./gl/brain-gl-renderer.ts";
+import type { ActivityState } from "./activity.ts";
 import { LOBE_CENTERS } from "./shape.ts";
 import type { BrainAtlasSettings, PinnedNodePosition } from "./settings.ts";
 import type { BrainGraph, BrainNode, LobeName } from "./types.ts";
@@ -14,6 +15,8 @@ export const BRAIN_ATLAS_VIEW_TYPE = "brain-atlas";
 export interface BrainAtlasPluginHost {
   app: App;
   settings: BrainAtlasSettings;
+  /** Shared live-activity state (null when the feature is off). */
+  activity?: ActivityState | null;
   saveSettings(): Promise<void>;
   refreshActiveBrainViews(): void;
 }
@@ -106,6 +109,8 @@ export class BrainAtlasView extends ItemView {
 
   rebuild(): void {
     this.graph = buildGraph(this.plugin.app, this.plugin.settings);
+    // Feed the live-activity state the node universe so posted paths resolve and cascade.
+    this.plugin.activity?.setGraph(Object.keys(this.graph.idx), this.graph.adj);
     this.syncPaletteClass();
     const wantsGL = this.plugin.settings.rendererMode === "webgl2" ||
       (this.plugin.settings.rendererMode === "auto" && !this.isMobileRuntime());
@@ -166,6 +171,7 @@ export class BrainAtlasView extends ItemView {
       const getGraph = (): BrainGraph => this.graph ?? emptyGraph(this.plugin.settings);
       const options = this.rendererOptions();
       const fallback = new BrainRenderer();
+      fallback.setActivity(this.plugin.activity ?? null);
       try {
         fallback.start(this.canvas, getGraph, options);
         this.renderer = fallback;
@@ -239,6 +245,7 @@ export class BrainAtlasView extends ItemView {
 
     const canvas = this.canvas;
 
+    desired.setActivity(this.plugin.activity ?? null);
     try {
       desired.start(canvas, getGraph, options);
       this.renderer = desired;
@@ -251,6 +258,7 @@ export class BrainAtlasView extends ItemView {
       // Canvas2D can bind to it directly. If for some reason it IS tainted
       // (should not happen on a null return), recreate first.
       const fallback = new BrainRenderer();
+      fallback.setActivity(this.plugin.activity ?? null);
       try {
         fallback.start(canvas, getGraph, options);
         this.renderer = fallback;

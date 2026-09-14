@@ -4,6 +4,7 @@ import type { BrainGraph, BrainNode, LobeName, ProjectedPoint, Vec3 } from "./ty
 import type { SurfacePoint } from "./shape.ts";
 import { buildBrainCloud } from "./cloud.ts";
 import { RenderCore, type ProjectedNode, type ProjectedEdge } from "./render-core.ts";
+import { lerpHexColor } from "./activity.ts";
 import {
   drawLobeLabels as sharedDrawLobeLabels,
   drawNodeLabels as sharedDrawNodeLabels,
@@ -270,22 +271,29 @@ export class BrainRenderer extends RenderCore {
     const node = projected.node;
     const isHover = node.id === this.hoverId;
     const isFocus = node.id === this.focusId;
-    const radius = nodeRadius(node) * Math.max(0.55, projected.scale) * (isHover ? 1.18 : isFocus ? 1.25 : 1);
+    // Live activity: swell the radius and lerp the color toward the read/write color by the level.
+    const act = this.activity?.get(node.id);
+    const level = act ? act.level : 0;
+    const swell = act ? 1 + this.activity!.options.swell * level : 1;
+    const color = act
+      ? lerpHexColor(node.color, act.kind === "write" ? this.activity!.options.writeColor : this.activity!.options.readColor, level)
+      : node.color;
+    const radius = nodeRadius(node) * Math.max(0.55, projected.scale) * (isHover ? 1.18 : isFocus ? 1.25 : 1) * swell;
     const fade = Math.max(0.32, 1 - projected.depth * 0.75);
     const dim = node.status === "archived" ? 0.30 : node.status === "dormantRelevant" ? 0.55 : 1;
-    const alpha = fade * dim * lobeMul(node._lobeName);
+    const alpha = Math.min(1, fade * dim * lobeMul(node._lobeName) + level * 0.5);
     if (alpha < 0.05) return;
 
     const haloRadius = radius * 3.6 * graph.CHAOS.halo;
     const halo = ctx.createRadialGradient(projected.sx, projected.sy, 0, projected.sx, projected.sy, haloRadius);
-    halo.addColorStop(0, hexA(node.color, 0.32 * alpha * graph.CHAOS.bloom));
-    halo.addColorStop(1, hexA(node.color, 0));
+    halo.addColorStop(0, hexA(color, Math.min(1, (0.32 + 0.4 * level) * alpha * graph.CHAOS.bloom)));
+    halo.addColorStop(1, hexA(color, 0));
     ctx.fillStyle = halo;
     ctx.beginPath();
     ctx.arc(projected.sx, projected.sy, haloRadius, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.fillStyle = hexA(node.color, Math.min(1, alpha * 0.93));
+    ctx.fillStyle = hexA(color, Math.min(1, alpha * 0.93));
     ctx.beginPath();
     ctx.arc(projected.sx, projected.sy, radius, 0, Math.PI * 2);
     ctx.fill();

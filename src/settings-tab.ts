@@ -23,9 +23,108 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
+  /**
+   * Live activity (Claude Code): a loopback listener lights the node of every note an
+   * external tool reads (green) or writes (red). Settings are applied immediately
+   * (listener restarted) so no reload is needed.
+   */
+  private renderActivitySection(containerEl: HTMLElement): void {
+    const apply = async (): Promise<void> => {
+      await this.plugin.saveSettings();
+      this.plugin.applyActivitySettings();
+    };
+    new Setting(containerEl).setName("Live activity").setHeading();
+    new Setting(containerEl)
+      .setName("Light up notes as Claude Code reads and writes them")
+      .setDesc("Runs a loopback HTTP listener (127.0.0.1 only, desktop only). A Claude Code PostToolUse hook posts each Read/Edit/Write to it and the note's node glows: green on read, red on write, fading over the hold and decay times below. Same contract as the Neural Vault plugin, so one hook can feed both.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.activityEnabled)
+        .onChange(async (value) => {
+          this.plugin.settings.activityEnabled = value;
+          await apply();
+        }));
+    new Setting(containerEl)
+      .setName("Listener port")
+      .setDesc("The hook posts to http://127.0.0.1:<port>/read (default 8766; Neural Vault uses 8765). Status: GET /status.")
+      .addText((text) => text
+        .setPlaceholder("8766")
+        .setValue(String(this.plugin.settings.activityPort))
+        .onChange(async (value) => {
+          const port = Number(value);
+          if (!Number.isInteger(port) || port < 1024 || port > 65535) return;
+          this.plugin.settings.activityPort = port;
+          await apply();
+        }));
+    new Setting(containerEl)
+      .setName("Read and write colors")
+      .setDesc("Hex colors the node lerps toward while it glows (read, then write).")
+      .addText((text) => text
+        .setPlaceholder("#00ff00")
+        .setValue(this.plugin.settings.activityReadColor)
+        .onChange(async (value) => {
+          if (!/^#[0-9a-fA-F]{6}$/.test(value.trim())) return;
+          this.plugin.settings.activityReadColor = value.trim().toLowerCase();
+          await apply();
+        }))
+      .addText((text) => text
+        .setPlaceholder("#ff0000")
+        .setValue(this.plugin.settings.activityWriteColor)
+        .onChange(async (value) => {
+          if (!/^#[0-9a-fA-F]{6}$/.test(value.trim())) return;
+          this.plugin.settings.activityWriteColor = value.trim().toLowerCase();
+          await apply();
+        }));
+    new Setting(containerEl)
+      .setName("Hold (seconds)")
+      .setDesc("How long a lit node stays at full glow before it starts to fade.")
+      .addSlider((slider) => slider
+        .setLimits(0, 10, 0.5)
+        .setValue(this.plugin.settings.activityHoldSeconds)
+        .setDynamicTooltip()
+        .onChange(async (value) => {
+          this.plugin.settings.activityHoldSeconds = value;
+          await apply();
+        }));
+    new Setting(containerEl)
+      .setName("Decay (seconds)")
+      .setDesc("Time constant of the exponential fade after the hold.")
+      .addSlider((slider) => slider
+        .setLimits(0.1, 5, 0.1)
+        .setValue(this.plugin.settings.activityDecaySeconds)
+        .setDynamicTooltip()
+        .onChange(async (value) => {
+          this.plugin.settings.activityDecaySeconds = value;
+          await apply();
+        }));
+    new Setting(containerEl)
+      .setName("Cascade")
+      .setDesc("Glow level passed to the linked neighbours of a lit node (0 = none, 1 = same as the node).")
+      .addSlider((slider) => slider
+        .setLimits(0, 1, 0.05)
+        .setValue(this.plugin.settings.activityCascade)
+        .setDynamicTooltip()
+        .onChange(async (value) => {
+          this.plugin.settings.activityCascade = value;
+          await apply();
+        }));
+    new Setting(containerEl)
+      .setName("Swell")
+      .setDesc("Radius multiplier at full glow is 1 + swell.")
+      .addSlider((slider) => slider
+        .setLimits(0, 6, 0.25)
+        .setValue(this.plugin.settings.activitySwell)
+        .setDynamicTooltip()
+        .onChange(async (value) => {
+          this.plugin.settings.activitySwell = value;
+          await apply();
+        }));
+  }
+
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
+
+    this.renderActivitySection(containerEl);
 
     new Setting(containerEl)
       .setName("Theme palette")

@@ -42,6 +42,15 @@ export interface BrainAtlasSettings {
   defaultKind: NodeKind;
   inferKindsFromLinks: boolean;
   rendererMode: RendererMode;
+  /** Live activity: light nodes as Claude Code (or any tool) reads and writes notes. */
+  activityEnabled: boolean;
+  activityPort: number;
+  activityReadColor: string;
+  activityWriteColor: string;
+  activityHoldSeconds: number;
+  activityDecaySeconds: number;
+  activityCascade: number;
+  activitySwell: number;
 }
 
 export const DEFAULT_SETTINGS: BrainAtlasSettings = {
@@ -94,7 +103,15 @@ export const DEFAULT_SETTINGS: BrainAtlasSettings = {
   pinnedNodePositions: {},
   defaultKind: "concept",
   inferKindsFromLinks: true,
-  rendererMode: "auto"
+  rendererMode: "auto",
+  activityEnabled: true,
+  activityPort: 8766,
+  activityReadColor: "#00ff00",
+  activityWriteColor: "#ff0000",
+  activityHoldSeconds: 2.5,
+  activityDecaySeconds: 0.5,
+  activityCascade: 0.45,
+  activitySwell: 2
 };
 
 export function normalizeSettings(input: Partial<BrainAtlasSettings> | null | undefined): BrainAtlasSettings {
@@ -119,8 +136,34 @@ export function normalizeSettings(input: Partial<BrainAtlasSettings> | null | un
     pinnedNodePositions: normalizePinnedNodePositions(input?.pinnedNodePositions),
     defaultKind: normalizeKindValue(input?.defaultKind) ?? DEFAULT_SETTINGS.defaultKind,
     inferKindsFromLinks: input?.inferKindsFromLinks ?? DEFAULT_SETTINGS.inferKindsFromLinks,
-    rendererMode: normalizeRendererMode(input?.rendererMode) ?? DEFAULT_SETTINGS.rendererMode
+    rendererMode: normalizeRendererMode(input?.rendererMode) ?? DEFAULT_SETTINGS.rendererMode,
+    activityEnabled: typeof input?.activityEnabled === "boolean" ? input.activityEnabled : DEFAULT_SETTINGS.activityEnabled,
+    activityPort: normalizePort(input?.activityPort) ?? DEFAULT_SETTINGS.activityPort,
+    activityReadColor: normalizeHexColor(input?.activityReadColor) ?? DEFAULT_SETTINGS.activityReadColor,
+    activityWriteColor: normalizeHexColor(input?.activityWriteColor) ?? DEFAULT_SETTINGS.activityWriteColor,
+    activityHoldSeconds: normalizeNumber(input?.activityHoldSeconds, 0, 60) ?? DEFAULT_SETTINGS.activityHoldSeconds,
+    activityDecaySeconds: normalizeNumber(input?.activityDecaySeconds, 0.05, 60) ?? DEFAULT_SETTINGS.activityDecaySeconds,
+    activityCascade: normalizeNumber(input?.activityCascade, 0, 1) ?? DEFAULT_SETTINGS.activityCascade,
+    activitySwell: normalizeNumber(input?.activitySwell, 0, 10) ?? DEFAULT_SETTINGS.activitySwell
   };
+}
+
+export function normalizePort(value: unknown): number | null {
+  const port = typeof value === "string" ? Number(value) : value;
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 1024 || port > 65535) return null;
+  return port;
+}
+
+export function normalizeHexColor(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return /^#[0-9a-fA-F]{6}$/.test(trimmed) ? trimmed.toLowerCase() : null;
+}
+
+function normalizeNumber(value: unknown, min: number, max: number): number | null {
+  const n = typeof value === "string" ? Number(value) : value;
+  if (typeof n !== "number" || !Number.isFinite(n)) return null;
+  return Math.max(min, Math.min(max, n));
 }
 
 export function normalizeFrontmatterValueKey(value: string): string | null {

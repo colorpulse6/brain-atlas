@@ -2,6 +2,7 @@ import { assignLobePositions, Brain3D, KIND_TO_LOBE } from "./shape.ts";
 import { allLobesEnabled, type LobeVisibility } from "./lobe-visibility.ts";
 import { clampPinnedNodePosition, type PerformancePreset, type PinnedNodePosition } from "./settings.ts";
 import type { BrainEdge, BrainGraph, BrainNode, LobeName, ProjectedPoint, Vec3 } from "./types.ts";
+import type { ActivityState } from "./activity.ts";
 
 export interface SignalParticle {
   id: number;
@@ -145,6 +146,18 @@ export abstract class RenderCore {
   protected deterministic = false;
 
   /**
+   * Live activity (nodes lit by external read/write events). Shared by every view;
+   * null = feature off. tick() runs once per frame in draw(); while anything glows
+   * the frame delay drops to 0 so the fade animates even on throttled presets.
+   */
+  protected activity: ActivityState | null = null;
+
+  setActivity(state: ActivityState | null): void {
+    this.activity = state;
+    this.requestImmediateFrame();
+  }
+
+  /**
    * Pass-gating test seam. null = render all passes (production default).
    * When a Set is supplied, only passes whose name is present are drawn.
    * Lets the A/B harness compare matching SUBSETS of passes while they are
@@ -223,6 +236,7 @@ export abstract class RenderCore {
       .map((node) => ({ node, ...project(node._3dLobe as Vec3) }));
     this.projCache = Object.fromEntries(nodeProjs.map((node) => [node.node.id, node]));
 
+    this.activity?.tick(now);
     this.drawScene(now);
 
     this.scheduleNextFrame(this.nextFrameDelay(now));
@@ -366,6 +380,7 @@ export abstract class RenderCore {
     const preset = this.effectivePerformancePreset();
     if (preset === "smooth") return 0;
     if (this.drag || now - this.lastUserAt < 700) return 0;
+    if (this.activity && this.activity.activeCount() > 0) return 0;
     return PERFORMANCE_FRAME_DELAYS[preset] ?? 0;
   }
 

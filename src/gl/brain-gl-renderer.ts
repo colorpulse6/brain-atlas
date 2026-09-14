@@ -22,6 +22,7 @@ import type { BrainGraph, BrainNode, LobeName, Vec3 } from "../types.ts";
 import { sceneProjection, projectPoint } from "./projection.ts";
 import type { ProjectionOpts } from "./projection.ts";
 import { hexToRgb01 } from "./color.ts";
+import { lerpRgb01 } from "../activity.ts";
 import { createProgram, getUniformLocations, createStaticBuffer } from "./programs.ts";
 import { BACKGROUND_VS, BACKGROUND_FS, HAZE_VS, HAZE_FS, CLOUD_VS, CLOUD_FS, EDGE_VS, EDGE_FS, NODE_VS, NODE_FS, SIGNAL_VS, SIGNAL_FS } from "./shaders.ts";
 import { LOBE_CENTERS } from "../shape.ts";
@@ -243,6 +244,12 @@ export class BrainGLRenderer extends RenderCore {
   private signalProgram: SignalProgram | null = null;
   /** Reusable scratch for uploading one node's 6-vertex interleaved block (drag update). */
   private nodeUploadScratch = new Float32Array(NODE_VERTS_PER_NODE * NODE_FLOATS_PER_VERT);
+  /**
+   * Node-buffer indices whose radius/color were overwritten by the live-activity glow.
+   * Restored to their base values (np.buf) the frame after the glow fades. Cleared
+   * whenever the node program is rebuilt (new graph or restored context).
+   */
+  private activityPatched = new Set<number>();
 
   // ---- Context-loss state ----
   /** True between webglcontextlost and webglcontextrestored (or permanent loss). */
@@ -555,6 +562,10 @@ export class BrainGLRenderer extends RenderCore {
     // and passed to both edge hemispheres so drawEdge's isFocus/isHover are in-shader.
     const focusIdx = this.nodeBufferIndexOf(graph, this.focusId);
     const hoverIdx = this.nodeBufferIndexOf(graph, this.hoverId);
+
+    // Live activity: patch the glowing nodes' radius/color in the static node VBO
+    // (a few bufferSubData calls per frame; nothing when nothing glows).
+    this.applyActivity(gl, graph);
 
     // FAR hemisphere (projected z > 0), back of the scene:
     if (this.passEnabled("cloud")) this.drawCloud(gl, proj, now, +1, lobeMul, lobeColors);
@@ -960,41 +971,9 @@ export class BrainGLRenderer extends RenderCore {
       np.buf.positions[bufIdx * 3 + 1] = pos.y;
       np.buf.positions[bufIdx * 3 + 2] = pos.z;
 
-      // Read the node's existing interleaved 6-vertex block, overwrite only the
-      // position floats (offset 0-2 of each vertex), upload that byte range.
-      const F = NODE_FLOATS_PER_VERT;
-      const block = this.nodeUploadScratch;
-      // Reconstruct the 6-vertex block from buf (all attrs are per-node constant).
-      const r = np.buf.radius[bufIdx];
-      const hub = np.buf.hub[bufIdx];
-      const status = np.buf.status[bufIdx];
-      const lobe = np.buf.lobeIndex[bufIdx];
-      const cr = np.buf.color[bufIdx * 3 + 0];
-      const cg = np.buf.color[bufIdx * 3 + 1];
-      const cb = np.buf.color[bufIdx * 3 + 2];
-      const nIdx = np.buf.nodeIndex[bufIdx];
-      // Corner offsets must match ensureNodeProgram's winding exactly.
-      const corners = NODE_CORNERS;
-      for (let c = 0; c < NODE_VERTS_PER_NODE; c++) {
-        let o = c * F;
-        block[o++] = pos.x;
-        block[o++] = pos.y;
-        block[o++] = pos.z;
-        block[o++] = r;
-        block[o++] = hub;
-        block[o++] = status;
-        block[o++] = lobe;
-        block[o++] = cr;
-        block[o++] = cg;
-        block[o++] = cb;
-        block[o++] = nIdx;
-        block[o++] = corners[c][0];
-        block[o++] = corners[c][1];
-      }
-      gl.bindBuffer(gl.ARRAY_BUFFER, np.vertexBuffer);
-      const byteOffset = bufIdx * NODE_VERTS_PER_NODE * F * 4;
-      gl.bufferSubData(gl.ARRAY_BUFFER, byteOffset, block);
-      gl.bindBuffer(gl.ARRAY_BUFFER, null);
+      // Rewrite the node's 6-vertex block from buf (position changed; a glowing node
+      // keeps its current activity radius/color because applyActivity re-patches it).
+      this.uploadNodeBlock(gl, np, bufIdx);
     }
 
     // ---- Edge VBO: rewrite each INCIDENT edge's 26-vertex block ----
@@ -1380,6 +1359,91 @@ export class BrainGLRenderer extends RenderCore {
   }
 
   /**
+   * Rewrite ONE node's 6-vertex interleaved block in the node VBO from np.buf (the
+   * source of truth), optionally overriding the radius and color (live activity).
+   * Corner offsets match ensureNodeProgram's winding exactly.
+   */
+  private uploadNodeBlock(
+    gl: WebGL2RenderingContext,
+    np: NodeProgram,
+    bufIdx: number,
+    radius?: number,
+    color?: [number, number, number]
+  ): void {
+    const F = NODE_FLOATS_PER_VERT;
+    const block = this.nodeUploadScratch;
+    const x = np.buf.positions[bufIdx * 3 + 0];
+    const y = np.buf.positions[bufIdx * 3 + 1];
+    const z = np.buf.positions[bufIdx * 3 + 2];
+    const r = radius ?? np.buf.radius[bufIdx];
+    const hub = np.buf.hub[bufIdx];
+    const status = np.buf.status[bufIdx];
+    const lobe = np.buf.lobeIndex[bufIdx];
+    const cr = color ? color[0] : np.buf.color[bufIdx * 3 + 0];
+    const cg = color ? color[1] : np.buf.color[bufIdx * 3 + 1];
+    const cb = color ? color[2] : np.buf.color[bufIdx * 3 + 2];
+    const nIdx = np.buf.nodeIndex[bufIdx];
+    const corners = NODE_CORNERS;
+    for (let c = 0; c < NODE_VERTS_PER_NODE; c++) {
+      let o = c * F;
+      block[o++] = x;
+      block[o++] = y;
+      block[o++] = z;
+      block[o++] = r;
+      block[o++] = hub;
+      block[o++] = status;
+      block[o++] = lobe;
+      block[o++] = cr;
+      block[o++] = cg;
+      block[o++] = cb;
+      block[o++] = nIdx;
+      block[o++] = corners[c][0];
+      block[o++] = corners[c][1];
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, np.vertexBuffer);
+    const byteOffset = bufIdx * NODE_VERTS_PER_NODE * F * 4;
+    gl.bufferSubData(gl.ARRAY_BUFFER, byteOffset, block);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  }
+
+  /**
+   * Live activity for the WebGL path. The node VBO is static, so each glowing node
+   * gets its block re-uploaded with radius * (1 + swell * level) and its color lerped
+   * toward the read/write color; a node whose glow faded is restored from np.buf once.
+   * Runs before the node passes; costs one bufferSubData per glowing node per frame.
+   */
+  private applyActivity(gl: WebGL2RenderingContext, graph: BrainGraph): void {
+    const np = this.nodeProgram;
+    if (!np || this.nodeGraph !== graph) return;
+    const activity = this.activity;
+    const wanted = new Map<number, { level: number; kind: "read" | "write" }>();
+    if (activity) {
+      for (const [id, entry] of activity.active()) {
+        const bufIdx = this.nodeBufferIndexOf(graph, id);
+        if (bufIdx >= 0 && bufIdx < np.nodeCount) wanted.set(bufIdx, { level: entry.level, kind: entry.kind });
+      }
+    }
+    for (const bufIdx of [...this.activityPatched]) {
+      if (wanted.has(bufIdx)) continue;
+      this.uploadNodeBlock(gl, np, bufIdx);
+      this.activityPatched.delete(bufIdx);
+    }
+    if (!activity || wanted.size === 0) return;
+    const { swell, readColor, writeColor } = activity.options;
+    for (const [bufIdx, entry] of wanted) {
+      const base: [number, number, number] = [
+        np.buf.color[bufIdx * 3 + 0],
+        np.buf.color[bufIdx * 3 + 1],
+        np.buf.color[bufIdx * 3 + 2]
+      ];
+      const color = lerpRgb01(base, entry.kind === "write" ? writeColor : readColor, entry.level);
+      const radius = np.buf.radius[bufIdx] * (1 + swell * entry.level);
+      this.uploadNodeBlock(gl, np, bufIdx, radius, color);
+      this.activityPatched.add(bufIdx);
+    }
+  }
+
+  /**
    * Lazily build the node sprite program + static VBO + dynamic element buffer.
    * Rebuilds when the graph identity changes.
    *
@@ -1406,6 +1470,7 @@ export class BrainGLRenderer extends RenderCore {
     const program = createProgram(gl, NODE_VS, NODE_FS);
     const buf = buildNodeBuffer(graph.nodes);
     const nodeCount = buf.count;
+    this.activityPatched.clear(); // fresh VBO: nothing is patched yet
 
     // Interleaved layout (floats per vertex):
     //   pos(3) radiusBase(1) hub(1) status(1) lobeIndex(1)

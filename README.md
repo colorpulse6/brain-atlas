@@ -48,6 +48,33 @@ This release focuses on making Brain Atlas work with real vault taxonomies inste
 - Click a node to open the backing note.
 - Drag a node to pin its position in the atlas.
 - Local-only rendering. Brain Atlas does not send vault data to a server.
+- Live activity: a loopback listener lights the node of every note an external tool (Claude Code hooks) reads or writes, with a cascade to linked notes and a fade. See "Live activity (Claude Code)" below.
+
+## Live activity (Claude Code)
+
+Brain Atlas can light up nodes as something else works in the vault. On desktop it runs a loopback HTTP listener (127.0.0.1 only, default port `8766`, `Live activity` settings) and accepts the payload Claude Code passes to its hooks:
+
+```
+POST http://127.0.0.1:8766/read
+{ "tool_name": "Read", "tool_input": { "file_path": "folder/note.md" } }
+```
+
+`tool_name` `Read` (or `Skill`) glows green, `Edit` / `Write` / `MultiEdit` / `NotebookEdit` glow red. `file_path` is the vault-relative path (an absolute path inside the vault is accepted too). The lit node swells and its linked neighbours light at the `Cascade` level; everything holds for `Hold` seconds and then fades over `Decay`. `GET /status` returns the listener state. Unknown paths are ignored. The contract is the same one the [Neural Vault](https://github.com/williansaez/obsidian-neural-vault) plugin uses for Obsidian's built-in graph, so one hook can feed both.
+
+A minimal Claude Code hook (`.claude/settings.json` in the vault):
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      { "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [ { "type": "command", "command": "curl -s --max-time 1 -X POST http://127.0.0.1:8766/read --data-binary @- >/dev/null 2>&1" } ] }
+    ]
+  }
+}
+```
+
+Nothing is sent anywhere but the local listener; turning the toggle off stops it.
 
 ## Install
 
