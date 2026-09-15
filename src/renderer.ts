@@ -50,8 +50,7 @@ export class BrainRenderer extends RenderCore {
 
     const pal = graph.activePalette;
     const scale = Math.min(this.width, this.height) * 0.32 * this.zoom;
-    const cx = this.width / 2;
-    const cy = this.height / 2 - this.height * 0.04;
+    const { cx, cy } = this.viewCenter();
     const project = Brain3D.makeProjector({ rotX: this.rot.x, rotY: this.rot.y, scale, cx, cy, dist: 3.4 });
     const lobeStats = this.getLobeStats();
     const interLobeEdges = graph.edges.filter((edge) => {
@@ -137,10 +136,11 @@ export class BrainRenderer extends RenderCore {
     // Pass: signals (additive particle trails).
     if (this.passEnabled("signals")) this.drawSignals(ctx, now, project, lobeMul);
 
-    // Pass: labels (lobe labels + node labels).
+    // Pass: labels. Section (lobe) labels follow showLobeLabels; node labels are ALWAYS drawn but minimal
+    // (only in-use / hovered / focused nodes) unless showAllLabels turns the dense mode back on.
     if (this.passEnabled("labels")) {
       if (this.options.showLobeLabels) this.drawLobeLabels(ctx, project, graph, lobeStats, lobeMul);
-      if (this.options.showLobeLabels) this.drawNodeLabels(ctx, nodeProjs, graph, lobeMul);
+      this.drawNodeLabels(ctx, nodeProjs, graph, lobeMul);
     }
 
     // Pass: compass (orientation gizmo).
@@ -386,7 +386,9 @@ export class BrainRenderer extends RenderCore {
       focusId: this.focusId,
       zoom: this.zoom,
       width: this.width,
-      mobile: this.effectivePerformancePreset() === "mobile"
+      mobile: this.effectivePerformancePreset() === "mobile",
+      activeIds: this.activeNoteIds(),
+      showAll: this.options.showAllLabels
     });
   }
 

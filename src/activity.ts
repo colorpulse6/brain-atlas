@@ -22,14 +22,21 @@
 
 export type ActivityKind = "read" | "write";
 
-/** Transient "live" nodes: things Claude is doing right now (a command, a launched terminal, a subagent). */
-export type LiveKind = "command" | "agent" | "terminal";
+/**
+ * Transient "live" nodes: things Claude is doing right now.
+ *   command  = a foreground shell command      terminal = a launched terminal / app window
+ *   shell    = a background shell (run_in_background; ends on its TTL, no end event fires)
+ *   agent    = a spawned subagent (uniquely colored per type)
+ */
+export type LiveKind = "command" | "shell" | "terminal" | "agent";
 
 export interface LiveEntry {
   /** Correlation id from the hook (tool_use_id, or a hash of the command). */
   id: string;
-  /** Short human label drawn next to the node (the command, the subagent type). */
+  /** Short human name shown on the reticle + in the task manager (the subagent type, a short command). */
   label: string;
+  /** Full detail for the task manager (the command line / description). */
+  detail: string;
   kind: LiveKind;
   /** Anatomical region to float the node in (a LobeName string, e.g. "temporal"). */
   region: string;
@@ -37,6 +44,8 @@ export interface LiveEntry {
   active: boolean;
   /** Activation timestamp (tick's clock). */
   bornAt: number;
+  /** Monotonic spawn order, so the stack keeps a stable top-to-bottom order. */
+  seq: number;
   /** When it stopped being active (decay start), or null while active. */
   endAt: number | null;
   /** Current glow level in [0, 1], recomputed by tick(). */
@@ -64,10 +73,13 @@ export interface ActivityOptions {
   liveDecaySeconds: number;
   /** Force-end an active live node after this many seconds (in case its "end" event is lost). */
   liveMaxSeconds: number;
-  /** Colors for the three live kinds. */
+  /** Background shells never get an end event (PostToolUse fires at backgrounding), so they use a longer TTL. */
+  liveShellMaxSeconds: number;
+  /** Base colors per live kind. Agents are additionally tinted per type (see liveColorFor). */
   liveCommandColor: string;
-  liveAgentColor: string;
+  liveShellColor: string;
   liveTerminalColor: string;
+  liveAgentColor: string;
 }
 
 export const DEFAULT_ACTIVITY_OPTIONS: ActivityOptions = {
@@ -79,9 +91,11 @@ export const DEFAULT_ACTIVITY_OPTIONS: ActivityOptions = {
   writeColor: "#ff0000",
   liveDecaySeconds: 1.2,
   liveMaxSeconds: 180,
+  liveShellMaxSeconds: 900,
   liveCommandColor: "#ffb02e",
-  liveAgentColor: "#22d3ee",
-  liveTerminalColor: "#c084fc"
+  liveShellColor: "#38bdf8",
+  liveTerminalColor: "#c084fc",
+  liveAgentColor: "#22d3ee"
 };
 
 export interface ActivityStatus {
@@ -159,11 +173,12 @@ export interface LiveEvent {
   op: "spawn" | "end";
   id: string;
   label: string;
+  detail: string;
   kind: LiveKind;
   region: string;
 }
 
-const LIVE_KINDS = new Set<LiveKind>(["command", "agent", "terminal"]);
+const LIVE_KINDS = new Set<LiveKind>(["command", "shell", "terminal", "agent"]);
 
 /** Parse a POST /live body into a LiveEvent, or null when it is malformed. */
 export function parseLiveBody(body: string): LiveEvent | null {
@@ -181,8 +196,36 @@ export function parseLiveBody(body: string): LiveEvent | null {
   const kindRaw = typeof p.kind === "string" ? (p.kind.trim().toLowerCase() as LiveKind) : "command";
   const kind = LIVE_KINDS.has(kindRaw) ? kindRaw : "command";
   const label = typeof p.label === "string" ? p.label.trim().slice(0, 80) : "";
+  const detail = typeof p.detail === "string" ? p.detail.trim().slice(0, 200) : "";
   const region = typeof p.region === "string" ? p.region.trim().toLowerCase() : "temporal";
-  return { op, id, label, kind, region };
+  return { op, id, label, detail, kind, region };
+}
+
+/** A stable, vivid color for an agent, derived from its name so each subagent type reads distinctly. */
+export function agentColor(label: string): string {
+  let h = 2166136261 >>> 0;
+  const s = (label || "agent").toLowerCase();
+  for (let i = 0; i < s.length; i += 1) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  const hue = h % 360;
+  return hslToHex(hue, 72, 62);
+}
+
+/** HSL (h 0-360, s/l 0-100) to "#rrggbb". */
+export function hslToHex(h: number, s: number, l: number): string {
+  const sN = s / 100;
+  const lN = l / 100;
+  const c = (1 - Math.abs(2 * lN - 1)) * sN;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = lN - c / 2;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (h < 60) { r = c; g = x; } else if (h < 120) { r = x; g = c; } else if (h < 180) { g = c; b = x; } else if (h < 240) { g = x; b = c; } else if (h < 300) { r = x; b = c; } else { r = c; b = x; }
+  const to = (v: number) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+  return `#${to(r)}${to(g)}${to(b)}`;
 }
 
 /** Parse "#rrggbb" into [r, g, b] in [0, 1]; a bad string yields white. */
@@ -227,6 +270,7 @@ export class ActivityState {
   /** Transient live nodes keyed by correlation id. */
   private liveEntries = new Map<string, LiveEntry>();
   private lastLive: string | null = null;
+  private liveSeq = 0;
 
   constructor(options: Partial<ActivityOptions> = {}) {
     this.options = { ...DEFAULT_ACTIVITY_OPTIONS, ...options };
@@ -294,9 +338,11 @@ export class ActivityState {
 
   /** Advance the transient live nodes: hold at full while active, decay after they end, TTL-expire the lost. */
   private tickLive(now: number): void {
-    const ttl = Math.max(1, this.options.liveMaxSeconds) * 1000;
     const decay = Math.max(0.05, this.options.liveDecaySeconds) * 1000;
     for (const [id, entry] of this.liveEntries) {
+      // Background shells never get an end event, so they use a longer TTL than a stuck foreground task.
+      const ttlSeconds = entry.kind === "shell" ? this.options.liveShellMaxSeconds : this.options.liveMaxSeconds;
+      const ttl = Math.max(1, ttlSeconds) * 1000;
       if (entry.active && now - entry.bornAt > ttl) {
         // The "end" event never arrived (crash, blocked tool, closed listener): retire it anyway.
         entry.active = false;
@@ -320,17 +366,19 @@ export class ActivityState {
    * Spawn or refresh a transient live node (a command Claude is running, a launched terminal, a subagent).
    * `region` is a LobeName string the renderer floats the node in. `now` is tick's clock.
    */
-  spawnLive(id: string, label: string, kind: LiveKind, region: string, now: number): void {
+  spawnLive(id: string, label: string, kind: LiveKind, region: string, now: number, detail = ""): void {
     if (!id) return;
     this.lastLive = label || id;
     const existing = this.liveEntries.get(id);
     this.liveEntries.set(id, {
       id,
       label: label || existing?.label || id,
+      detail: detail || existing?.detail || label || "",
       kind,
       region: region || existing?.region || "temporal",
       active: true,
       bornAt: existing?.bornAt ?? now,
+      seq: existing?.seq ?? (this.liveSeq += 1),
       endAt: null,
       level: 1
     });
@@ -344,13 +392,13 @@ export class ActivityState {
     entry.endAt = now;
   }
 
-  /** Live nodes currently worth drawing (level >= 0.01), newest first. */
+  /** Live nodes currently worth drawing (level >= 0.01), newest first (stable by spawn order). */
   liveNodes(): LiveEntry[] {
     const out: LiveEntry[] = [];
     for (const entry of this.liveEntries.values()) {
       if (entry.level >= MIN_LEVEL) out.push(entry);
     }
-    return out.sort((a, b) => b.bornAt - a.bornAt);
+    return out.sort((a, b) => b.seq - a.seq);
   }
 
   /** Number of live nodes glowing (active or fading). */
@@ -362,11 +410,21 @@ export class ActivityState {
     return n;
   }
 
-  /** The configured color for a live kind. */
+  /** The configured base color for a live kind. */
   liveColor(kind: LiveKind): string {
     if (kind === "agent") return this.options.liveAgentColor;
     if (kind === "terminal") return this.options.liveTerminalColor;
+    if (kind === "shell") return this.options.liveShellColor;
     return this.options.liveCommandColor;
+  }
+
+  /**
+   * The color to draw a live entry: the kind's base color, except agents, which are tinted per type so a
+   * workflow's subagents each read as a distinct color (the same subagent type is always the same hue).
+   */
+  liveColorFor(entry: { kind: LiveKind; label: string }): string {
+    if (entry.kind !== "agent") return this.liveColor(entry.kind);
+    return agentColor(entry.label || "agent");
   }
 
   /** The node's entry while it glows (level >= 0.01), else undefined. */

@@ -54,9 +54,11 @@ export interface BrainAtlasSettings {
   /** Transient live nodes: commands / terminals Claude runs and subagents it spawns, glowing while active. */
   liveDecaySeconds: number;
   liveMaxSeconds: number;
+  liveShellMaxSeconds: number;
   liveCommandColor: string;
-  liveAgentColor: string;
+  liveShellColor: string;
   liveTerminalColor: string;
+  liveAgentColor: string;
 }
 
 export const DEFAULT_SETTINGS: BrainAtlasSettings = {
@@ -120,9 +122,11 @@ export const DEFAULT_SETTINGS: BrainAtlasSettings = {
   activitySwell: 2,
   liveDecaySeconds: 1.2,
   liveMaxSeconds: 180,
+  liveShellMaxSeconds: 900,
   liveCommandColor: "#ffb02e",
-  liveAgentColor: "#22d3ee",
-  liveTerminalColor: "#c084fc"
+  liveShellColor: "#38bdf8",
+  liveTerminalColor: "#c084fc",
+  liveAgentColor: "#22d3ee"
 };
 
 export function normalizeSettings(input: Partial<BrainAtlasSettings> | null | undefined): BrainAtlasSettings {
@@ -158,9 +162,11 @@ export function normalizeSettings(input: Partial<BrainAtlasSettings> | null | un
     activitySwell: normalizeNumber(input?.activitySwell, 0, 10) ?? DEFAULT_SETTINGS.activitySwell,
     liveDecaySeconds: normalizeNumber(input?.liveDecaySeconds, 0.05, 60) ?? DEFAULT_SETTINGS.liveDecaySeconds,
     liveMaxSeconds: normalizeNumber(input?.liveMaxSeconds, 5, 3600) ?? DEFAULT_SETTINGS.liveMaxSeconds,
+    liveShellMaxSeconds: normalizeNumber(input?.liveShellMaxSeconds, 5, 7200) ?? DEFAULT_SETTINGS.liveShellMaxSeconds,
     liveCommandColor: normalizeHexColor(input?.liveCommandColor) ?? DEFAULT_SETTINGS.liveCommandColor,
-    liveAgentColor: normalizeHexColor(input?.liveAgentColor) ?? DEFAULT_SETTINGS.liveAgentColor,
-    liveTerminalColor: normalizeHexColor(input?.liveTerminalColor) ?? DEFAULT_SETTINGS.liveTerminalColor
+    liveShellColor: normalizeHexColor(input?.liveShellColor) ?? DEFAULT_SETTINGS.liveShellColor,
+    liveTerminalColor: normalizeHexColor(input?.liveTerminalColor) ?? DEFAULT_SETTINGS.liveTerminalColor,
+    liveAgentColor: normalizeHexColor(input?.liveAgentColor) ?? DEFAULT_SETTINGS.liveAgentColor
   };
 }
 

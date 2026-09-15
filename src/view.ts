@@ -3,7 +3,7 @@ import { buildGraph } from "./adapter.ts";
 import { LOBES, setAllLobes, setLobeEnabled } from "./lobe-visibility.ts";
 import { displayNodeName, displayNodePath } from "./node-display.ts";
 import { BrainRenderer } from "./renderer.ts";
-import { RenderCore, type BrainRendererOptions, type LiveScreenNode } from "./render-core.ts";
+import { RenderCore, type BrainRendererOptions, type LiveScreenNode, type LiveAnchor } from "./render-core.ts";
 import { BrainGLRenderer } from "./gl/brain-gl-renderer.ts";
 import type { ActivityState } from "./activity.ts";
 import { LOBE_CENTERS } from "./shape.ts";
@@ -34,10 +34,19 @@ export class BrainAtlasView extends ItemView {
   private infoEl: HTMLDivElement | null = null;
   private emptyEl: HTMLDivElement | null = null;
   private liveLayerEl: HTMLDivElement | null = null;
-  /** Transient live-node chips (commands / terminals / agents Claude is running) keyed by correlation id. */
+  private taskPanelEl: HTMLDivElement | null = null;
+  /** Transient live-node reticles (commands / shells / terminals / agents Claude runs) keyed by correlation id. */
   private liveChips = new Map<string, HTMLElement>();
+  /** Signature of the last task-panel render, so we only rebuild it when the task set/status changes. */
+  private taskPanelSig = "";
+  /** View-local quick toggles (not persisted): dense node labels, and the task panel + reticles. */
+  private showAllLabels = false;
+  private liveUiVisible = true;
   private infoButton: HTMLButtonElement | null = null;
   private labelButton: HTMLButtonElement | null = null;
+  private namesButton: HTMLButtonElement | null = null;
+  private spinButton: HTMLButtonElement | null = null;
+  private tasksButton: HTMLButtonElement | null = null;
   private allButton: HTMLButtonElement | null = null;
   private noneButton: HTMLButtonElement | null = null;
   private lobeButtons: Partial<Record<LobeName, HTMLButtonElement>> = {};
@@ -83,6 +92,8 @@ export class BrainAtlasView extends ItemView {
     this.tooltipEl = root.createDiv({ cls: "brain-atlas-tooltip" });
     this.focusEl = root.createDiv({ cls: "brain-atlas-focus-card" });
     this.liveLayerEl = root.createDiv({ cls: "brain-atlas-live-layer" });
+    this.taskPanelEl = root.createDiv({ cls: "brain-atlas-task-panel" });
+    this.taskPanelEl.hide();
     this.emptyEl = root.createDiv({ cls: "brain-atlas-empty" });
     this.emptyEl.setText("Your brain is empty. Add notes with #project, #person, or #source tags to start mapping.");
 
@@ -97,6 +108,8 @@ export class BrainAtlasView extends ItemView {
     this.liveChips.forEach((chip) => chip.remove());
     this.liveChips.clear();
     this.liveLayerEl = null;
+    this.taskPanelEl = null;
+    this.taskPanelSig = "";
     this.rootEl = null;
     this.canvas = null;
     this.canvasContextKind = null;
@@ -141,53 +154,133 @@ export class BrainAtlasView extends ItemView {
     return {
       idleAutoRotate: this.plugin.settings.idleAutoRotate,
       showLobeLabels: this.plugin.settings.showLobeLabels,
+      showAllLabels: this.showAllLabels,
       enabledLobes: this.plugin.settings.enabledLobes,
       performancePreset: this.plugin.settings.performancePreset,
       mobileMode: this.isMobileRuntime(),
       onPinNode: (node, position) => this.pinNode(node, position),
       onChange: this.syncOverlays,
-      onLiveNodes: (nodes) => this.syncLiveNodes(nodes),
+      onLiveNodes: (nodes, anchor) => this.syncLiveNodes(nodes, anchor),
       onRendererUnavailable: () => this.fallbackToCanvas2D()
     };
   }
 
   /**
-   * Reconcile the transient live-node chips (commands / terminals Claude runs, subagents it spawns)
-   * against the projected list the renderer hands us each frame. Chips are DOM, so their labels stay
-   * crisp and the same code works under Canvas2D and WebGL. A chip that is no longer in the list is removed.
+   * The renderer hands us the live nodes (things Claude is doing right now) + the temporal-lobe anchor each
+   * frame. We draw two things: reticle markers stacked on the temporal side of the brain, and the full
+   * task-manager panel in the bottom-left. Both are DOM (crisp labels; identical under Canvas2D and WebGL).
    */
-  private syncLiveNodes(nodes: LiveScreenNode[]): void {
+  private syncLiveNodes(nodes: LiveScreenNode[], anchor: LiveAnchor): void {
+    if (!this.liveLayerEl) return;
+    if (!this.liveUiVisible) {
+      this.clearLiveUi();
+      return;
+    }
+    this.syncLiveReticles(nodes, anchor);
+    this.syncTaskPanel(nodes);
+  }
+
+  /** Stack reticle markers (target-marker style) on the temporal side, anchored to the temporal lobe. */
+  private syncLiveReticles(nodes: LiveScreenNode[], anchor: LiveAnchor): void {
     const layer = this.liveLayerEl;
     if (!layer) return;
+    const RETICLE_CAP = 12;
+    const shown = nodes.slice(0, RETICLE_CAP);
+    const step = 30;
+    const height = layer.clientHeight || 600;
     const seen = new Set<string>();
-    for (const node of nodes) {
+    shown.forEach((node, index) => {
       seen.add(node.id);
       let chip = this.liveChips.get(node.id);
       if (!chip) {
-        chip = layer.createDiv({ cls: "brain-atlas-live-chip" });
-        chip.createSpan({ cls: "brain-atlas-live-dot" });
-        chip.createSpan({ cls: "brain-atlas-live-label" });
+        chip = layer.createDiv({ cls: "brain-atlas-live-reticle" });
+        chip.createSpan({ cls: "brain-atlas-reticle-ring" });
+        chip.createSpan({ cls: "brain-atlas-reticle-label" });
         this.liveChips.set(node.id, chip);
       }
-      const label = chip.querySelector<HTMLElement>(".brain-atlas-live-label");
+      const label = chip.querySelector<HTMLElement>(".brain-atlas-reticle-label");
       if (label && label.textContent !== node.label) label.textContent = node.label;
       chip.toggleClass("is-active", node.active);
       chip.toggleClass("is-ending", !node.active);
       chip.setAttr("data-kind", node.kind);
-      const depthFade = Math.max(0.35, 1 - node.depth * 0.5);
+      const depthFade = Math.max(0.4, 1 - node.depth * 0.45);
+      // Stack downward from a little above the temporal anchor; clamp to stay on screen.
+      const x = anchor.sx + 14;
+      const y = Math.max(28, Math.min(height - 24, anchor.sy - (shown.length - 1) * step * 0.5 + index * step));
       chip.style.setProperty("--live-color", node.color);
-      chip.style.setProperty("--live-level", node.level.toFixed(3));
-      chip.style.left = `${node.sx.toFixed(1)}px`;
-      chip.style.top = `${node.sy.toFixed(1)}px`;
-      chip.style.opacity = (Math.max(0, Math.min(1, node.level)) * depthFade).toFixed(3);
-      chip.style.zIndex = String(200 + Math.round((1 - node.depth) * 100));
-    }
+      chip.style.left = `${x.toFixed(1)}px`;
+      chip.style.top = `${y.toFixed(1)}px`;
+      chip.style.opacity = (Math.max(0.15, Math.min(1, node.level)) * depthFade).toFixed(3);
+      chip.style.zIndex = String(200 + (shown.length - index));
+    });
     for (const [id, chip] of this.liveChips) {
       if (!seen.has(id)) {
         chip.remove();
         this.liveChips.delete(id);
       }
     }
+  }
+
+  /** The bottom-left task manager: every live task grouped by kind (shells / commands / terminals / agents). */
+  private syncTaskPanel(nodes: LiveScreenNode[]): void {
+    const panel = this.taskPanelEl;
+    if (!panel) return;
+    if (nodes.length === 0) {
+      if (this.taskPanelSig !== "") {
+        panel.hide();
+        panel.empty();
+        this.taskPanelSig = "";
+      }
+      return;
+    }
+    // Only rebuild when the task set or their running/ending state changes (not every animation frame).
+    const sig = nodes.map((n) => `${n.id}:${n.active ? 1 : 0}:${n.kind}`).join("|");
+    if (sig === this.taskPanelSig) return;
+    this.taskPanelSig = sig;
+    panel.show();
+    panel.empty();
+
+    const active = nodes.filter((n) => n.active).length;
+    const header = panel.createDiv({ cls: "brain-atlas-task-header" });
+    header.createSpan({ cls: "brain-atlas-task-title", text: "ACTIVE" });
+    header.createSpan({ cls: "brain-atlas-task-count", text: `${active} running` });
+
+    const groups: Array<{ kind: string; title: string }> = [
+      { kind: "shell", title: "Background shells" },
+      { kind: "command", title: "Commands" },
+      { kind: "terminal", title: "Terminals" },
+      { kind: "agent", title: "Agents" }
+    ];
+    for (const group of groups) {
+      const rows = nodes.filter((n) => n.kind === group.kind);
+      if (rows.length === 0) continue;
+      const section = panel.createDiv({ cls: "brain-atlas-task-group" });
+      section.createDiv({ cls: "brain-atlas-task-group-title", text: `${group.title} — ${rows.length}` });
+      for (const node of rows) {
+        const row = section.createDiv({ cls: "brain-atlas-task-row" });
+        row.toggleClass("is-ending", !node.active);
+        row.setAttr("data-kind", node.kind);
+        row.style.setProperty("--live-color", node.color);
+        row.createSpan({ cls: "brain-atlas-task-dot" });
+        const body = row.createDiv({ cls: "brain-atlas-task-body" });
+        body.createSpan({ cls: "brain-atlas-task-name", text: node.label });
+        if (node.detail && node.detail !== node.label) {
+          body.createSpan({ cls: "brain-atlas-task-detail", text: node.detail });
+        }
+        row.createSpan({ cls: "brain-atlas-task-status", text: node.active ? "running" : "done" });
+      }
+    }
+  }
+
+  /** Remove every reticle + hide the panel (the Tasks quick toggle is off). */
+  private clearLiveUi(): void {
+    this.liveChips.forEach((chip) => chip.remove());
+    this.liveChips.clear();
+    if (this.taskPanelEl) {
+      this.taskPanelEl.hide();
+      this.taskPanelEl.empty();
+    }
+    this.taskPanelSig = "";
   }
 
   /** Select the desired renderer kind based on rendererMode + mobile detection. */
@@ -357,9 +450,15 @@ export class BrainAtlasView extends ItemView {
     this.controlsEl = root.createDiv({ cls: "brain-atlas-controls" });
     const primary = this.controlsEl.createDiv({ cls: "brain-atlas-control-group" });
     this.infoButton = this.createControlButton(primary, "Info", () => this.toggleInfo());
-    this.labelButton = this.createControlButton(primary, "Labels", () => this.toggleLabels());
-    this.allButton = this.createControlButton(primary, "All", () => this.setAllRegions(true));
-    this.noneButton = this.createControlButton(primary, "None", () => this.setAllRegions(false));
+    this.labelButton = this.createControlButton(primary, "Sections", () => this.toggleLabels());
+    this.namesButton = this.createControlButton(primary, "Names", () => this.toggleNames());
+    this.spinButton = this.createControlButton(primary, "Spin", () => this.toggleSpin());
+    this.tasksButton = this.createControlButton(primary, "Tasks", () => this.toggleTasks());
+    this.createControlButton(primary, "Reset", () => this.renderer.resetView());
+
+    const regionsRow = this.controlsEl.createDiv({ cls: "brain-atlas-control-group" });
+    this.allButton = this.createControlButton(regionsRow, "All", () => this.setAllRegions(true));
+    this.noneButton = this.createControlButton(regionsRow, "None", () => this.setAllRegions(false));
 
     const lobes = this.controlsEl.createDiv({ cls: "brain-atlas-control-group brain-atlas-region-controls" });
     for (const lobe of LOBES) {
@@ -400,6 +499,12 @@ export class BrainAtlasView extends ItemView {
     this.infoButton?.setAttr("aria-pressed", String(this.showInfo));
     this.labelButton?.toggleClass("is-active", this.plugin.settings.showLobeLabels);
     this.labelButton?.setAttr("aria-pressed", String(this.plugin.settings.showLobeLabels));
+    this.namesButton?.toggleClass("is-active", this.showAllLabels);
+    this.namesButton?.setAttr("aria-pressed", String(this.showAllLabels));
+    this.spinButton?.toggleClass("is-active", this.plugin.settings.idleAutoRotate);
+    this.spinButton?.setAttr("aria-pressed", String(this.plugin.settings.idleAutoRotate));
+    this.tasksButton?.toggleClass("is-active", this.liveUiVisible);
+    this.tasksButton?.setAttr("aria-pressed", String(this.liveUiVisible));
     const enabledCount = LOBES.filter((lobe) => enabled[lobe]).length;
     this.allButton?.toggleClass("is-active", enabledCount === LOBES.length);
     this.noneButton?.toggleClass("is-active", enabledCount === 0);
@@ -542,6 +647,29 @@ export class BrainAtlasView extends ItemView {
   private toggleInfo(): void {
     this.showInfo = !this.showInfo;
     this.syncOverlays();
+  }
+
+  /** Node-label density: minimal (in-use/hover/focus) vs all (dense hub labels). View-local. */
+  private toggleNames(): void {
+    this.showAllLabels = !this.showAllLabels;
+    this.renderer.setOptions({ showAllLabels: this.showAllLabels });
+    this.syncOverlays();
+  }
+
+  /** Idle auto-rotation on/off (persisted). */
+  private toggleSpin(): void {
+    this.plugin.settings.idleAutoRotate = !this.plugin.settings.idleAutoRotate;
+    this.renderer.setOptions({ idleAutoRotate: this.plugin.settings.idleAutoRotate });
+    this.syncOverlays();
+    void this.persistViewSettings();
+  }
+
+  /** Show/hide the live task UI (reticle stack + bottom-left task manager). View-local. */
+  private toggleTasks(): void {
+    this.liveUiVisible = !this.liveUiVisible;
+    if (!this.liveUiVisible) this.clearLiveUi();
+    this.syncOverlays();
+    this.renderer.requestFrame();
   }
 
   private toggleLobe(lobe: LobeName): void {

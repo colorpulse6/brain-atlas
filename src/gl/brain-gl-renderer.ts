@@ -513,7 +513,7 @@ export class BrainGLRenderer extends RenderCore {
 
     // Scene projection opts — shared by every geometry pass. For Task 6 only
     // proj.cx / proj.cy feed the background; later tasks use the full opts.
-    const proj = sceneProjection(this.width, this.height, this.zoom, this.rot);
+    const proj = sceneProjection(this.width, this.height, this.zoom, this.rot, this.panX, this.panY);
 
     // Clear the overlay each frame; text passes (labels/compass) draw into it.
     if (this.overlayCtx) {
@@ -580,8 +580,9 @@ export class BrainGLRenderer extends RenderCore {
     // ---- Pass: signals (additive particle trails) ----
     if (this.passEnabled("signals")) this.drawSignals(gl, proj, now);
 
-    // ---- Pass: labels (lobe + node labels, overlay 2D) ----
-    if (this.passEnabled("labels") && this.overlayCtx && this.options.showLobeLabels) {
+    // ---- Pass: labels (overlay 2D). Section labels follow showLobeLabels; node labels are ALWAYS drawn but
+    // minimal (in-use / hovered / focused) unless showAllLabels turns the dense mode back on. ----
+    if (this.passEnabled("labels") && this.overlayCtx) {
       const overlayCtx = this.overlayCtx;
       // Build the scene projector as a (point)=>ProjectedPoint closure (same params
       // as Canvas2D drawScene uses for lobe labels).
@@ -591,13 +592,17 @@ export class BrainGLRenderer extends RenderCore {
         lobeVisibilityMultiplier(lobe, this.options.enabledLobes, this.highlightLobe);
       // Build nodeProjs from the projCache populated by draw() in RenderCore.
       const nodeProjs = Object.values(this.projCache);
-      sharedDrawLobeLabels(overlayCtx, lobeProject, graph, lobeStats, scalarLobeMul, (lobe) => this.lobeColor(lobe, graph));
+      if (this.options.showLobeLabels) {
+        sharedDrawLobeLabels(overlayCtx, lobeProject, graph, lobeStats, scalarLobeMul, (lobe) => this.lobeColor(lobe, graph));
+      }
       sharedDrawNodeLabels(overlayCtx, nodeProjs, graph, scalarLobeMul, {
         hoverId: this.hoverId,
         focusId: this.focusId,
         zoom: this.zoom,
         width: this.width,
-        mobile: this.effectivePerformancePreset() === "mobile"
+        mobile: this.effectivePerformancePreset() === "mobile",
+        activeIds: this.activeNoteIds(),
+        showAll: this.options.showAllLabels
       });
     }
 

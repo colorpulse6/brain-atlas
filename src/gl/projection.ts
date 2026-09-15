@@ -32,14 +32,16 @@ export function sceneProjection(
   width: number,
   height: number,
   zoom: number,
-  rot: { x: number; y: number }
+  rot: { x: number; y: number },
+  panX = 0,
+  panY = 0
 ): ProjectionOpts {
   return {
     rotX: rot.x,
     rotY: rot.y,
     scale: Math.min(width, height) * 0.32 * zoom,
-    cx: width / 2,
-    cy: height / 2 - height * 0.04,
+    cx: width / 2 + panX,
+    cy: height / 2 - height * 0.04 + panY,
     dist: 3.4
   };
 }

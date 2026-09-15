@@ -9,6 +9,7 @@ import test from "node:test";
 import {
   ActivityListener,
   ActivityState,
+  agentColor,
   kindForTool,
   lerpHexColor,
   lerpRgb01,
@@ -183,13 +184,16 @@ function request(port, method, path, body) {
 
 // --- Live (transient) nodes: commands / terminals / subagents Claude runs -----------------
 
-test("parseLiveBody parses spawn and end, clamps kind, defaults region", () => {
-  const spawn = parseLiveBody(JSON.stringify({ op: "spawn", id: "t1", label: "git status", kind: "command" }));
-  assert.deepEqual(spawn, { op: "spawn", id: "t1", label: "git status", kind: "command", region: "temporal" });
+test("parseLiveBody parses spawn and end, clamps kind, defaults region, reads detail", () => {
+  const spawn = parseLiveBody(JSON.stringify({ op: "spawn", id: "t1", label: "git status", detail: "git status -s", kind: "command" }));
+  assert.deepEqual(spawn, { op: "spawn", id: "t1", label: "git status", detail: "git status -s", kind: "command", region: "temporal" });
   const agent = parseLiveBody(JSON.stringify({ op: "spawn", id: "a1", label: "code-reviewer", kind: "agent", region: "temporal" }));
   assert.equal(agent.kind, "agent");
+  assert.equal(agent.detail, "");
+  const shell = parseLiveBody(JSON.stringify({ op: "spawn", id: "s1", label: "mysqld", kind: "shell" }));
+  assert.equal(shell.kind, "shell");
   const end = parseLiveBody(JSON.stringify({ op: "end", id: "t1" }));
-  assert.deepEqual(end, { op: "end", id: "t1", label: "", kind: "command", region: "temporal" });
+  assert.deepEqual(end, { op: "end", id: "t1", label: "", detail: "", kind: "command", region: "temporal" });
   assert.equal(parseLiveBody(JSON.stringify({ op: "spawn", id: "x", kind: "bogus" })).kind, "command");
   assert.equal(parseLiveBody(JSON.stringify({ op: "spawn" })), null); // no id
   assert.equal(parseLiveBody(JSON.stringify({ id: "x" })), null);     // no op
@@ -246,15 +250,47 @@ test("spawnLive refresh keeps the original bornAt and reactivates", () => {
 });
 
 test("liveColor maps kinds and status reports live count + lastLive", () => {
-  const state = new ActivityState({ liveCommandColor: "#111111", liveAgentColor: "#222222", liveTerminalColor: "#333333" });
+  const state = new ActivityState({ liveCommandColor: "#111111", liveAgentColor: "#222222", liveTerminalColor: "#333333", liveShellColor: "#444444" });
   assert.equal(state.liveColor("command"), "#111111");
   assert.equal(state.liveColor("agent"), "#222222");
   assert.equal(state.liveColor("terminal"), "#333333");
-  state.spawnLive("a1", "code-reviewer", "agent", "temporal", 0);
+  assert.equal(state.liveColor("shell"), "#444444");
+  state.spawnLive("a1", "code-reviewer", "agent", "temporal", 0, "review the diff");
   state.tick(0);
   const s = state.status();
   assert.equal(s.live, 1);
   assert.equal(s.lastLive, "code-reviewer");
+  assert.equal(state.liveNodes()[0].detail, "review the diff");
+});
+
+test("agents are uniquely colored by type; other kinds use the base color", () => {
+  const state = new ActivityState({ liveCommandColor: "#111111" });
+  const c1 = state.liveColorFor({ kind: "agent", label: "code-reviewer" });
+  const c2 = state.liveColorFor({ kind: "agent", label: "python-reviewer" });
+  assert.match(c1, /^#[0-9a-f]{6}$/);
+  assert.notEqual(c1, c2, "different agent types get different colors");
+  assert.equal(state.liveColorFor({ kind: "agent", label: "code-reviewer" }), c1, "same type is stable");
+  assert.equal(state.liveColorFor({ kind: "command", label: "x" }), "#111111");
+  assert.equal(agentColor("code-reviewer"), c1);
+});
+
+test("background shells outlive foreground TTL", () => {
+  const state = new ActivityState({ liveMaxSeconds: 2, liveShellMaxSeconds: 60, liveDecaySeconds: 0.5 });
+  state.spawnLive("cmd", "x", "command", "temporal", 0);
+  state.spawnLive("sh", "mysqld", "shell", "temporal", 0);
+  state.tick(3_000); // past the 2s command TTL, well within the 60s shell TTL
+  const kinds = new Map(state.liveNodes().map((n) => [n.id, n]));
+  assert.equal(kinds.get("cmd")?.active ?? false, false, "command TTL-expired");
+  assert.equal(kinds.get("sh")?.active, true, "shell still running");
+});
+
+test("live nodes stack in a stable order by spawn sequence", () => {
+  const state = new ActivityState();
+  state.spawnLive("a", "a", "command", "temporal", 0);
+  state.spawnLive("b", "b", "command", "temporal", 0);
+  state.spawnLive("c", "c", "command", "temporal", 0);
+  state.tick(0);
+  assert.deepEqual(state.liveNodes().map((n) => n.id), ["c", "b", "a"], "newest first, stable");
 });
 
 test("tick returns true while a live node glows even with no note activity", () => {

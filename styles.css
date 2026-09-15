@@ -491,7 +491,7 @@
   }
 }
 
-/* --- Live activity chips: transient nodes for commands / terminals / subagents Claude runs --- */
+/* --- Live activity: reticle stack (temporal side) + bottom-left task manager --- */
 .brain-atlas-live-layer {
   position: absolute;
   inset: 0;
@@ -499,57 +499,113 @@
   overflow: hidden;
   z-index: 6;
 }
-.brain-atlas-live-chip {
+
+/* A "target marker" reticle: a ring with a crosshair, plus a label to the right. */
+.brain-atlas-live-reticle {
   position: absolute;
   transform: translate(-50%, -50%);
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 9px 2px 5px;
-  border-radius: 999px;
+  gap: 8px;
   white-space: nowrap;
-  font-size: 11px;
-  font-weight: 600;
+  transition: opacity 200ms ease-out, left 220ms ease-out, top 220ms ease-out;
+}
+.brain-atlas-reticle-ring {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 1.5px solid var(--live-color, #ffb02e);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--live-color, #ffb02e) 70%, transparent),
+              inset 0 0 5px color-mix(in srgb, var(--live-color, #ffb02e) 45%, transparent);
+}
+/* crosshair ticks */
+.brain-atlas-reticle-ring::before,
+.brain-atlas-reticle-ring::after {
+  content: "";
+  position: absolute;
+  background: var(--live-color, #ffb02e);
+  box-shadow: 0 0 4px var(--live-color, #ffb02e);
+}
+.brain-atlas-reticle-ring::before { left: 50%; top: -5px; width: 1.5px; height: 26px; transform: translateX(-50%); }
+.brain-atlas-reticle-ring::after  { top: 50%; left: -5px; height: 1.5px; width: 26px; transform: translateY(-50%); }
+.brain-atlas-live-reticle[data-kind="agent"] .brain-atlas-reticle-ring { border-radius: 3px; }
+.brain-atlas-live-reticle[data-kind="shell"] .brain-atlas-reticle-ring { border-style: dashed; }
+.brain-atlas-reticle-label {
+  font: 600 10px 'JetBrains Mono', monospace;
   letter-spacing: 0.02em;
   color: var(--live-color, #ffb02e);
-  background: color-mix(in srgb, var(--live-color, #ffb02e) 12%, rgba(8, 8, 12, 0.74));
-  border: 1px solid color-mix(in srgb, var(--live-color, #ffb02e) 55%, transparent);
-  box-shadow: 0 0 10px color-mix(in srgb, var(--live-color, #ffb02e) 65%, transparent),
-              0 0 22px color-mix(in srgb, var(--live-color, #ffb02e) 32%, transparent);
-  transition: opacity 180ms ease-out;
-}
-.brain-atlas-live-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex: 0 0 auto;
-  background: var(--live-color, #ffb02e);
-  box-shadow: 0 0 8px var(--live-color, #ffb02e), 0 0 16px var(--live-color, #ffb02e);
-}
-.brain-atlas-live-label {
-  max-width: 240px;
+  text-shadow: 0 0 6px color-mix(in srgb, var(--live-color, #ffb02e) 55%, transparent), 0 1px 2px rgba(0,0,0,0.8);
+  max-width: 260px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.brain-atlas-live-chip.is-active {
-  animation: brain-atlas-live-pulse 1.15s ease-in-out infinite;
+.brain-atlas-live-reticle.is-active .brain-atlas-reticle-ring {
+  animation: brain-atlas-reticle-pulse 1.15s ease-in-out infinite;
 }
-.brain-atlas-live-chip.is-ending {
-  filter: saturate(0.65);
+.brain-atlas-live-reticle.is-ending { filter: saturate(0.55); }
+@keyframes brain-atlas-reticle-pulse {
+  0%, 100% { box-shadow: 0 0 6px color-mix(in srgb, var(--live-color, #ffb02e) 55%, transparent), inset 0 0 4px color-mix(in srgb, var(--live-color, #ffb02e) 40%, transparent); }
+  50%      { box-shadow: 0 0 15px color-mix(in srgb, var(--live-color, #ffb02e) 95%, transparent), inset 0 0 8px color-mix(in srgb, var(--live-color, #ffb02e) 65%, transparent); }
 }
-.brain-atlas-live-chip[data-kind="agent"] .brain-atlas-live-dot {
-  border-radius: 2px;
+
+/* Bottom-left task manager: everything Claude is running right now. */
+.brain-atlas-task-panel {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  z-index: 8;
+  max-width: 340px;
+  max-height: 45%;
+  overflow-y: auto;
+  padding: 8px 10px 10px;
+  border-radius: 8px;
+  background: rgba(10, 10, 14, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(6px);
+  pointer-events: auto;
+  font-family: 'JetBrains Mono', monospace;
 }
-@keyframes brain-atlas-live-pulse {
-  0%, 100% {
-    box-shadow: 0 0 8px color-mix(in srgb, var(--live-color, #ffb02e) 55%, transparent),
-                0 0 16px color-mix(in srgb, var(--live-color, #ffb02e) 26%, transparent);
-  }
-  50% {
-    box-shadow: 0 0 16px color-mix(in srgb, var(--live-color, #ffb02e) 92%, transparent),
-                0 0 36px color-mix(in srgb, var(--live-color, #ffb02e) 55%, transparent);
-  }
+.brain-atlas-task-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
 }
-.brain-atlas-root.is-light-palette .brain-atlas-live-chip {
-  background: color-mix(in srgb, var(--live-color, #ffb02e) 18%, rgba(250, 250, 252, 0.84));
+.brain-atlas-task-title { font-size: 11px; font-weight: 700; letter-spacing: 0.14em; color: #e8e6e0; }
+.brain-atlas-task-count { font-size: 10px; color: #9aa0a6; }
+.brain-atlas-task-group { margin-top: 6px; }
+.brain-atlas-task-group-title {
+  font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: #8a9099; margin-bottom: 3px;
 }
+.brain-atlas-task-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 2px;
+  animation: brain-atlas-task-in 220ms ease-out;
+}
+.brain-atlas-task-row.is-ending { opacity: 0.5; }
+.brain-atlas-task-dot {
+  width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%;
+  background: var(--live-color, #ffb02e);
+  box-shadow: 0 0 7px var(--live-color, #ffb02e);
+}
+.brain-atlas-task-row[data-kind="agent"] .brain-atlas-task-dot { border-radius: 2px; }
+.brain-atlas-task-row.is-ending .brain-atlas-task-dot { animation: none; box-shadow: none; }
+.brain-atlas-task-row:not(.is-ending) .brain-atlas-task-dot { animation: brain-atlas-task-blink 1.15s ease-in-out infinite; }
+.brain-atlas-task-body { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+.brain-atlas-task-name { font-size: 11px; color: var(--live-color, #ffb02e); font-weight: 600; }
+.brain-atlas-task-detail {
+  font-size: 9px; color: #9aa0a6;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 250px;
+}
+.brain-atlas-task-status { font-size: 9px; color: #6f757c; flex: 0 0 auto; }
+@keyframes brain-atlas-task-in { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
+@keyframes brain-atlas-task-blink { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+.brain-atlas-root.is-light-palette .brain-atlas-task-panel { background: rgba(250, 250, 252, 0.9); border-color: rgba(0,0,0,0.1); }
+.brain-atlas-root.is-light-palette .brain-atlas-task-title { color: #1a1a1f; }

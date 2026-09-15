@@ -181,6 +181,10 @@ export interface NodeLabelOptions {
   zoom: number;
   width: number;
   mobile: boolean;
+  /** Nodes currently lit by read/write activity ("in use") — always labelled. */
+  activeIds?: Set<string>;
+  /** true = the old dense mode (auto-label the top hubs). Default/false = minimal (in-use/hover/focus only). */
+  showAll?: boolean;
 }
 
 export function drawNodeLabels(
@@ -196,8 +200,13 @@ export function drawNodeLabels(
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
 
-  const labels = new Set(automaticLabelIds(graph, nodeProjs, mobile, width, zoom));
+  // Minimal by default: label only nodes in use (read/write activity), hovered, or focused. The old dense
+  // "auto-label the top hubs" behaviour returns only when showAll is on (the Labels: all quick toggle).
+  const labels = opts.showAll
+    ? new Set(automaticLabelIds(graph, nodeProjs, mobile, width, zoom))
+    : new Set<string>();
 
+  if (opts.activeIds) for (const id of opts.activeIds) labels.add(id);
   if (hoverId) labels.add(hoverId);
   if (focusId) {
     labels.add(focusId);

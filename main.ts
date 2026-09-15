@@ -88,7 +88,7 @@ export default class BrainAtlasPlugin extends Plugin {
         // Mutate the shared state only; the renderer's frame loop keeps ticking while anything glows
         // (activeCount counts live nodes), so a rebuild here would only flicker the graph.
         if (event.op === "spawn") {
-          this.activity.spawnLive(event.id, event.label, event.kind, event.region, performance.now());
+          this.activity.spawnLive(event.id, event.label, event.kind, event.region, performance.now(), event.detail);
         } else {
           this.activity.endLive(event.id, performance.now());
         }
@@ -151,9 +151,11 @@ function activityOptions(settings: BrainAtlasSettings): ActivityOptions {
     writeColor: settings.activityWriteColor,
     liveDecaySeconds: settings.liveDecaySeconds,
     liveMaxSeconds: settings.liveMaxSeconds,
+    liveShellMaxSeconds: settings.liveShellMaxSeconds,
     liveCommandColor: settings.liveCommandColor,
-    liveAgentColor: settings.liveAgentColor,
-    liveTerminalColor: settings.liveTerminalColor
+    liveShellColor: settings.liveShellColor,
+    liveTerminalColor: settings.liveTerminalColor,
+    liveAgentColor: settings.liveAgentColor
   };
 }
 

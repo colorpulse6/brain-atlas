@@ -18,17 +18,25 @@ export interface ProjectedNode extends ProjectedPoint {
   node: BrainNode;
 }
 
-/** A transient live node projected to screen space, handed to the view to draw as a DOM chip. */
+/** A transient live node projected to screen space, handed to the view to draw as a reticle + task row. */
 export interface LiveScreenNode {
   id: string;
   label: string;
+  detail: string;
   kind: string;
   color: string;
+  seq: number;
   sx: number;
   sy: number;
   depth: number;
   level: number;
   active: boolean;
+}
+
+/** Where to anchor the live-node stack (the temporal lobe's projected screen point). */
+export interface LiveAnchor {
+  sx: number;
+  sy: number;
 }
 
 export interface ProjectedEdge {
@@ -62,7 +70,17 @@ export interface NodeDragState {
   pointerId: number;
 }
 
-export type DragState = RotateDragState | NodeDragState;
+export interface PanDragState {
+  mode: "pan";
+  startX: number;
+  startY: number;
+  panX: number;
+  panY: number;
+  moved: boolean;
+  pointerId: number;
+}
+
+export type DragState = RotateDragState | NodeDragState | PanDragState;
 
 /** Pointer travel, in CSS pixels, that maps to one radian of rotation. */
 export const DRAG_PIXELS_PER_RADIAN = 180;
@@ -96,18 +114,20 @@ export function rotationFromDrag(
 export interface BrainRendererOptions {
   idleAutoRotate: boolean;
   showLobeLabels: boolean;
+  /** When false (default) node labels show only for in-use / hovered / focused nodes; true = the old dense mode. */
+  showAllLabels: boolean;
   enabledLobes: LobeVisibility;
   performancePreset: PerformancePreset;
   mobileMode: boolean;
   onChange?: () => void;
   onPinNode?: (node: BrainNode, position: PinnedNodePosition) => void;
   /**
-   * Called once per frame with the transient live nodes projected to screen space
-   * (the view renders them as DOM chips). Fires with [] once when the last live
-   * node fades, so the view can clear its layer. Both renderers use the same CPU
-   * projector for this, so the chips track the volume in Canvas2D and WebGL alike.
+   * Called once per frame with the transient live nodes projected to screen space and the temporal-lobe
+   * anchor to stack them from (the view renders reticle markers + a task panel). Fires with [] once when the
+   * last live node fades, so the view can clear its layer. Both renderers use the same CPU projector, so the
+   * markers track the volume in Canvas2D and WebGL alike.
    */
-  onLiveNodes?: (nodes: LiveScreenNode[]) => void;
+  onLiveNodes?: (nodes: LiveScreenNode[], anchor: LiveAnchor) => void;
   /**
    * Called when the WebGL renderer determines it cannot recover (context
    * permanently lost or resource rebuild failed). The view should fall back
@@ -140,6 +160,7 @@ export abstract class RenderCore {
   protected options: BrainRendererOptions = {
     idleAutoRotate: true,
     showLobeLabels: true,
+    showAllLabels: false,
     enabledLobes: allLobesEnabled(),
     performancePreset: "smooth",
     mobileMode: false
@@ -149,6 +170,9 @@ export abstract class RenderCore {
   protected resizeObserver: ResizeObserver | null = null;
   protected rot = { x: -0.15, y: 0.55 };
   protected zoom = 1;
+  /** Screen-space pan offset (shift-drag or middle-drag), in CSS pixels. */
+  protected panX = 0;
+  protected panY = 0;
   protected drag: DragState | null = null;
   protected lastUserAt = 0;
   protected suppressClickUntil = 0;
@@ -253,8 +277,7 @@ export abstract class RenderCore {
     }
 
     const scale = Math.min(this.width, this.height) * 0.32 * this.zoom;
-    const cx = this.width / 2;
-    const cy = this.height / 2 - this.height * 0.04;
+    const { cx, cy } = this.viewCenter();
     const project = Brain3D.makeProjector({ rotX: this.rot.x, rotY: this.rot.y, scale, cx, cy, dist: 3.4 });
     const nodeProjs = graph.nodes
       .filter((node) => node._3dLobe)
@@ -271,20 +294,23 @@ export abstract class RenderCore {
   /** How many live nodes we last handed the view (so we emit [] exactly once when they all fade). */
   private lastLiveEmitted = 0;
 
-  /** Project the transient live nodes and hand them to the view (renderer-agnostic; DOM chips). */
+  /** Project the transient live nodes + the temporal anchor and hand them to the view (DOM reticles + panel). */
   protected emitLiveNodes(project: (point: Vec3) => ProjectedPoint): void {
     const cb = this.options.onLiveNodes;
     if (!cb || !this.activity) return;
     const live = this.activity.liveNodes();
     if (live.length === 0 && this.lastLiveEmitted === 0) return;
     this.lastLiveEmitted = live.length;
+    const anchorPt = project(Brain3D.LOBE_CENTERS.temporal.c);
     const out: LiveScreenNode[] = live.map((entry) => {
       const projected = project(Brain3D.liveNodePosition(entry.id, entry.region));
       return {
         id: entry.id,
         label: entry.label,
+        detail: entry.detail,
         kind: entry.kind,
-        color: this.activity!.liveColor(entry.kind),
+        color: this.activity!.liveColorFor(entry),
+        seq: entry.seq,
         sx: projected.sx,
         sy: projected.sy,
         depth: projected.depth,
@@ -292,7 +318,16 @@ export abstract class RenderCore {
         active: entry.active
       };
     });
-    cb(out);
+    cb(out, { sx: anchorPt.sx, sy: anchorPt.sy });
+  }
+
+  /** Ids of nodes currently lit by read/write activity ("in use"), for minimal node labels. */
+  protected activeNoteIds(): Set<string> {
+    const ids = new Set<string>();
+    if (this.activity) {
+      for (const [id] of this.activity.active()) ids.add(id);
+    }
+    return ids;
   }
 
   start(canvas: HTMLCanvasElement, getGraph: () => BrainGraph, options: Partial<BrainRendererOptions> = {}): void {
@@ -465,9 +500,27 @@ export abstract class RenderCore {
   }
 
   protected onPointerDown = (event: PointerEvent): void => {
-    if (!this.canvas || event.button !== 0) return;
+    if (!this.canvas) return;
+    // Middle button, or Shift/Alt + left = pan (translate the view). Left alone = rotate/drag a node.
+    const wantsPan = event.button === 1 || (event.button === 0 && (event.shiftKey || event.altKey));
+    if (event.button !== 0 && !wantsPan) return;
     event.preventDefault();
     event.stopPropagation();
+    if (wantsPan) {
+      this.drag = {
+        mode: "pan",
+        startX: event.clientX,
+        startY: event.clientY,
+        panX: this.panX,
+        panY: this.panY,
+        moved: false,
+        pointerId: event.pointerId
+      };
+      this.lastUserAt = performance.now();
+      this.canvas.setPointerCapture(event.pointerId);
+      this.requestImmediateFrame();
+      return;
+    }
     const point = this.localPoint(event);
     const hit = this.hitTestProjected(point.x, point.y);
     if (hit?.node._3dLobe) {
@@ -509,6 +562,13 @@ export abstract class RenderCore {
       const screenDx = event.clientX - this.drag.startX;
       const screenDy = event.clientY - this.drag.startY;
       this.drag.moved = this.drag.moved || Math.hypot(screenDx, screenDy) > 3;
+      if (this.drag.mode === "pan") {
+        this.panX = this.drag.panX + screenDx;
+        this.panY = this.drag.panY + screenDy;
+        this.lastUserAt = performance.now();
+        this.requestImmediateFrame();
+        return;
+      }
       if (this.drag.mode === "node") {
         const next = this.draggedNodePosition(this.drag, screenDx, screenDy);
         this.drag.latestPosition = next;
@@ -586,10 +646,7 @@ export abstract class RenderCore {
   protected onContextMenu = (event: MouseEvent): void => {
     event.preventDefault();
     event.stopPropagation();
-    this.rot = { x: -0.15, y: 0.55 };
-    this.zoom = 1;
-    this.lastUserAt = performance.now();
-    this.requestImmediateFrame();
+    this.resetView();
   };
 
   protected localPoint(event: MouseEvent | PointerEvent): { x: number; y: number } {
@@ -647,6 +704,21 @@ export abstract class RenderCore {
 
   protected currentProjectionScale(): number {
     return Math.min(this.width, this.height) * 0.32 * this.zoom;
+  }
+
+  /** The on-screen projection center, including the pan offset. Every projector site uses this. */
+  protected viewCenter(): { cx: number; cy: number } {
+    return { cx: this.width / 2 + this.panX, cy: this.height / 2 - this.height * 0.04 + this.panY };
+  }
+
+  /** Reset rotation, zoom and pan to the default framing (right-click, or the Reset control). */
+  resetView(): void {
+    this.rot = { x: -0.15, y: 0.55 };
+    this.zoom = 1;
+    this.panX = 0;
+    this.panY = 0;
+    this.lastUserAt = performance.now();
+    this.requestImmediateFrame();
   }
 
   protected hitTolerance(): number {
