@@ -169,10 +169,11 @@ export function assignLobePositions(nodes: BrainNode[]): void {
 }
 
 /**
- * A deterministic 3D position for a transient live node in `region`, floated just OUTSIDE the note
- * cluster so it reads as "hovering in" the region rather than buried in the ball. Unknown region -> temporal.
+ * A deterministic 3D position for a transient live node in `region`. `side` picks a hemisphere for a
+ * mirrored region (temporal): "right" (+x) for live/background tasks, "left" (-x) for deployed workflow
+ * agents, "auto" hashes. Floated a little outside the note cluster so it reads as "hovering in" the region.
  */
-export function liveNodePosition(id: string, region: string): Vec3 {
+export function liveNodePosition(id: string, region: string, side: "left" | "right" | "auto" = "auto"): Vec3 {
   const lobe = (LOBE_CENTERS[region as LobeName] ? region : "temporal") as LobeName;
   const center = LOBE_CENTERS[lobe];
   const h = stableHash("live:" + id);
@@ -180,9 +181,14 @@ export function liveNodePosition(id: string, region: string): Vec3 {
   const r2 = ((h >>> 16) & 0xffff) / 0xffff;
   const u = r1 * Math.PI * 2;
   const v = Math.acos(2 * r2 - 1);
-  const radius = center.r * 1.2;
+  const radius = center.r * 1.15;
   let cx = center.c.x;
-  if (center.mirror && r1 > 0.5) cx = -cx;
+  if (center.mirror) {
+    const mag = Math.abs(center.c.x);
+    if (side === "left") cx = -mag;
+    else if (side === "right") cx = mag;
+    else cx = r1 > 0.5 ? -mag : mag;
+  }
   return {
     x: cx + radius * Math.sin(v) * Math.cos(u),
     y: center.c.y + radius * Math.sin(v) * Math.sin(u),

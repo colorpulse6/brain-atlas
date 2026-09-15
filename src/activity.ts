@@ -60,6 +60,14 @@ export interface ActivityEntry {
   kind: ActivityKind;
   /** Timestamp (same clock as tick's `now`) of the activation. */
   at: number;
+  /** True when this glow is a live node (a running task): keep its own color, just swell/pulse. */
+  live?: boolean;
+}
+
+/** An action worth firing a signal for: a read/write on `target`, or a spawned live node. */
+export interface FireEvent {
+  target: string;
+  kind: ActivityKind | "spawn";
 }
 
 export interface ActivityOptions {
@@ -271,6 +279,8 @@ export class ActivityState {
   private liveEntries = new Map<string, LiveEntry>();
   private lastLive: string | null = null;
   private liveSeq = 0;
+  /** Actions (reads/writes/spawns) waiting for the renderer to fire a signal along the brain. */
+  private fires: FireEvent[] = [];
 
   constructor(options: Partial<ActivityOptions> = {}) {
     this.options = { ...DEFAULT_ACTIVITY_OPTIONS, ...options };
@@ -307,6 +317,7 @@ export class ActivityState {
       return false;
     }
     this.entries.set(id, { peak: 1, level: 1, kind, at: now });
+    this.fires.push({ target: id, kind }); // the renderer fires a signal to this node (a visible action)
     const cascade = Math.max(0, Math.min(1, this.options.cascade));
     if (cascade > 0) {
       for (const neighbour of this.adj[id] ?? []) {
@@ -349,7 +360,8 @@ export class ActivityState {
         entry.endAt = now;
       }
       if (entry.active) {
-        entry.level = 1;
+        // Pulse while running so the node reads as "working" (an ongoing action), not a static dot.
+        entry.level = 0.7 + 0.3 * (0.5 + 0.5 * Math.sin(now * 0.005 + entry.seq));
         continue;
       }
       const since = Math.max(0, now - (entry.endAt ?? now));
@@ -382,6 +394,15 @@ export class ActivityState {
       endAt: null,
       level: 1
     });
+    if (!existing) this.fires.push({ target: id, kind: "spawn" }); // fire a signal when a new task appears
+  }
+
+  /** Drain the pending fire events (the renderer turns each into a signal along the brain). */
+  drainFires(): FireEvent[] {
+    if (this.fires.length === 0) return [];
+    const out = this.fires;
+    this.fires = [];
+    return out;
   }
 
   /** Mark a live node finished; it fades over liveDecaySeconds and is then removed. */
@@ -427,16 +448,22 @@ export class ActivityState {
     return agentColor(entry.label || "agent");
   }
 
-  /** The node's entry while it glows (level >= 0.01), else undefined. */
+  /** The node's glow entry (read/write, or a live task) while it glows (level >= 0.01), else undefined. */
   get(id: string): ActivityEntry | undefined {
     const entry = this.entries.get(id);
-    return entry && entry.level >= MIN_LEVEL ? entry : undefined;
+    if (entry && entry.level >= MIN_LEVEL) return entry;
+    const live = this.liveEntries.get(id);
+    if (live && live.level >= MIN_LEVEL) return { peak: 1, level: live.level, kind: "write", at: 0, live: true };
+    return undefined;
   }
 
-  /** Live (id, entry) pairs. */
+  /** Live (id, entry) pairs: read/write glows AND running live-task nodes (so the renderer lights both). */
   *active(): IterableIterator<[string, ActivityEntry]> {
     for (const pair of this.entries) {
       if (pair[1].level >= MIN_LEVEL) yield pair;
+    }
+    for (const [id, live] of this.liveEntries) {
+      if (live.level >= MIN_LEVEL) yield [id, { peak: 1, level: live.level, kind: "write", at: 0, live: true }];
     }
   }
 
@@ -452,6 +479,7 @@ export class ActivityState {
   clear(): void {
     this.entries.clear();
     this.liveEntries.clear();
+    this.fires = [];
   }
 
   status(): ActivityStatus {

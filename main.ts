@@ -83,7 +83,10 @@ export default class BrainAtlasPlugin extends Plugin {
     const listener = new ActivityListener({
       http,
       vaultBase: vaultBasePath(this.app),
-      onEvent: (event) => this.activity.activate(event.path, event.kind, performance.now()),
+      onEvent: (event) => {
+        this.activity.activate(event.path, event.kind, performance.now());
+        this.pokeActiveBrainViews(); // wake the loop so the read/write fires a signal
+      },
       onLive: (event) => {
         // Mutate the shared state only; the renderer's frame loop keeps ticking while anything glows
         // (activeCount counts live nodes), so a rebuild here would only flicker the graph.

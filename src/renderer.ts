@@ -77,11 +77,9 @@ export class BrainRenderer extends RenderCore {
     // Pass: haze (lobe glow gradients, additive).
     if (this.passEnabled("haze")) this.drawLobeHaze(ctx, project, scale, graph, lobeMul);
 
-    const cloudProj = this.cloud.map((p) => ({
-      p,
-      pr: project(p),
-      tw: 0.65 + 0.35 * Math.sin(now * 0.0005 * (p.twFreq ?? 1) + (p.twPhase ?? 0))
-    }));
+    // No idle animation: the cloud twinkle is frozen to a constant so the brain is still at rest.
+    // (Only activity -- reads/writes/live tasks -- animates now.)
+    const cloudProj = this.cloud.map((p) => ({ p, pr: project(p), tw: 0.85 }));
     const nodeProjs = graph.nodes
       .filter((node) => node._3dLobe)
       .map((node) => ({ node, ...project(node._3dLobe as Vec3) }));
@@ -275,8 +273,10 @@ export class BrainRenderer extends RenderCore {
     const act = this.activity?.get(node.id);
     const level = act ? act.level : 0;
     const swell = act ? 1 + this.activity!.options.swell * level : 1;
+    // A live task node keeps its own kind/agent color while it works (just swells + glows); a read/write
+    // glow lerps the note's color toward green/red.
     const color = act
-      ? lerpHexColor(node.color, act.kind === "write" ? this.activity!.options.writeColor : this.activity!.options.readColor, level)
+      ? (act.live ? node.color : lerpHexColor(node.color, act.kind === "write" ? this.activity!.options.writeColor : this.activity!.options.readColor, level))
       : node.color;
     const radius = nodeRadius(node) * Math.max(0.55, projected.scale) * (isHover ? 1.18 : isFocus ? 1.25 : 1) * swell;
     const fade = Math.max(0.32, 1 - projected.depth * 0.75);

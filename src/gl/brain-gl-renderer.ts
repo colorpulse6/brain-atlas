@@ -920,7 +920,7 @@ export class BrainGLRenderer extends RenderCore {
     gl.uniform1f(cp.uniforms.uCx, proj.cx);
     gl.uniform1f(cp.uniforms.uCy, proj.cy);
     gl.uniform1f(cp.uniforms.uDist, proj.dist);
-    gl.uniform1f(cp.uniforms.uTime, now);
+    gl.uniform1f(cp.uniforms.uTime, 0); // frozen: no idle cloud twinkle (only actions animate)
     gl.uniform1f(cp.uniforms.uHemisphere, hemisphere);
     gl.uniform1fv(cp.uniforms["uLobeMul[0]"], lobeMul);
     gl.uniform3fv(cp.uniforms["uLobeColors[0]"], lobeColors);
@@ -1421,11 +1421,11 @@ export class BrainGLRenderer extends RenderCore {
     const np = this.nodeProgram;
     if (!np || this.nodeGraph !== graph) return;
     const activity = this.activity;
-    const wanted = new Map<number, { level: number; kind: "read" | "write" }>();
+    const wanted = new Map<number, { level: number; kind: "read" | "write"; live: boolean }>();
     if (activity) {
       for (const [id, entry] of activity.active()) {
         const bufIdx = this.nodeBufferIndexOf(graph, id);
-        if (bufIdx >= 0 && bufIdx < np.nodeCount) wanted.set(bufIdx, { level: entry.level, kind: entry.kind });
+        if (bufIdx >= 0 && bufIdx < np.nodeCount) wanted.set(bufIdx, { level: entry.level, kind: entry.kind, live: !!entry.live });
       }
     }
     for (const bufIdx of [...this.activityPatched]) {
@@ -1441,7 +1441,8 @@ export class BrainGLRenderer extends RenderCore {
         np.buf.color[bufIdx * 3 + 1],
         np.buf.color[bufIdx * 3 + 2]
       ];
-      const color = lerpRgb01(base, entry.kind === "write" ? writeColor : readColor, entry.level);
+      // A live task node keeps its own color (just swells/pulses); a read/write glow lerps toward green/red.
+      const color = entry.live ? base : lerpRgb01(base, entry.kind === "write" ? writeColor : readColor, entry.level);
       const radius = np.buf.radius[bufIdx] * (1 + swell * entry.level);
       this.uploadNodeBlock(gl, np, bufIdx, radius, color);
       this.activityPatched.add(bufIdx);

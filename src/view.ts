@@ -3,10 +3,10 @@ import { buildGraph } from "./adapter.ts";
 import { LOBES, setAllLobes, setLobeEnabled } from "./lobe-visibility.ts";
 import { displayNodeName, displayNodePath } from "./node-display.ts";
 import { BrainRenderer } from "./renderer.ts";
-import { RenderCore, type BrainRendererOptions, type LiveScreenNode, type LiveAnchor } from "./render-core.ts";
+import { RenderCore, type BrainRendererOptions, type LiveScreenNode } from "./render-core.ts";
 import { BrainGLRenderer } from "./gl/brain-gl-renderer.ts";
-import type { ActivityState } from "./activity.ts";
-import { LOBE_CENTERS } from "./shape.ts";
+import type { ActivityState, LiveEntry } from "./activity.ts";
+import { LOBE_CENTERS, liveNodePosition } from "./shape.ts";
 import type { BrainAtlasSettings, PinnedNodePosition } from "./settings.ts";
 import type { BrainGraph, BrainNode, LobeName } from "./types.ts";
 
@@ -33,15 +33,16 @@ export class BrainAtlasView extends ItemView {
   private focusEl: HTMLDivElement | null = null;
   private infoEl: HTMLDivElement | null = null;
   private emptyEl: HTMLDivElement | null = null;
-  private liveLayerEl: HTMLDivElement | null = null;
   private taskPanelEl: HTMLDivElement | null = null;
-  /** Transient live-node reticles (commands / shells / terminals / agents Claude runs) keyed by correlation id. */
-  private liveChips = new Map<string, HTMLElement>();
   /** Signature of the last task-panel render, so we only rebuild it when the task set/status changes. */
   private taskPanelSig = "";
-  /** View-local quick toggles (not persisted): dense node labels, and the task panel + reticles. */
+  /** View-local quick toggles (not persisted): dense node labels, and the task-manager panel. */
   private showAllLabels = false;
   private liveUiVisible = true;
+  /** The vault-only graph (from buildGraph); live task/agent nodes are merged on top of it into this.graph. */
+  private vaultGraph: BrainGraph | null = null;
+  /** Signature of the live-node set currently merged into this.graph (re-merge only when it changes). */
+  private mergedLiveSig = "";
   private infoButton: HTMLButtonElement | null = null;
   private labelButton: HTMLButtonElement | null = null;
   private namesButton: HTMLButtonElement | null = null;
@@ -91,7 +92,6 @@ export class BrainAtlasView extends ItemView {
     this.infoEl = root.createDiv({ cls: "brain-atlas-info-panel" });
     this.tooltipEl = root.createDiv({ cls: "brain-atlas-tooltip" });
     this.focusEl = root.createDiv({ cls: "brain-atlas-focus-card" });
-    this.liveLayerEl = root.createDiv({ cls: "brain-atlas-live-layer" });
     this.taskPanelEl = root.createDiv({ cls: "brain-atlas-task-panel" });
     this.taskPanelEl.hide();
     this.emptyEl = root.createDiv({ cls: "brain-atlas-empty" });
@@ -105,15 +105,13 @@ export class BrainAtlasView extends ItemView {
     this.canvas?.removeEventListener("click", this.onCanvasClick);
     this.renderer.stop();
     this.rendererStarted = false;
-    this.liveChips.forEach((chip) => chip.remove());
-    this.liveChips.clear();
-    this.liveLayerEl = null;
     this.taskPanelEl = null;
     this.taskPanelSig = "";
     this.rootEl = null;
     this.canvas = null;
     this.canvasContextKind = null;
     this.graph = null;
+    this.vaultGraph = null;
   }
 
   onShow(): void {
@@ -127,15 +125,20 @@ export class BrainAtlasView extends ItemView {
     this.rendererStarted = false;
   }
 
-  /** Wake the frame loop without rebuilding the graph (a live-activity event arrived). */
+  /** An activity event arrived: re-merge live nodes if the set changed (so a just-spawned node is in the graph
+   *  before the next draw, and its fire signal resolves), then wake the frame loop. No vault re-read. */
   poke(): void {
-    if (this.rendererStarted) this.renderer.requestFrame();
+    if (!this.rendererStarted) return;
+    const live = this.plugin.activity?.liveNodes() ?? [];
+    const sig = live.map((e) => `${e.id}:${e.active ? 1 : 0}:${e.kind}`).join("|");
+    if (sig !== this.mergedLiveSig) this.composeGraph();
+    this.renderer.requestFrame();
   }
 
   rebuild(): void {
-    this.graph = buildGraph(this.plugin.app, this.plugin.settings);
-    // Feed the live-activity state the node universe so posted paths resolve and cascade.
-    this.plugin.activity?.setGraph(Object.keys(this.graph.idx), this.graph.adj);
+    this.vaultGraph = buildGraph(this.plugin.app, this.plugin.settings);
+    // Merge the live task/agent nodes on top so they render as REAL graph nodes; feeds activity.setGraph too.
+    this.composeGraph();
     this.syncPaletteClass();
     const wantsGL = this.plugin.settings.rendererMode === "webgl2" ||
       (this.plugin.settings.rendererMode === "auto" && !this.isMobileRuntime());
@@ -160,65 +163,69 @@ export class BrainAtlasView extends ItemView {
       mobileMode: this.isMobileRuntime(),
       onPinNode: (node, position) => this.pinNode(node, position),
       onChange: this.syncOverlays,
-      onLiveNodes: (nodes, anchor) => this.syncLiveNodes(nodes, anchor),
+      onLiveNodes: (nodes) => this.syncLiveNodes(nodes),
       onRendererUnavailable: () => this.fallbackToCanvas2D()
     };
   }
 
   /**
-   * The renderer hands us the live nodes (things Claude is doing right now) + the temporal-lobe anchor each
-   * frame. We draw two things: reticle markers stacked on the temporal side of the brain, and the full
-   * task-manager panel in the bottom-left. Both are DOM (crisp labels; identical under Canvas2D and WebGL).
+   * The renderer hands us the current live nodes (what Claude is doing right now) each frame. The nodes
+   * themselves render as REAL graph nodes (merged into the graph, see composeGraph); here we only (1) re-merge
+   * when the set changes and (2) refresh the bottom-left task manager. No per-frame DOM work otherwise.
    */
-  private syncLiveNodes(nodes: LiveScreenNode[], anchor: LiveAnchor): void {
-    if (!this.liveLayerEl) return;
-    if (!this.liveUiVisible) {
-      this.clearLiveUi();
-      return;
+  private syncLiveNodes(nodes: LiveScreenNode[]): void {
+    const sig = nodes.map((n) => `${n.id}:${n.active ? 1 : 0}:${n.kind}`).join("|");
+    if (sig !== this.mergedLiveSig) {
+      this.composeGraph();
+      this.renderer.requestFrame();
     }
-    this.syncLiveReticles(nodes, anchor);
-    this.syncTaskPanel(nodes);
+    if (this.liveUiVisible) this.syncTaskPanel(nodes);
+    else this.clearLiveUi();
   }
 
-  /** Stack reticle markers (target-marker style) on the temporal side, anchored to the temporal lobe. */
-  private syncLiveReticles(nodes: LiveScreenNode[], anchor: LiveAnchor): void {
-    const layer = this.liveLayerEl;
-    if (!layer) return;
-    const RETICLE_CAP = 12;
-    const shown = nodes.slice(0, RETICLE_CAP);
-    const step = 30;
-    const height = layer.clientHeight || 600;
-    const seen = new Set<string>();
-    shown.forEach((node, index) => {
-      seen.add(node.id);
-      let chip = this.liveChips.get(node.id);
-      if (!chip) {
-        chip = layer.createDiv({ cls: "brain-atlas-live-reticle" });
-        chip.createSpan({ cls: "brain-atlas-reticle-ring" });
-        chip.createSpan({ cls: "brain-atlas-reticle-label" });
-        this.liveChips.set(node.id, chip);
-      }
-      const label = chip.querySelector<HTMLElement>(".brain-atlas-reticle-label");
-      if (label && label.textContent !== node.label) label.textContent = node.label;
-      chip.toggleClass("is-active", node.active);
-      chip.toggleClass("is-ending", !node.active);
-      chip.setAttr("data-kind", node.kind);
-      const depthFade = Math.max(0.4, 1 - node.depth * 0.45);
-      // Stack downward from a little above the temporal anchor; clamp to stay on screen.
-      const x = anchor.sx + 14;
-      const y = Math.max(28, Math.min(height - 24, anchor.sy - (shown.length - 1) * step * 0.5 + index * step));
-      chip.style.setProperty("--live-color", node.color);
-      chip.style.left = `${x.toFixed(1)}px`;
-      chip.style.top = `${y.toFixed(1)}px`;
-      chip.style.opacity = (Math.max(0.15, Math.min(1, node.level)) * depthFade).toFixed(3);
-      chip.style.zIndex = String(200 + (shown.length - index));
-    });
-    for (const [id, chip] of this.liveChips) {
-      if (!seen.has(id)) {
-        chip.remove();
-        this.liveChips.delete(id);
-      }
+  /** A live task/agent as a real BrainNode: temporal-right for tasks, temporal-left (mirror) for agents. */
+  private makeLiveNode(entry: LiveEntry): BrainNode {
+    const side = entry.kind === "agent" ? "left" : "right";
+    const kindLabel = entry.kind === "shell" ? "background shell"
+      : entry.kind === "agent" ? "agent"
+        : entry.kind === "terminal" ? "terminal" : "command";
+    return {
+      id: entry.id,
+      name: entry.label,
+      title: entry.label,
+      kind: "workThread",
+      kindLabel,
+      status: "active",
+      hub: false,
+      degree: 0,
+      color: this.plugin.activity ? this.plugin.activity.liveColorFor(entry) : "#ffb02e",
+      path: entry.detail || entry.label,
+      classificationSource: "frontmatter",
+      _lobeName: "temporal",
+      _3dLobe: liveNodePosition(entry.id, "temporal", side)
+    };
+  }
+
+  /**
+   * Merge the current live task/agent nodes on top of the vault graph so they render as real nodes (glow,
+   * depth, hover). A NEW graph object is produced so the WebGL renderer rebuilds its buffers; live glow then
+   * animates per-frame via the activity system with no further rebuild until the set changes.
+   */
+  private composeGraph(): void {
+    const vault = this.vaultGraph;
+    if (!vault) return;
+    const live = this.plugin.activity?.liveNodes() ?? [];
+    this.mergedLiveSig = live.map((e) => `${e.id}:${e.active ? 1 : 0}:${e.kind}`).join("|");
+    if (live.length === 0) {
+      this.graph = vault;
+      this.plugin.activity?.setGraph(Object.keys(vault.idx), vault.adj);
+      return;
     }
+    const liveNodes = live.map((entry) => this.makeLiveNode(entry));
+    const idx: Record<string, BrainNode> = { ...vault.idx };
+    for (const node of liveNodes) idx[node.id] = node;
+    this.graph = { ...vault, nodes: [...vault.nodes, ...liveNodes], idx, adj: vault.adj };
+    this.plugin.activity?.setGraph(Object.keys(idx), vault.adj);
   }
 
   /** The bottom-left task manager: every live task grouped by kind (shells / commands / terminals / agents). */
@@ -272,10 +279,8 @@ export class BrainAtlasView extends ItemView {
     }
   }
 
-  /** Remove every reticle + hide the panel (the Tasks quick toggle is off). */
+  /** Hide the task-manager panel (the Tasks quick toggle is off). Live nodes stay in the brain. */
   private clearLiveUi(): void {
-    this.liveChips.forEach((chip) => chip.remove());
-    this.liveChips.clear();
     if (this.taskPanelEl) {
       this.taskPanelEl.hide();
       this.taskPanelEl.empty();

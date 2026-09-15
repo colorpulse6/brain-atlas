@@ -208,10 +208,10 @@ test("spawnLive holds at full while active, then decays and is removed after end
   assert.equal(live.length, 1);
   assert.equal(live[0].label, "pytest -q");
   assert.equal(live[0].active, true);
-  assert.equal(live[0].level, 1);
-  // still full while active, even seconds later
+  assert.ok(live[0].level > 0.4 && live[0].level <= 1, `active level pulses in range, got ${live[0].level}`);
+  // still glowing (pulsing) while active, even seconds later
   state.tick(10_000);
-  assert.equal(state.liveNodes()[0].level, 1);
+  assert.ok(state.liveNodes()[0].level > 0.4 && state.liveNodes()[0].level <= 1);
   // end -> decays
   state.endLive("t1", 10_000);
   state.tick(10_250); // 0.25s into a 0.5s decay
@@ -282,6 +282,26 @@ test("background shells outlive foreground TTL", () => {
   const kinds = new Map(state.liveNodes().map((n) => [n.id, n]));
   assert.equal(kinds.get("cmd")?.active ?? false, false, "command TTL-expired");
   assert.equal(kinds.get("sh")?.active, true, "shell still running");
+});
+
+test("actions queue fire events; live nodes glow via get()/active()", () => {
+  const state = stateWithGraph();
+  // a read pushes a fire for the touched node
+  state.activate("a.md", "read", 0);
+  let fires = state.drainFires();
+  assert.equal(fires.length, 1);
+  assert.deepEqual(fires[0], { target: "a.md", kind: "read" });
+  assert.deepEqual(state.drainFires(), [], "drained once");
+  // a spawned live node pushes a spawn fire and shows up in get()/active() as a live glow
+  state.spawnLive("live-1", "pytest", "command", "temporal", 0);
+  fires = state.drainFires();
+  assert.equal(fires.length, 1);
+  assert.equal(fires[0].kind, "spawn");
+  state.tick(0);
+  const entry = state.get("live-1");
+  assert.ok(entry && entry.live === true, "live node glows via get()");
+  const ids = [...state.active()].map((pair) => pair[0]);
+  assert.ok(ids.includes("live-1"), "live node appears in active()");
 });
 
 test("live nodes stack in a stable order by spawn sequence", () => {

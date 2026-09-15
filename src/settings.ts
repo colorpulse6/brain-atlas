@@ -102,7 +102,7 @@ export const DEFAULT_SETTINGS: BrainAtlasSettings = {
   dailyNoteDateFormat: "YYYY-MM-DD",
   nodeCap: 1500,
   edgeCap: 4000,
-  idleAutoRotate: true,
+  idleAutoRotate: false,
   showLobeLabels: true,
   showLegendChip: true,
   enabledLobes: allLobesEnabled(),

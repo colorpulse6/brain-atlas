@@ -24,6 +24,7 @@ export interface LiveScreenNode {
   label: string;
   detail: string;
   kind: string;
+  region: string;
   color: string;
   seq: number;
   sx: number;
@@ -158,7 +159,7 @@ export abstract class RenderCore {
   protected canvas: HTMLCanvasElement | null = null;
   protected getGraph: (() => BrainGraph) | null = null;
   protected options: BrainRendererOptions = {
-    idleAutoRotate: true,
+    idleAutoRotate: false,
     showLobeLabels: true,
     showAllLabels: false,
     enabledLobes: allLobesEnabled(),
@@ -309,6 +310,7 @@ export abstract class RenderCore {
         label: entry.label,
         detail: entry.detail,
         kind: entry.kind,
+        region: entry.region,
         color: this.activity!.liveColorFor(entry),
         seq: entry.seq,
         sx: projected.sx,
@@ -751,34 +753,53 @@ export abstract class RenderCore {
     return graph.activePalette.kinds[LOBE_KIND[lobe] ?? "concept"] ?? graph.activePalette.hud;
   }
 
-  protected spawnSignals(now: number, graph: BrainGraph, interLobeEdges: BrainEdge[]): void {
-    if (this.deterministic) {
-      // In deterministic mode, don't spawn new signals; existing ones still animate.
-      for (let index = this.signals.length - 1; index >= 0; index -= 1) {
-        if (now - this.signals[index].born > this.signals[index].dur) this.signals.splice(index, 1);
-      }
-      return;
-    }
-    if (interLobeEdges.length && now - this.lastSpawn > 900) {
-      this.lastSpawn = now;
-      const edge = interLobeEdges[Math.floor(Math.random() * interLobeEdges.length)];
-      const forward = Math.random() < 0.5;
-      const A = graph.idx[forward ? edge.a : edge.b];
-      const B = graph.idx[forward ? edge.b : edge.a];
-      if (A && B) {
+  private signalHub: BrainNode | null = null;
+  private signalHubGraph: BrainGraph | null = null;
+
+  /**
+   * Signals are now ACTION-DRIVEN, not ambient: each read/write/spawn recorded by ActivityState fires one
+   * signal from the brain's routing hub to the touched node, so every action visibly does something and the
+   * brain sits still when nothing is happening. Deterministic mode (the A/B harness) never spawns.
+   */
+  protected spawnSignals(now: number, graph: BrainGraph, _interLobeEdges: BrainEdge[]): void {
+    if (!this.deterministic && this.activity) {
+      for (const ev of this.activity.drainFires()) {
+        const target = graph.idx[ev.target];
+        if (!target?._3dLobe) continue;
+        const source = this.signalSource(graph, target);
         this.signals.push({
           id: Math.random(),
-          a: A,
-          b: B,
+          a: source,
+          b: target,
           born: now,
-          dur: 2400 + Math.random() * 1100,
-          colA: A.color,
-          colB: B.color
+          dur: ev.kind === "spawn" ? 950 : 650,
+          colA: source.color,
+          colB: target.color
         });
       }
     }
     for (let index = this.signals.length - 1; index >= 0; index -= 1) {
       if (now - this.signals[index].born > this.signals[index].dur) this.signals.splice(index, 1);
     }
+  }
+
+  /** The node a fired signal travels FROM: the highest-degree hub, else a pseudo node at the brain-stem core. */
+  protected signalSource(graph: BrainGraph, target: BrainNode): BrainNode {
+    if (this.signalHubGraph !== graph) {
+      this.signalHubGraph = graph;
+      this.signalHub = null;
+      let best = -1;
+      for (const node of graph.nodes) {
+        if (!node._3dLobe) continue;
+        if ((node.degree || 0) > best) { best = node.degree || 0; this.signalHub = node; }
+      }
+    }
+    const hub = this.signalHub;
+    if (hub && hub._3dLobe && hub.id !== target.id) return hub;
+    return {
+      id: "__stem__", name: "", title: "", kind: "index", kindLabel: "", status: "active",
+      hub: false, degree: 0, color: graph.activePalette.hud, path: "", classificationSource: "default",
+      _3dLobe: { ...Brain3D.LOBE_CENTERS.stem.c }, _lobeName: "stem"
+    } as BrainNode;
   }
 }
