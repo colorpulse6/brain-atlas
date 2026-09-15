@@ -3,7 +3,7 @@ import { buildGraph } from "./adapter.ts";
 import { LOBES, setAllLobes, setLobeEnabled } from "./lobe-visibility.ts";
 import { displayNodeName, displayNodePath } from "./node-display.ts";
 import { BrainRenderer } from "./renderer.ts";
-import { RenderCore, type BrainRendererOptions } from "./render-core.ts";
+import { RenderCore, type BrainRendererOptions, type LiveScreenNode } from "./render-core.ts";
 import { BrainGLRenderer } from "./gl/brain-gl-renderer.ts";
 import type { ActivityState } from "./activity.ts";
 import { LOBE_CENTERS } from "./shape.ts";
@@ -33,6 +33,9 @@ export class BrainAtlasView extends ItemView {
   private focusEl: HTMLDivElement | null = null;
   private infoEl: HTMLDivElement | null = null;
   private emptyEl: HTMLDivElement | null = null;
+  private liveLayerEl: HTMLDivElement | null = null;
+  /** Transient live-node chips (commands / terminals / agents Claude is running) keyed by correlation id. */
+  private liveChips = new Map<string, HTMLElement>();
   private infoButton: HTMLButtonElement | null = null;
   private labelButton: HTMLButtonElement | null = null;
   private allButton: HTMLButtonElement | null = null;
@@ -79,6 +82,7 @@ export class BrainAtlasView extends ItemView {
     this.infoEl = root.createDiv({ cls: "brain-atlas-info-panel" });
     this.tooltipEl = root.createDiv({ cls: "brain-atlas-tooltip" });
     this.focusEl = root.createDiv({ cls: "brain-atlas-focus-card" });
+    this.liveLayerEl = root.createDiv({ cls: "brain-atlas-live-layer" });
     this.emptyEl = root.createDiv({ cls: "brain-atlas-empty" });
     this.emptyEl.setText("Your brain is empty. Add notes with #project, #person, or #source tags to start mapping.");
 
@@ -90,6 +94,9 @@ export class BrainAtlasView extends ItemView {
     this.canvas?.removeEventListener("click", this.onCanvasClick);
     this.renderer.stop();
     this.rendererStarted = false;
+    this.liveChips.forEach((chip) => chip.remove());
+    this.liveChips.clear();
+    this.liveLayerEl = null;
     this.rootEl = null;
     this.canvas = null;
     this.canvasContextKind = null;
@@ -105,6 +112,11 @@ export class BrainAtlasView extends ItemView {
   onHide(): void {
     this.renderer.stop();
     this.rendererStarted = false;
+  }
+
+  /** Wake the frame loop without rebuilding the graph (a live-activity event arrived). */
+  poke(): void {
+    if (this.rendererStarted) this.renderer.requestFrame();
   }
 
   rebuild(): void {
@@ -134,8 +146,48 @@ export class BrainAtlasView extends ItemView {
       mobileMode: this.isMobileRuntime(),
       onPinNode: (node, position) => this.pinNode(node, position),
       onChange: this.syncOverlays,
+      onLiveNodes: (nodes) => this.syncLiveNodes(nodes),
       onRendererUnavailable: () => this.fallbackToCanvas2D()
     };
+  }
+
+  /**
+   * Reconcile the transient live-node chips (commands / terminals Claude runs, subagents it spawns)
+   * against the projected list the renderer hands us each frame. Chips are DOM, so their labels stay
+   * crisp and the same code works under Canvas2D and WebGL. A chip that is no longer in the list is removed.
+   */
+  private syncLiveNodes(nodes: LiveScreenNode[]): void {
+    const layer = this.liveLayerEl;
+    if (!layer) return;
+    const seen = new Set<string>();
+    for (const node of nodes) {
+      seen.add(node.id);
+      let chip = this.liveChips.get(node.id);
+      if (!chip) {
+        chip = layer.createDiv({ cls: "brain-atlas-live-chip" });
+        chip.createSpan({ cls: "brain-atlas-live-dot" });
+        chip.createSpan({ cls: "brain-atlas-live-label" });
+        this.liveChips.set(node.id, chip);
+      }
+      const label = chip.querySelector<HTMLElement>(".brain-atlas-live-label");
+      if (label && label.textContent !== node.label) label.textContent = node.label;
+      chip.toggleClass("is-active", node.active);
+      chip.toggleClass("is-ending", !node.active);
+      chip.setAttr("data-kind", node.kind);
+      const depthFade = Math.max(0.35, 1 - node.depth * 0.5);
+      chip.style.setProperty("--live-color", node.color);
+      chip.style.setProperty("--live-level", node.level.toFixed(3));
+      chip.style.left = `${node.sx.toFixed(1)}px`;
+      chip.style.top = `${node.sy.toFixed(1)}px`;
+      chip.style.opacity = (Math.max(0, Math.min(1, node.level)) * depthFade).toFixed(3);
+      chip.style.zIndex = String(200 + Math.round((1 - node.depth) * 100));
+    }
+    for (const [id, chip] of this.liveChips) {
+      if (!seen.has(id)) {
+        chip.remove();
+        this.liveChips.delete(id);
+      }
+    }
   }
 
   /** Select the desired renderer kind based on rendererMode + mobile detection. */

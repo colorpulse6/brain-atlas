@@ -84,6 +84,16 @@ export default class BrainAtlasPlugin extends Plugin {
       http,
       vaultBase: vaultBasePath(this.app),
       onEvent: (event) => this.activity.activate(event.path, event.kind, performance.now()),
+      onLive: (event) => {
+        // Mutate the shared state only; the renderer's frame loop keeps ticking while anything glows
+        // (activeCount counts live nodes), so a rebuild here would only flicker the graph.
+        if (event.op === "spawn") {
+          this.activity.spawnLive(event.id, event.label, event.kind, event.region, performance.now());
+        } else {
+          this.activity.endLive(event.id, performance.now());
+        }
+        this.pokeActiveBrainViews();
+      },
       status: () => this.activity.status()
     });
     this.activityListener = listener;
@@ -113,6 +123,14 @@ export default class BrainAtlasPlugin extends Plugin {
     }
   }
 
+  /** Nudge open atlas views to render a frame now (a live-activity event) without a graph rebuild. */
+  pokeActiveBrainViews(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(BRAIN_ATLAS_VIEW_TYPE)) {
+      const view = leaf.view;
+      if (view instanceof BrainAtlasView) view.poke();
+    }
+  }
+
   private debouncedRefresh = debounce(() => {
     try {
       this.refreshActiveBrainViews();
@@ -130,7 +148,12 @@ function activityOptions(settings: BrainAtlasSettings): ActivityOptions {
     cascade: settings.activityCascade,
     swell: settings.activitySwell,
     readColor: settings.activityReadColor,
-    writeColor: settings.activityWriteColor
+    writeColor: settings.activityWriteColor,
+    liveDecaySeconds: settings.liveDecaySeconds,
+    liveMaxSeconds: settings.liveMaxSeconds,
+    liveCommandColor: settings.liveCommandColor,
+    liveAgentColor: settings.liveAgentColor,
+    liveTerminalColor: settings.liveTerminalColor
   };
 }
 

@@ -13,7 +13,8 @@ import {
   lerpHexColor,
   lerpRgb01,
   normalizePath,
-  parseEventBody
+  parseEventBody,
+  parseLiveBody
 } from "../src/activity.ts";
 
 const IDS = ["a.md", "folder/b.md", "folder/c.md", "lonely.md"];
@@ -177,5 +178,124 @@ function request(port, method, path, body) {
     req.on("error", reject);
     if (body) req.write(body);
     req.end();
+  });
+}
+
+// --- Live (transient) nodes: commands / terminals / subagents Claude runs -----------------
+
+test("parseLiveBody parses spawn and end, clamps kind, defaults region", () => {
+  const spawn = parseLiveBody(JSON.stringify({ op: "spawn", id: "t1", label: "git status", kind: "command" }));
+  assert.deepEqual(spawn, { op: "spawn", id: "t1", label: "git status", kind: "command", region: "temporal" });
+  const agent = parseLiveBody(JSON.stringify({ op: "spawn", id: "a1", label: "code-reviewer", kind: "agent", region: "temporal" }));
+  assert.equal(agent.kind, "agent");
+  const end = parseLiveBody(JSON.stringify({ op: "end", id: "t1" }));
+  assert.deepEqual(end, { op: "end", id: "t1", label: "", kind: "command", region: "temporal" });
+  assert.equal(parseLiveBody(JSON.stringify({ op: "spawn", id: "x", kind: "bogus" })).kind, "command");
+  assert.equal(parseLiveBody(JSON.stringify({ op: "spawn" })), null); // no id
+  assert.equal(parseLiveBody(JSON.stringify({ id: "x" })), null);     // no op
+  assert.equal(parseLiveBody("not json"), null);
+});
+
+test("spawnLive holds at full while active, then decays and is removed after end", () => {
+  const state = new ActivityState({ liveDecaySeconds: 0.5, liveMaxSeconds: 180 });
+  state.spawnLive("t1", "pytest -q", "command", "temporal", 0);
+  state.tick(0);
+  let live = state.liveNodes();
+  assert.equal(live.length, 1);
+  assert.equal(live[0].label, "pytest -q");
+  assert.equal(live[0].active, true);
+  assert.equal(live[0].level, 1);
+  // still full while active, even seconds later
+  state.tick(10_000);
+  assert.equal(state.liveNodes()[0].level, 1);
+  // end -> decays
+  state.endLive("t1", 10_000);
+  state.tick(10_250); // 0.25s into a 0.5s decay
+  const fading = state.liveNodes();
+  assert.equal(fading.length, 1);
+  assert.ok(fading[0].level < 1 && fading[0].level > 0.1, `level ${fading[0].level}`);
+  // fully gone after a few decay constants
+  state.tick(14_000);
+  assert.equal(state.liveNodes().length, 0);
+  assert.equal(state.liveCount(), 0);
+});
+
+test("an active live node with no end event is TTL-expired", () => {
+  const state = new ActivityState({ liveDecaySeconds: 0.5, liveMaxSeconds: 2 });
+  state.spawnLive("stuck", "hung command", "command", "temporal", 0);
+  state.tick(1_000);
+  assert.equal(state.liveNodes()[0].active, true);
+  state.tick(2_500); // past the 2s TTL -> force-ended, now fading
+  const after = state.liveNodes();
+  if (after.length) assert.equal(after[0].active, false);
+  state.tick(6_000); // decayed away
+  assert.equal(state.liveNodes().length, 0);
+});
+
+test("spawnLive refresh keeps the original bornAt and reactivates", () => {
+  const state = new ActivityState({ liveDecaySeconds: 0.5, liveMaxSeconds: 180 });
+  state.spawnLive("t1", "first", "command", "temporal", 100);
+  state.endLive("t1", 200);
+  state.spawnLive("t1", "second", "command", "temporal", 300);
+  state.tick(300);
+  const live = state.liveNodes();
+  assert.equal(live.length, 1);
+  assert.equal(live[0].active, true);
+  assert.equal(live[0].label, "second");
+  assert.equal(live[0].bornAt, 100); // original spawn time preserved
+});
+
+test("liveColor maps kinds and status reports live count + lastLive", () => {
+  const state = new ActivityState({ liveCommandColor: "#111111", liveAgentColor: "#222222", liveTerminalColor: "#333333" });
+  assert.equal(state.liveColor("command"), "#111111");
+  assert.equal(state.liveColor("agent"), "#222222");
+  assert.equal(state.liveColor("terminal"), "#333333");
+  state.spawnLive("a1", "code-reviewer", "agent", "temporal", 0);
+  state.tick(0);
+  const s = state.status();
+  assert.equal(s.live, 1);
+  assert.equal(s.lastLive, "code-reviewer");
+});
+
+test("tick returns true while a live node glows even with no note activity", () => {
+  const state = new ActivityState();
+  assert.equal(state.tick(0), false);
+  state.spawnLive("t1", "x", "command", "temporal", 0);
+  assert.equal(state.tick(0), true);
+});
+
+test("listener POST /live invokes onLive with the parsed event", async () => {
+  const events = [];
+  const listener = new ActivityListener({
+    http,
+    onEvent: () => {},
+    onLive: (ev) => events.push(ev),
+    status: () => ({ active: 0, lastPath: null, lastKind: null, nodeCount: 0, missed: 0, events: 0, live: 0, lastLive: null })
+  });
+  const port = await listener.start(0);
+  try {
+    await postJson(port, "/live", { op: "spawn", id: "t1", label: "git push", kind: "terminal" });
+    await postJson(port, "/live", { op: "end", id: "t1" });
+  } finally {
+    listener.stop();
+  }
+  assert.equal(events.length, 2);
+  assert.equal(events[0].op, "spawn");
+  assert.equal(events[0].kind, "terminal");
+  assert.equal(events[1].op, "end");
+});
+
+function postJson(port, path, body) {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify(body);
+    const req = http.request(
+      { host: "127.0.0.1", port, path, method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) } },
+      (res) => {
+        res.on("data", () => {});
+        res.on("end", resolve);
+      }
+    );
+    req.on("error", reject);
+    req.end(data);
   });
 }

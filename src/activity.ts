@@ -22,6 +22,27 @@
 
 export type ActivityKind = "read" | "write";
 
+/** Transient "live" nodes: things Claude is doing right now (a command, a launched terminal, a subagent). */
+export type LiveKind = "command" | "agent" | "terminal";
+
+export interface LiveEntry {
+  /** Correlation id from the hook (tool_use_id, or a hash of the command). */
+  id: string;
+  /** Short human label drawn next to the node (the command, the subagent type). */
+  label: string;
+  kind: LiveKind;
+  /** Anatomical region to float the node in (a LobeName string, e.g. "temporal"). */
+  region: string;
+  /** True while the work is still running; false once an "end" event (or the TTL) fired. */
+  active: boolean;
+  /** Activation timestamp (tick's clock). */
+  bornAt: number;
+  /** When it stopped being active (decay start), or null while active. */
+  endAt: number | null;
+  /** Current glow level in [0, 1], recomputed by tick(). */
+  level: number;
+}
+
 export interface ActivityEntry {
   /** Peak level set at activation (1 for the hit node, cascade for a neighbour). */
   peak: number;
@@ -39,6 +60,14 @@ export interface ActivityOptions {
   swell: number;
   readColor: string;
   writeColor: string;
+  /** Live nodes: hold the glow at full while active, then decay this long after they end. */
+  liveDecaySeconds: number;
+  /** Force-end an active live node after this many seconds (in case its "end" event is lost). */
+  liveMaxSeconds: number;
+  /** Colors for the three live kinds. */
+  liveCommandColor: string;
+  liveAgentColor: string;
+  liveTerminalColor: string;
 }
 
 export const DEFAULT_ACTIVITY_OPTIONS: ActivityOptions = {
@@ -47,7 +76,12 @@ export const DEFAULT_ACTIVITY_OPTIONS: ActivityOptions = {
   cascade: 0.45,
   swell: 2,
   readColor: "#00ff00",
-  writeColor: "#ff0000"
+  writeColor: "#ff0000",
+  liveDecaySeconds: 1.2,
+  liveMaxSeconds: 180,
+  liveCommandColor: "#ffb02e",
+  liveAgentColor: "#22d3ee",
+  liveTerminalColor: "#c084fc"
 };
 
 export interface ActivityStatus {
@@ -57,6 +91,10 @@ export interface ActivityStatus {
   nodeCount: number;
   missed: number;
   events: number;
+  /** Count of live nodes currently glowing (active or fading). */
+  live: number;
+  /** Label of the most recent live spawn. */
+  lastLive: string | null;
 }
 
 const MIN_LEVEL = 0.01;
@@ -117,6 +155,36 @@ export function parseEventBody(body: string, vaultBase?: string | null): ParsedE
   return { path, kind };
 }
 
+export interface LiveEvent {
+  op: "spawn" | "end";
+  id: string;
+  label: string;
+  kind: LiveKind;
+  region: string;
+}
+
+const LIVE_KINDS = new Set<LiveKind>(["command", "agent", "terminal"]);
+
+/** Parse a POST /live body into a LiveEvent, or null when it is malformed. */
+export function parseLiveBody(body: string): LiveEvent | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!data || typeof data !== "object") return null;
+  const p = data as Record<string, unknown>;
+  const op = p.op === "end" ? "end" : p.op === "spawn" ? "spawn" : null;
+  const id = typeof p.id === "string" ? p.id.trim() : "";
+  if (!op || !id) return null;
+  const kindRaw = typeof p.kind === "string" ? (p.kind.trim().toLowerCase() as LiveKind) : "command";
+  const kind = LIVE_KINDS.has(kindRaw) ? kindRaw : "command";
+  const label = typeof p.label === "string" ? p.label.trim().slice(0, 80) : "";
+  const region = typeof p.region === "string" ? p.region.trim().toLowerCase() : "temporal";
+  return { op, id, label, kind, region };
+}
+
 /** Parse "#rrggbb" into [r, g, b] in [0, 1]; a bad string yields white. */
 export function hexToRgb01(hex: string): [number, number, number] {
   const h = (hex || "").replace("#", "");
@@ -156,6 +224,9 @@ export class ActivityState {
   private lastKind: ActivityKind | null = null;
   private missed = 0;
   private events = 0;
+  /** Transient live nodes keyed by correlation id. */
+  private liveEntries = new Map<string, LiveEntry>();
+  private lastLive: string | null = null;
 
   constructor(options: Partial<ActivityOptions> = {}) {
     this.options = { ...DEFAULT_ACTIVITY_OPTIONS, ...options };
@@ -217,7 +288,85 @@ export class ActivityState {
         entry.level = level;
       }
     }
-    return this.entries.size > 0;
+    this.tickLive(now);
+    return this.entries.size > 0 || this.liveEntries.size > 0;
+  }
+
+  /** Advance the transient live nodes: hold at full while active, decay after they end, TTL-expire the lost. */
+  private tickLive(now: number): void {
+    const ttl = Math.max(1, this.options.liveMaxSeconds) * 1000;
+    const decay = Math.max(0.05, this.options.liveDecaySeconds) * 1000;
+    for (const [id, entry] of this.liveEntries) {
+      if (entry.active && now - entry.bornAt > ttl) {
+        // The "end" event never arrived (crash, blocked tool, closed listener): retire it anyway.
+        entry.active = false;
+        entry.endAt = now;
+      }
+      if (entry.active) {
+        entry.level = 1;
+        continue;
+      }
+      const since = Math.max(0, now - (entry.endAt ?? now));
+      const level = Math.exp(-since / decay);
+      if (level < MIN_LEVEL) {
+        this.liveEntries.delete(id);
+      } else {
+        entry.level = level;
+      }
+    }
+  }
+
+  /**
+   * Spawn or refresh a transient live node (a command Claude is running, a launched terminal, a subagent).
+   * `region` is a LobeName string the renderer floats the node in. `now` is tick's clock.
+   */
+  spawnLive(id: string, label: string, kind: LiveKind, region: string, now: number): void {
+    if (!id) return;
+    this.lastLive = label || id;
+    const existing = this.liveEntries.get(id);
+    this.liveEntries.set(id, {
+      id,
+      label: label || existing?.label || id,
+      kind,
+      region: region || existing?.region || "temporal",
+      active: true,
+      bornAt: existing?.bornAt ?? now,
+      endAt: null,
+      level: 1
+    });
+  }
+
+  /** Mark a live node finished; it fades over liveDecaySeconds and is then removed. */
+  endLive(id: string, now: number): void {
+    const entry = this.liveEntries.get(id);
+    if (!entry || !entry.active) return;
+    entry.active = false;
+    entry.endAt = now;
+  }
+
+  /** Live nodes currently worth drawing (level >= 0.01), newest first. */
+  liveNodes(): LiveEntry[] {
+    const out: LiveEntry[] = [];
+    for (const entry of this.liveEntries.values()) {
+      if (entry.level >= MIN_LEVEL) out.push(entry);
+    }
+    return out.sort((a, b) => b.bornAt - a.bornAt);
+  }
+
+  /** Number of live nodes glowing (active or fading). */
+  liveCount(): number {
+    let n = 0;
+    for (const entry of this.liveEntries.values()) {
+      if (entry.level >= MIN_LEVEL) n += 1;
+    }
+    return n;
+  }
+
+  /** The configured color for a live kind. */
+  liveColor(kind: LiveKind): string {
+    if (kind === "agent") return this.options.liveAgentColor;
+    if (kind === "terminal") return this.options.liveTerminalColor;
+    return this.options.liveCommandColor;
   }
 
   /** The node's entry while it glows (level >= 0.01), else undefined. */
@@ -238,11 +387,13 @@ export class ActivityState {
     for (const entry of this.entries.values()) {
       if (entry.level >= MIN_LEVEL) n += 1;
     }
-    return n;
+    // Live nodes keep the animation running too (steady glow while active, then a fade).
+    return n + this.liveCount();
   }
 
   clear(): void {
     this.entries.clear();
+    this.liveEntries.clear();
   }
 
   status(): ActivityStatus {
@@ -252,7 +403,9 @@ export class ActivityState {
       lastKind: this.lastKind,
       nodeCount: this.ids.size,
       missed: this.missed,
-      events: this.events
+      events: this.events,
+      live: this.liveCount(),
+      lastLive: this.lastLive
     };
   }
 
@@ -297,6 +450,8 @@ export interface HttpServerLike {
 export interface ActivityListenerOptions {
   http: HttpLike;
   onEvent: (event: ParsedEvent) => void;
+  /** Transient live node events (POST /live): a command/terminal/agent starting or ending. */
+  onLive?: (event: LiveEvent) => void;
   status: () => ActivityStatus;
   vaultBase?: string | null;
   /** Bodies longer than this are truncated before parsing (default 1 MiB). */
@@ -373,6 +528,28 @@ export class ActivityListener {
             this.opts.onEvent(event);
           } catch (error) {
             console.warn("Brain Atlas activity: event handler failed", error);
+          }
+        }
+        this.reply(res, 200, "ok");
+      });
+      return;
+    }
+    if (method === "POST" && url === "/live") {
+      const limit = this.opts.maxBodyBytes ?? 1024 * 1024;
+      let body = "";
+      let truncated = false;
+      req.on("data", (chunk) => {
+        if (body.length < limit) body += String(chunk);
+        else truncated = true;
+      });
+      req.on("error", () => this.reply(res, 200, "ok"));
+      req.on("end", () => {
+        const event = parseLiveBody(truncated ? body.slice(0, 65536) : body);
+        if (event && this.opts.onLive) {
+          try {
+            this.opts.onLive(event);
+          } catch (error) {
+            console.warn("Brain Atlas activity: live handler failed", error);
           }
         }
         this.reply(res, 200, "ok");

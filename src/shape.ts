@@ -168,6 +168,28 @@ export function assignLobePositions(nodes: BrainNode[]): void {
   }
 }
 
+/**
+ * A deterministic 3D position for a transient live node in `region`, floated just OUTSIDE the note
+ * cluster so it reads as "hovering in" the region rather than buried in the ball. Unknown region -> temporal.
+ */
+export function liveNodePosition(id: string, region: string): Vec3 {
+  const lobe = (LOBE_CENTERS[region as LobeName] ? region : "temporal") as LobeName;
+  const center = LOBE_CENTERS[lobe];
+  const h = stableHash("live:" + id);
+  const r1 = (h & 0xffff) / 0xffff;
+  const r2 = ((h >>> 16) & 0xffff) / 0xffff;
+  const u = r1 * Math.PI * 2;
+  const v = Math.acos(2 * r2 - 1);
+  const radius = center.r * 1.2;
+  let cx = center.c.x;
+  if (center.mirror && r1 > 0.5) cx = -cx;
+  return {
+    x: cx + radius * Math.sin(v) * Math.cos(u),
+    y: center.c.y + radius * Math.sin(v) * Math.sin(u),
+    z: center.c.z + radius * Math.cos(v)
+  };
+}
+
 function clusterPoint(node: BrainNode, lobe: LobeName, lobeRadius: number): Vec3 {
   const key = `${lobe}:${topFolder(node.path) ?? node.kind}`;
   const h = stableHash(key);
@@ -207,6 +229,7 @@ export const Brain3D = {
   lobeFor,
   makeProjector,
   assignLobePositions,
+  liveNodePosition,
   LOBE_CENTERS,
   KIND_TO_LOBE
 };

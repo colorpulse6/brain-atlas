@@ -18,6 +18,19 @@ export interface ProjectedNode extends ProjectedPoint {
   node: BrainNode;
 }
 
+/** A transient live node projected to screen space, handed to the view to draw as a DOM chip. */
+export interface LiveScreenNode {
+  id: string;
+  label: string;
+  kind: string;
+  color: string;
+  sx: number;
+  sy: number;
+  depth: number;
+  level: number;
+  active: boolean;
+}
+
 export interface ProjectedEdge {
   e: BrainEdge;
   A: BrainNode;
@@ -89,6 +102,13 @@ export interface BrainRendererOptions {
   onChange?: () => void;
   onPinNode?: (node: BrainNode, position: PinnedNodePosition) => void;
   /**
+   * Called once per frame with the transient live nodes projected to screen space
+   * (the view renders them as DOM chips). Fires with [] once when the last live
+   * node fades, so the view can clear its layer. Both renderers use the same CPU
+   * projector for this, so the chips track the volume in Canvas2D and WebGL alike.
+   */
+  onLiveNodes?: (nodes: LiveScreenNode[]) => void;
+  /**
    * Called when the WebGL renderer determines it cannot recover (context
    * permanently lost or resource rebuild failed). The view should fall back
    * to Canvas2D in response.
@@ -154,6 +174,11 @@ export abstract class RenderCore {
 
   setActivity(state: ActivityState | null): void {
     this.activity = state;
+    this.requestImmediateFrame();
+  }
+
+  /** Wake the frame loop now (e.g. a live-activity event arrived while idle). No rebuild. */
+  requestFrame(): void {
     this.requestImmediateFrame();
   }
 
@@ -238,9 +263,37 @@ export abstract class RenderCore {
 
     this.activity?.tick(now);
     this.drawScene(now);
+    this.emitLiveNodes(project);
 
     this.scheduleNextFrame(this.nextFrameDelay(now));
   };
+
+  /** How many live nodes we last handed the view (so we emit [] exactly once when they all fade). */
+  private lastLiveEmitted = 0;
+
+  /** Project the transient live nodes and hand them to the view (renderer-agnostic; DOM chips). */
+  protected emitLiveNodes(project: (point: Vec3) => ProjectedPoint): void {
+    const cb = this.options.onLiveNodes;
+    if (!cb || !this.activity) return;
+    const live = this.activity.liveNodes();
+    if (live.length === 0 && this.lastLiveEmitted === 0) return;
+    this.lastLiveEmitted = live.length;
+    const out: LiveScreenNode[] = live.map((entry) => {
+      const projected = project(Brain3D.liveNodePosition(entry.id, entry.region));
+      return {
+        id: entry.id,
+        label: entry.label,
+        kind: entry.kind,
+        color: this.activity!.liveColor(entry.kind),
+        sx: projected.sx,
+        sy: projected.sy,
+        depth: projected.depth,
+        level: entry.level,
+        active: entry.active
+      };
+    });
+    cb(out);
+  }
 
   start(canvas: HTMLCanvasElement, getGraph: () => BrainGraph, options: Partial<BrainRendererOptions> = {}): void {
     this.stop();

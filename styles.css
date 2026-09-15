@@ -490,3 +490,66 @@
     font-size: 13px;
   }
 }
+
+/* --- Live activity chips: transient nodes for commands / terminals / subagents Claude runs --- */
+.brain-atlas-live-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 6;
+}
+.brain-atlas-live-chip {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px 2px 5px;
+  border-radius: 999px;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--live-color, #ffb02e);
+  background: color-mix(in srgb, var(--live-color, #ffb02e) 12%, rgba(8, 8, 12, 0.74));
+  border: 1px solid color-mix(in srgb, var(--live-color, #ffb02e) 55%, transparent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--live-color, #ffb02e) 65%, transparent),
+              0 0 22px color-mix(in srgb, var(--live-color, #ffb02e) 32%, transparent);
+  transition: opacity 180ms ease-out;
+}
+.brain-atlas-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--live-color, #ffb02e);
+  box-shadow: 0 0 8px var(--live-color, #ffb02e), 0 0 16px var(--live-color, #ffb02e);
+}
+.brain-atlas-live-label {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.brain-atlas-live-chip.is-active {
+  animation: brain-atlas-live-pulse 1.15s ease-in-out infinite;
+}
+.brain-atlas-live-chip.is-ending {
+  filter: saturate(0.65);
+}
+.brain-atlas-live-chip[data-kind="agent"] .brain-atlas-live-dot {
+  border-radius: 2px;
+}
+@keyframes brain-atlas-live-pulse {
+  0%, 100% {
+    box-shadow: 0 0 8px color-mix(in srgb, var(--live-color, #ffb02e) 55%, transparent),
+                0 0 16px color-mix(in srgb, var(--live-color, #ffb02e) 26%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 16px color-mix(in srgb, var(--live-color, #ffb02e) 92%, transparent),
+                0 0 36px color-mix(in srgb, var(--live-color, #ffb02e) 55%, transparent);
+  }
+}
+.brain-atlas-root.is-light-palette .brain-atlas-live-chip {
+  background: color-mix(in srgb, var(--live-color, #ffb02e) 18%, rgba(250, 250, 252, 0.84));
+}

@@ -51,6 +51,12 @@ export interface BrainAtlasSettings {
   activityDecaySeconds: number;
   activityCascade: number;
   activitySwell: number;
+  /** Transient live nodes: commands / terminals Claude runs and subagents it spawns, glowing while active. */
+  liveDecaySeconds: number;
+  liveMaxSeconds: number;
+  liveCommandColor: string;
+  liveAgentColor: string;
+  liveTerminalColor: string;
 }
 
 export const DEFAULT_SETTINGS: BrainAtlasSettings = {
@@ -111,7 +117,12 @@ export const DEFAULT_SETTINGS: BrainAtlasSettings = {
   activityHoldSeconds: 2.5,
   activityDecaySeconds: 0.5,
   activityCascade: 0.45,
-  activitySwell: 2
+  activitySwell: 2,
+  liveDecaySeconds: 1.2,
+  liveMaxSeconds: 180,
+  liveCommandColor: "#ffb02e",
+  liveAgentColor: "#22d3ee",
+  liveTerminalColor: "#c084fc"
 };
 
 export function normalizeSettings(input: Partial<BrainAtlasSettings> | null | undefined): BrainAtlasSettings {
@@ -144,7 +155,12 @@ export function normalizeSettings(input: Partial<BrainAtlasSettings> | null | un
     activityHoldSeconds: normalizeNumber(input?.activityHoldSeconds, 0, 60) ?? DEFAULT_SETTINGS.activityHoldSeconds,
     activityDecaySeconds: normalizeNumber(input?.activityDecaySeconds, 0.05, 60) ?? DEFAULT_SETTINGS.activityDecaySeconds,
     activityCascade: normalizeNumber(input?.activityCascade, 0, 1) ?? DEFAULT_SETTINGS.activityCascade,
-    activitySwell: normalizeNumber(input?.activitySwell, 0, 10) ?? DEFAULT_SETTINGS.activitySwell
+    activitySwell: normalizeNumber(input?.activitySwell, 0, 10) ?? DEFAULT_SETTINGS.activitySwell,
+    liveDecaySeconds: normalizeNumber(input?.liveDecaySeconds, 0.05, 60) ?? DEFAULT_SETTINGS.liveDecaySeconds,
+    liveMaxSeconds: normalizeNumber(input?.liveMaxSeconds, 5, 3600) ?? DEFAULT_SETTINGS.liveMaxSeconds,
+    liveCommandColor: normalizeHexColor(input?.liveCommandColor) ?? DEFAULT_SETTINGS.liveCommandColor,
+    liveAgentColor: normalizeHexColor(input?.liveAgentColor) ?? DEFAULT_SETTINGS.liveAgentColor,
+    liveTerminalColor: normalizeHexColor(input?.liveTerminalColor) ?? DEFAULT_SETTINGS.liveTerminalColor
   };
 }
 
