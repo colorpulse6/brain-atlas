@@ -612,7 +612,7 @@
 .brain-atlas-root.is-light-palette .brain-atlas-task-panel { background: rgba(250, 250, 252, 0.9); border-color: rgba(0,0,0,0.1); }
 .brain-atlas-root.is-light-palette .brain-atlas-task-title { color: #1a1a1f; }
 
-/* Right column under the controls: a stack of collapsible cards (Layout & Display, History, Shells). */
+/* Right column under the controls: collapsible cards (Layout & Display, Active, Shells). */
 .brain-atlas-right-dock {
   position: absolute;
   top: 122px;            /* corrected at runtime to sit just below the controls (positionRightDock) */
@@ -626,6 +626,22 @@
   pointer-events: none;  /* only the cards catch events, so gaps click through to the brain */
   font-family: 'JetBrains Mono', monospace;
 }
+/* Left column: Anatomical Regions over a long, scrollable History feed. */
+.brain-atlas-left-dock {
+  position: absolute;
+  top: 44px;
+  left: 14px;
+  bottom: 14px;
+  z-index: 6;
+  width: min(320px, calc(100% - 28px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+  font-family: 'JetBrains Mono', monospace;
+}
+.brain-atlas-left-dock .brain-atlas-card.is-hidden { display: none; }
+.brain-atlas-card[data-card="regions"] .brain-atlas-card-body { max-height: 40vh; }
 
 /* Collapsible card (shared by the controls "View" card and the dock cards). */
 .brain-atlas-card {
@@ -655,6 +671,7 @@
 .brain-atlas-card.is-collapsed .brain-atlas-card-body { display: none; }
 .brain-atlas-card-grow .brain-atlas-card-body { flex: 1 1 auto; }
 .brain-atlas-card[data-card="config"] .brain-atlas-card-body { max-height: 42vh; }
+.brain-atlas-card[data-card="active"] .brain-atlas-card-body { max-height: 30vh; }
 .brain-atlas-card[data-card="shells"] .brain-atlas-card-body { max-height: 26vh; }
 .brain-atlas-card[data-card="shells"] { border-color: rgba(56, 189, 248, 0.22); }  /* shell-blue edge */
 /* The controls card is absolutely positioned (top-right) but shares the card chrome. */
@@ -692,6 +709,7 @@
 .brain-atlas-config-val { font-size: 10px; color: #c9b896; font-variant-numeric: tabular-nums; }
 .brain-atlas-config-slider { width: 100%; margin: 0; accent-color: #c9b896; cursor: pointer; }
 .brain-atlas-config-desc { font-size: 8.5px; color: #8a9099; margin-top: 3px; line-height: 1.3; }
+.brain-atlas-config-reset-row { display: flex; justify-content: flex-end; margin: 2px 0 6px; }
 .brain-atlas-config-note {
   font-size: 8.5px; color: #6f757c; line-height: 1.35; margin-top: 4px;
   border-top: 1px solid rgba(255,255,255,0.08); padding-top: 6px;
@@ -699,5 +717,6 @@
 .brain-atlas-root.is-light-palette .brain-atlas-config-label { color: #1a1a1f; }
 
 @media (max-width: 700px) {
-  .brain-atlas-right-dock { display: none; }   /* too cramped to be useful on a phone-width leaf */
+  .brain-atlas-right-dock,
+  .brain-atlas-left-dock { display: none; }   /* too cramped to be useful on a phone-width leaf */
 }

@@ -141,11 +141,22 @@ export function makeProjector(options: {
 }
 
 /**
- * Place every node inside its lobe. `spread` (clustered < 1 < spread) scales the intra-lobe scatter so
- * notes fan out to use more of the 3D volume without moving the lobes themselves (the brain keeps its shape).
+ * Place every node inside its lobe. `spread` (clustered < 1 < spread) fans notes out WITHIN their own region.
+ * Two things keep the spread even and "relative to the section":
+ *   - the per-node scatter scales by `spread` AND by the region's population (cube root, for constant density),
+ *     so a 400-note region opens up proportionally more than a 5-note one instead of staying a tight ball;
+ *   - the folder-cluster offset barely moves with `spread`, so clusters stay inside their lobe rather than
+ *     flinging outward (which read as "spreading toward the camera" once perspective magnified the near ones).
  */
 export function assignLobePositions(nodes: BrainNode[], spread = 1): void {
   const s = Math.max(0.5, Math.min(2.5, spread));
+  // Per-lobe population, so denser sections spread proportionally.
+  const counts: Record<string, number> = {};
+  for (const node of nodes) {
+    const lobe = node._lobeName ?? KIND_TO_LOBE[node.kind] ?? "parietal";
+    counts[lobe] = (counts[lobe] ?? 0) + 1;
+  }
+  const clusterScale = 1 + (s - 1) * 0.35; // clusters stay in-section; spacing mostly opens up the scatter
   for (const node of nodes) {
     const h = stableHash(node.id);
     const r1 = (h & 0xffff) / 0xffff;
@@ -155,9 +166,10 @@ export function assignLobePositions(nodes: BrainNode[], spread = 1): void {
     const lobe = node._lobeName ?? KIND_TO_LOBE[node.kind] ?? "parietal";
     const center = LOBE_CENTERS[lobe];
     const cluster = clusterPoint(node, lobe, center.r);
+    const density = Math.max(0.7, Math.min(1.9, Math.cbrt((counts[lobe] ?? 1) / 36)));
     const u = r1 * Math.PI * 2;
     const v = Math.acos(2 * r2 - 1);
-    const radius = center.r * (node.hub ? 0.08 : 0.08 + r3 * 0.13) * s;
+    const radius = center.r * (node.hub ? 0.08 : 0.08 + r3 * 0.13) * s * density;
     const dx = radius * Math.sin(v) * Math.cos(u);
     const dy = radius * Math.sin(v) * Math.sin(u);
     const dz = radius * Math.cos(v);
@@ -165,9 +177,9 @@ export function assignLobePositions(nodes: BrainNode[], spread = 1): void {
     if (center.mirror && r1 > 0.5) cx = -cx;
 
     node._3dLobe = {
-      x: cx + cluster.x * s + dx,
-      y: center.c.y + cluster.y * s + dy,
-      z: center.c.z + cluster.z * s + dz
+      x: cx + cluster.x * clusterScale + dx,
+      y: center.c.y + cluster.y * clusterScale + dy,
+      z: center.c.z + cluster.z * clusterScale + dz
     };
     node._lobeName = lobe;
   }
