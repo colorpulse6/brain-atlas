@@ -35,27 +35,33 @@ test("lobe assignment creates folder sub-clusters inside dense regions", () => {
 });
 
 test("live grid places the two sides on opposite temporal faces", () => {
-  const left = liveGridPosition("left", 0, 4);
-  const right = liveGridPosition("right", 0, 4);
+  const left = liveGridPosition("left", 0);
+  const right = liveGridPosition("right", 0);
   assert.ok(left.x < 0, "left side has negative x");
   assert.ok(right.x > 0, "right side has positive x");
   assert.equal(Math.sign(left.x), -Math.sign(right.x));
 });
 
-test("live grid keeps nodes on a side spread apart so labels don't overlap", () => {
-  const total = 9;
+test("live grid keeps slots well spread so labels don't overlap", () => {
   const points = [];
-  for (let i = 0; i < total; i += 1) points.push(liveGridPosition("right", i, total));
-  // no two slots collapse onto the same spot
-  for (let i = 0; i < total; i += 1) {
-    for (let j = i + 1; j < total; j += 1) {
-      assert.ok(distance(points[i], points[j]) > 0.08, `slots ${i} and ${j} are too close`);
+  for (let slot = 0; slot < 9; slot += 1) points.push(liveGridPosition("right", slot));
+  for (let i = 0; i < points.length; i += 1) {
+    for (let j = i + 1; j < points.length; j += 1) {
+      assert.ok(distance(points[i], points[j]) > 0.3, `slots ${i} and ${j} are too close`);
     }
   }
 });
 
-test("live grid is deterministic (same slot -> same point)", () => {
-  assert.deepEqual(liveGridPosition("left", 3, 8), liveGridPosition("left", 3, 8));
+test("live grid slot position is stable and independent of how many tasks exist", () => {
+  // A given slot always maps to the same point -> a running task never jumps as others come and go.
+  assert.deepEqual(liveGridPosition("left", 3), liveGridPosition("left", 3));
+  assert.deepEqual(liveGridPosition("right", 5), liveGridPosition("right", 5));
+});
+
+test("live grid grows downward as slots fill (new tasks spread, not stack)", () => {
+  const s0 = liveGridPosition("right", 0);
+  const s2 = liveGridPosition("right", 2); // next row (2 columns)
+  assert.ok(s2.y < s0.y, "later rows sit lower");
 });
 
 function distance(a, b) {

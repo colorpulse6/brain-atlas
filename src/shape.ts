@@ -213,27 +213,26 @@ export function liveNodePosition(id: string, region: string, side: "left" | "rig
   };
 }
 
+/** Fixed columns per side for the live-task grid; two keeps labels far enough apart to read. */
+export const LIVE_GRID_COLS = 2;
+
 /**
- * A GRID position for a live node on the temporal outer face -- "random but grid-like" so labels don't
- * overlap. `side` picks the hemisphere (right = live/foreground tasks, left = background shells + agents).
- * `index` is the node's slot within its side group; `total` sizes the grid. A tiny deterministic jitter
- * keeps it from looking mechanical. Spread wide to use the volume the 3D brain gives us.
+ * The position of a live node's SLOT on the temporal outer face. `slot` is a stable index the view assigns
+ * per side (0,1,2,... reused as tasks end), so a running task never jumps and a new task fills a freed slot.
+ * Deterministic (slot -> point), widely spaced (labels don't overlap), and it grows DOWNWARD as slots fill,
+ * so new tasks spread out instead of stacking. `side` picks the hemisphere (right = foreground, left = bg).
  */
-export function liveGridPosition(side: "left" | "right", index: number, total: number): Vec3 {
+export function liveGridPosition(side: "left" | "right", slot: number): Vec3 {
   const c = LOBE_CENTERS.temporal.c;
-  const cols = Math.min(4, Math.max(1, Math.ceil(Math.sqrt(Math.max(1, total)))));
-  const rows = Math.max(1, Math.ceil(total / cols));
-  const col = index % cols;
-  const row = Math.floor(index / cols);
-  const stepY = 0.20;
-  const stepZ = 0.24;
-  const h = stableHash("livegrid:" + side + ":" + index);
-  const jy = (((h & 0xff) / 0xff) - 0.5) * 0.05;
-  const jz = ((((h >>> 8) & 0xff) / 0xff) - 0.5) * 0.05;
+  const cols = LIVE_GRID_COLS;
+  const stepY = 0.34;   // generous vertical gap -> labels on different rows never touch
+  const stepZ = 0.60;   // generous horizontal gap between the two columns
+  const col = slot % cols;
+  const row = Math.floor(slot / cols);
   return {
-    x: (side === "left" ? -1 : 1) * (Math.abs(c.x) + 0.24),
-    y: c.y + (row - (rows - 1) / 2) * stepY + jy,
-    z: c.z + (col - (cols - 1) / 2) * stepZ + jz
+    x: (side === "left" ? -1 : 1) * (Math.abs(c.x) + 0.34),
+    y: c.y + 0.55 - row * stepY,                    // slot 0 near the top; each new row drops down
+    z: c.z + (col - (cols - 1) / 2) * stepZ
   };
 }
 

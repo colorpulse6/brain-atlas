@@ -57,6 +57,10 @@ export class BrainAtlasView extends ItemView {
   /** View-local quick toggles (not persisted): dense node labels, and the task-manager panel. */
   private showAllLabels = false;
   private liveUiVisible = true;
+  /** Stable grid-slot per live-node id, per temporal side. A task holds its slot for life; when it ends and
+   *  fully fades the slot frees, and the next new task takes the lowest free slot -- so tasks spread out and
+   *  reuse vacated positions instead of stacking on top of each other. */
+  private liveSlots: Record<"left" | "right", Map<string, number>> = { left: new Map(), right: new Map() };
   /** The vault-only graph (from buildGraph); live task/agent nodes are merged on top of it into this.graph. */
   private vaultGraph: BrainGraph | null = null;
   /** Signature of the live-node set currently merged into this.graph (re-merge only when it changes). */
@@ -198,6 +202,8 @@ export class BrainAtlasView extends ItemView {
     this.taskPanelSig = "";
     this.shellPanelSig = "";
     this.historyRendered = -1;
+    this.liveSlots.left.clear();
+    this.liveSlots.right.clear();
     this.rootEl = null;
     this.canvas = null;
     this.canvasContextKind = null;
@@ -339,15 +345,33 @@ export class BrainAtlasView extends ItemView {
    * terminals, LEFT for background shells + deployed agents. The on-node name is short (the program/type);
    * the full command lives in entry.detail (shown in the task manager, not on the map).
    */
-  private makeLiveNode(entry: LiveEntry, side: "left" | "right", index: number, total: number): BrainNode {
+  /** Give each live task its stable slot on a side (0,1,2,...), reusing slots freed when a task fully fades,
+   *  so tasks spread out and a new task takes a vacated position instead of stacking on a running one. */
+  private reconcileSlots(side: "left" | "right", entries: LiveEntry[]): Map<string, number> {
+    const slots = this.liveSlots[side];
+    const present = new Set(entries.map((e) => e.id));
+    for (const id of [...slots.keys()]) if (!present.has(id)) slots.delete(id); // free slots of ended+faded tasks
+    const used = new Set(slots.values());
+    // Assign new ids oldest-first so the longest-running task keeps the lowest (top) slot; new ones fill gaps.
+    for (const e of [...entries].sort((a, b) => a.seq - b.seq)) {
+      if (slots.has(e.id)) continue;
+      let s = 0;
+      while (used.has(s)) s += 1;
+      slots.set(e.id, s);
+      used.add(s);
+    }
+    return slots;
+  }
+
+  private makeLiveNode(entry: LiveEntry, side: "left" | "right", slot: number): BrainNode {
     const kindLabel = entry.kind === "shell" ? "background shell"
       : entry.kind === "agent" ? "agent"
         : entry.kind === "terminal" ? "terminal" : "command";
-    // A recorded position (timelapse playback) pins the node exactly where it was; otherwise grid-place it and
-    // record that position so the timelapse captures WHERE this transient node lived.
+    // A recorded position (timelapse playback) pins the node exactly where it was; otherwise place it in its
+    // stable grid slot and record that position so the timelapse captures WHERE this transient node lived.
     const pos = entry.x !== undefined
       ? { x: entry.x, y: entry.y as number, z: entry.z as number }
-      : liveGridPosition(side, index, total);
+      : liveGridPosition(side, slot);
     if (entry.x === undefined) this.plugin.activity?.setLivePos(entry.id, pos.x, pos.y, pos.z);
     return {
       id: entry.id,
@@ -377,6 +401,8 @@ export class BrainAtlasView extends ItemView {
     const live = this.plugin.activity?.liveNodes() ?? [];
     this.mergedLiveSig = live.map((e) => `${e.id}:${e.active ? 1 : 0}:${e.kind}`).join("|");
     if (live.length === 0) {
+      this.liveSlots.left.clear();
+      this.liveSlots.right.clear();
       this.graph = vault;
       this.plugin.activity?.setGraph(Object.keys(vault.idx), vault.adj);
       return;
@@ -385,7 +411,8 @@ export class BrainAtlasView extends ItemView {
     for (const e of live) bySide[liveSideForKind(e.kind)].push(e);
     const liveNodes: BrainNode[] = [];
     for (const side of ["left", "right"] as const) {
-      bySide[side].forEach((entry, i) => liveNodes.push(this.makeLiveNode(entry, side, i, bySide[side].length)));
+      const slots = this.reconcileSlots(side, bySide[side]);
+      for (const entry of bySide[side]) liveNodes.push(this.makeLiveNode(entry, side, slots.get(entry.id) ?? 0));
     }
     const idx: Record<string, BrainNode> = { ...vault.idx };
     for (const node of liveNodes) idx[node.id] = node;
