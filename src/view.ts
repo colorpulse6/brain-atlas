@@ -34,13 +34,18 @@ export class BrainAtlasView extends ItemView {
   private infoEl: HTMLDivElement | null = null;
   private emptyEl: HTMLDivElement | null = null;
   private taskPanelEl: HTMLDivElement | null = null;    // bottom-left: commands / terminals / agents
-  private rightDockEl: HTMLDivElement | null = null;    // right column under the controls
-  private configEl: HTMLDivElement | null = null;       // collapsible layout/display config panel (top of the dock)
-  private historyEl: HTMLDivElement | null = null;      // scrollable action history
-  private shellPanelEl: HTMLDivElement | null = null;   // bottom-right: background shells
+  private rightDockEl: HTMLDivElement | null = null;    // right column of collapsible cards, under the controls
+  private controlsGroupsEl: HTMLDivElement | null = null; // the (collapsible) button groups inside the controls card
+  private configEl: HTMLDivElement | null = null;       // Layout & Display card BODY (the sliders)
+  private configCardEl: HTMLDivElement | null = null;   // the Layout & Display card (for the Config button toggle)
+  private historyEl: HTMLDivElement | null = null;      // History card BODY (scrollable rows)
+  private historyCountEl: HTMLSpanElement | null = null; // History card header count
+  private shellPanelEl: HTMLDivElement | null = null;   // Shells card BODY (scrollable rows)
+  private shellCountEl: HTMLSpanElement | null = null;  // Shells card header count
   /** Keeps the right dock positioned just below the controls no matter how many rows they wrap to. */
   private controlsResizeObserver: ResizeObserver | null = null;
-  private configVisible = false;
+  /** Per-section collapsed state (view-local). Config starts collapsed to stay out of the way. */
+  private collapsed: Record<string, boolean> = { menu: false, config: true, history: false, shells: false };
   /** Signatures so we only rebuild each panel when its set/status changes. */
   private taskPanelSig = "";
   private shellPanelSig = "";
@@ -104,13 +109,19 @@ export class BrainAtlasView extends ItemView {
     this.focusEl = root.createDiv({ cls: "brain-atlas-focus-card" });
     this.taskPanelEl = root.createDiv({ cls: "brain-atlas-task-panel" });
     this.taskPanelEl.hide();
-    // Right column under the controls: an optional config panel, a large scrollable action history, and a
-    // shells task manager (bottom ~25%). Its top is positioned just below the controls (see positionRightDock).
+    // Right column of collapsible cards under the controls: Layout & Display, History, Shells. Its top is
+    // positioned just below the controls (see positionRightDock) so the two never overlap.
     this.rightDockEl = root.createDiv({ cls: "brain-atlas-right-dock" });
-    this.configEl = this.rightDockEl.createDiv({ cls: "brain-atlas-config-panel" });
-    this.configEl.hide();
-    this.historyEl = this.rightDockEl.createDiv({ cls: "brain-atlas-history" });
-    this.shellPanelEl = this.rightDockEl.createDiv({ cls: "brain-atlas-shell-panel" });
+    const cfg = this.makeCard("config", "Layout & Display");
+    this.configCardEl = cfg.card;
+    this.configEl = cfg.body;
+    const hist = this.makeCard("history", "History");
+    this.historyEl = hist.body;
+    this.historyCountEl = hist.count;
+    hist.card.addClass("brain-atlas-card-grow"); // History is the big, scrollable one
+    const shells = this.makeCard("shells", "Shells");
+    this.shellPanelEl = shells.body;
+    this.shellCountEl = shells.count;
     this.emptyEl = root.createDiv({ cls: "brain-atlas-empty" });
     this.emptyEl.setText("Your brain is empty. Add notes with #project, #person, or #source tags to start mapping.");
 
@@ -133,6 +144,30 @@ export class BrainAtlasView extends ItemView {
     this.rightDockEl.style.top = `${Math.max(44, top)}px`;
   }
 
+  /** A collapsible card in the right dock: a clickable header (chevron + title + count) over a body the sync
+   *  methods fill. Clicking the header folds/unfolds the card; the state is view-local (survives data refreshes). */
+  private makeCard(key: string, title: string): { card: HTMLDivElement; count: HTMLSpanElement; body: HTMLDivElement } {
+    const card = this.rightDockEl!.createDiv({ cls: "brain-atlas-card" });
+    card.setAttr("data-card", key);
+    card.toggleClass("is-collapsed", !!this.collapsed[key]);
+    const header = card.createDiv({ cls: "brain-atlas-card-header" });
+    header.createSpan({ cls: "brain-atlas-card-chevron", text: "▾" }); // ▾
+    header.createSpan({ cls: "brain-atlas-card-title", text: title });
+    const count = header.createSpan({ cls: "brain-atlas-card-count" });
+    header.addEventListener("click", () => this.toggleCard(key, card));
+    const body = card.createDiv({ cls: "brain-atlas-card-body" });
+    return { card, count, body };
+  }
+
+  /** Fold/unfold a card and remember it. */
+  private toggleCard(key: string, card: HTMLElement): void {
+    const next = !card.hasClass("is-collapsed");
+    card.toggleClass("is-collapsed", next);
+    this.collapsed[key] = next;
+    if (key === "config") this.syncControls(); // keep the Config button's active state in step
+    this.positionRightDock();
+  }
+
   async onClose(): Promise<void> {
     this.canvas?.removeEventListener("click", this.onCanvasClick);
     this.controlsResizeObserver?.disconnect();
@@ -141,9 +176,13 @@ export class BrainAtlasView extends ItemView {
     this.rendererStarted = false;
     this.taskPanelEl = null;
     this.rightDockEl = null;
+    this.controlsGroupsEl = null;
     this.configEl = null;
+    this.configCardEl = null;
     this.historyEl = null;
+    this.historyCountEl = null;
     this.shellPanelEl = null;
+    this.shellCountEl = null;
     this.taskPanelSig = "";
     this.shellPanelSig = "";
     this.historyRendered = -1;
@@ -232,18 +271,20 @@ export class BrainAtlasView extends ItemView {
     this.syncHistory(); // the history column stays under the buttons regardless of the Tasks toggle
   }
 
-  /** Bottom-right: the background-shell task manager (scrollable). */
+  /** The background-shell task manager card body (scrollable). */
   private syncShellPanel(shells: LiveScreenNode[]): void {
     const panel = this.shellPanelEl;
     if (!panel) return;
+    const running = shells.filter((n) => n.active).length;
+    if (this.shellCountEl) this.shellCountEl.setText(shells.length ? `${running} active` : "");
     const sig = shells.map((n) => `${n.id}:${n.active ? 1 : 0}`).join("|");
     if (sig === this.shellPanelSig) return;
     this.shellPanelSig = sig;
     panel.empty();
-    const running = shells.filter((n) => n.active).length;
-    const header = panel.createDiv({ cls: "brain-atlas-task-header" });
-    header.createSpan({ cls: "brain-atlas-task-title", text: "SHELLS" });
-    header.createSpan({ cls: "brain-atlas-task-count", text: `${running} active` });
+    if (shells.length === 0) {
+      panel.createDiv({ cls: "brain-atlas-history-empty", text: "no background shells" });
+      return;
+    }
     for (const node of shells) {
       const row = panel.createDiv({ cls: "brain-atlas-task-row" });
       row.toggleClass("is-ending", !node.active);
@@ -257,16 +298,16 @@ export class BrainAtlasView extends ItemView {
     }
   }
 
-  /** Top-right: a scrollable log of every action (reads/writes/spawns/ends), newest first. */
+  /** The action-history card body: a scrollable log of every action (reads/writes/spawns/ends), newest first. */
   private syncHistory(): void {
     const el = this.historyEl;
     const activity = this.plugin.activity;
     if (!el || !activity) return;
     const count = activity.historyCount();
+    if (this.historyCountEl) this.historyCountEl.setText(String(count));
     if (count === this.historyRendered) return;
     this.historyRendered = count;
     el.empty();
-    el.createDiv({ cls: "brain-atlas-history-title", text: `HISTORY - ${count}` });
     const rows = activity.recentHistory(200);
     if (rows.length === 0) {
       el.createDiv({ cls: "brain-atlas-history-empty", text: "no activity yet" });
@@ -396,7 +437,6 @@ export class BrainAtlasView extends ItemView {
     const el = this.configEl;
     if (!el) return;
     el.empty();
-    el.createDiv({ cls: "brain-atlas-config-title", text: "LAYOUT & DISPLAY" });
     // Node size + Spacing change the layout, so apply on release (they rebuild the graph).
     this.addConfigSlider(el, "Node size", 0.4, 3, 0.1, this.plugin.settings.nodeSizeScale, (v) => {
       this.plugin.settings.nodeSizeScale = v;
@@ -445,15 +485,9 @@ export class BrainAtlasView extends ItemView {
     if (opts.desc) row.createDiv({ cls: "brain-atlas-config-desc", text: opts.desc });
   }
 
-  /** Show/hide the config panel (top of the right dock). View-local. */
+  /** The Config button folds/unfolds the Layout & Display card (a shortcut to its header). View-local. */
   private toggleConfig(): void {
-    this.configVisible = !this.configVisible;
-    if (this.configEl) {
-      if (this.configVisible) this.configEl.show();
-      else this.configEl.hide();
-    }
-    this.configButton?.toggleClass("is-active", this.configVisible);
-    this.configButton?.setAttr("aria-pressed", String(this.configVisible));
+    if (this.configCardEl) this.toggleCard("config", this.configCardEl);
   }
 
   /** Hide the task-manager panels (the Tasks quick toggle is off). Live nodes + history stay. */
@@ -464,7 +498,9 @@ export class BrainAtlasView extends ItemView {
     }
     if (this.shellPanelEl && this.shellPanelSig !== "") {
       this.shellPanelEl.empty();
+      this.shellPanelEl.createDiv({ cls: "brain-atlas-history-empty", text: "background shells hidden (Tasks off)" });
     }
+    this.shellCountEl?.setText("");
     this.taskPanelSig = "";
     this.shellPanelSig = "";
   }
@@ -633,8 +669,18 @@ export class BrainAtlasView extends ItemView {
   }
 
   private createControls(root: HTMLElement): void {
-    this.controlsEl = root.createDiv({ cls: "brain-atlas-controls" });
-    const primary = this.controlsEl.createDiv({ cls: "brain-atlas-control-group" });
+    this.controlsEl = root.createDiv({ cls: "brain-atlas-controls brain-atlas-card" });
+    this.controlsEl.setAttr("data-card", "menu");
+    this.controlsEl.toggleClass("is-collapsed", !!this.collapsed.menu);
+    // Collapsible header (chevron + title), like the dock cards, so the whole button block folds away.
+    const header = this.controlsEl.createDiv({ cls: "brain-atlas-card-header" });
+    header.createSpan({ cls: "brain-atlas-card-chevron", text: "▾" });
+    header.createSpan({ cls: "brain-atlas-card-title", text: "View" });
+    header.addEventListener("click", () => this.toggleCard("menu", this.controlsEl as HTMLElement));
+
+    const groups = this.controlsEl.createDiv({ cls: "brain-atlas-controls-groups brain-atlas-card-body" });
+    this.controlsGroupsEl = groups;
+    const primary = groups.createDiv({ cls: "brain-atlas-control-group" });
     this.infoButton = this.createControlButton(primary, "Info", () => this.toggleInfo());
     this.labelButton = this.createControlButton(primary, "Sections", () => this.toggleLabels());
     this.namesButton = this.createControlButton(primary, "Names", () => this.toggleNames());
@@ -643,11 +689,11 @@ export class BrainAtlasView extends ItemView {
     this.configButton = this.createControlButton(primary, "Config", () => this.toggleConfig());
     this.createControlButton(primary, "Reset", () => this.renderer.resetView());
 
-    const regionsRow = this.controlsEl.createDiv({ cls: "brain-atlas-control-group" });
+    const regionsRow = groups.createDiv({ cls: "brain-atlas-control-group" });
     this.allButton = this.createControlButton(regionsRow, "All", () => this.setAllRegions(true));
     this.noneButton = this.createControlButton(regionsRow, "None", () => this.setAllRegions(false));
 
-    const lobes = this.controlsEl.createDiv({ cls: "brain-atlas-control-group brain-atlas-region-controls" });
+    const lobes = groups.createDiv({ cls: "brain-atlas-control-group brain-atlas-region-controls" });
     for (const lobe of LOBES) {
       this.lobeButtons[lobe] = this.createControlButton(lobes, shortLobeLabel(lobe), () => this.toggleLobe(lobe));
       this.lobeButtons[lobe]?.setAttr("aria-label", `${LOBE_CENTERS[lobe].label} region`);
@@ -692,8 +738,9 @@ export class BrainAtlasView extends ItemView {
     this.spinButton?.setAttr("aria-pressed", String(this.plugin.settings.idleAutoRotate));
     this.tasksButton?.toggleClass("is-active", this.liveUiVisible);
     this.tasksButton?.setAttr("aria-pressed", String(this.liveUiVisible));
-    this.configButton?.toggleClass("is-active", this.configVisible);
-    this.configButton?.setAttr("aria-pressed", String(this.configVisible));
+    const configOpen = !this.collapsed.config;
+    this.configButton?.toggleClass("is-active", configOpen);
+    this.configButton?.setAttr("aria-pressed", String(configOpen));
     const enabledCount = LOBES.filter((lobe) => enabled[lobe]).length;
     this.allButton?.toggleClass("is-active", enabledCount === LOBES.length);
     this.noneButton?.toggleClass("is-active", enabledCount === 0);

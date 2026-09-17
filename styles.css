@@ -84,20 +84,22 @@
   position: absolute;
   top: 36px;
   right: 14px;
-  z-index: 3;
-  display: flex;
-  max-width: min(330px, calc(100% - 28px));
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
+  z-index: 6;
+  width: min(330px, calc(100% - 28px));
   pointer-events: auto;
   font-family: var(--font-monospace);
+}
+/* The controls card body holds the button groups (collapsible with the header). */
+.brain-atlas-controls-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .brain-atlas-control-group {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 4px;
 }
 
@@ -610,10 +612,10 @@
 .brain-atlas-root.is-light-palette .brain-atlas-task-panel { background: rgba(250, 250, 252, 0.9); border-color: rgba(0,0,0,0.1); }
 .brain-atlas-root.is-light-palette .brain-atlas-task-title { color: #1a1a1f; }
 
-/* Right column under the controls: a large scrollable HISTORY (top ~75%) + a SHELLS task manager (bottom ~25%). */
+/* Right column under the controls: a stack of collapsible cards (Layout & Display, History, Shells). */
 .brain-atlas-right-dock {
   position: absolute;
-  top: 122px;            /* below the three control-button rows */
+  top: 122px;            /* corrected at runtime to sit just below the controls (positionRightDock) */
   right: 14px;
   bottom: 14px;
   z-index: 6;
@@ -621,39 +623,44 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  pointer-events: auto;
+  pointer-events: none;  /* only the cards catch events, so gaps click through to the brain */
   font-family: 'JetBrains Mono', monospace;
 }
-.brain-atlas-history {
-  flex: 3 1 0;           /* the large history column */
+
+/* Collapsible card (shared by the controls "View" card and the dock cards). */
+.brain-atlas-card {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
   min-height: 0;
-  overflow-y: auto;
-  padding: 8px 10px 10px;
   border-radius: 8px;
   background: rgba(10, 10, 14, 0.82);
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
   backdrop-filter: blur(6px);
+  overflow: hidden;
+  pointer-events: auto;
 }
-.brain-atlas-shell-panel {
-  flex: 1 1 0;           /* ~25% of the dock for the shell task manager */
-  min-height: 0;
-  overflow-y: auto;
-  padding: 8px 10px 10px;
-  border-radius: 8px;
-  background: rgba(10, 10, 14, 0.82);
-  border: 1px solid rgba(56, 189, 248, 0.22);   /* shell-blue edge */
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(6px);
+.brain-atlas-card-grow { flex: 1 1 auto; }   /* History fills the remaining height */
+.brain-atlas-card-header {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px; cursor: pointer; user-select: none; flex: 0 0 auto;
 }
-.brain-atlas-history-title {
-  position: sticky;
-  top: -8px;
-  margin: -8px -10px 6px;
-  padding: 8px 10px 4px;
-  background: rgba(10, 10, 14, 0.92);
-  font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: #9aa0a6;
-}
+.brain-atlas-card-header:hover { background: rgba(255, 255, 255, 0.05); }
+.brain-atlas-card-chevron { flex: 0 0 auto; width: 8px; font-size: 8px; color: #9aa0a6; transition: transform 120ms ease; }
+.brain-atlas-card.is-collapsed .brain-atlas-card-chevron { transform: rotate(-90deg); }
+.brain-atlas-card-title { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: #c9b896; font-weight: 700; }
+.brain-atlas-card-count { margin-left: auto; font-size: 9px; color: #8a9099; font-variant-numeric: tabular-nums; }
+.brain-atlas-card-body { padding: 4px 10px 10px; overflow-y: auto; min-height: 0; }
+.brain-atlas-card.is-collapsed .brain-atlas-card-body { display: none; }
+.brain-atlas-card-grow .brain-atlas-card-body { flex: 1 1 auto; }
+.brain-atlas-card[data-card="config"] .brain-atlas-card-body { max-height: 42vh; }
+.brain-atlas-card[data-card="shells"] .brain-atlas-card-body { max-height: 26vh; }
+.brain-atlas-card[data-card="shells"] { border-color: rgba(56, 189, 248, 0.22); }  /* shell-blue edge */
+/* The controls card is absolutely positioned (top-right) but shares the card chrome. */
+.brain-atlas-controls.brain-atlas-card { overflow: visible; }
+.brain-atlas-controls .brain-atlas-card-body { overflow: visible; max-height: none; }
+
 .brain-atlas-history-empty { font-size: 10px; color: #6f757c; padding: 4px 0; }
 .brain-atlas-history-row {
   display: flex; align-items: baseline; gap: 7px;
@@ -674,27 +681,11 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-.brain-atlas-root.is-light-palette .brain-atlas-history,
-.brain-atlas-root.is-light-palette .brain-atlas-shell-panel { background: rgba(250, 250, 252, 0.9); border-color: rgba(0,0,0,0.1); }
-.brain-atlas-root.is-light-palette .brain-atlas-history-title { background: rgba(250, 250, 252, 0.96); color: #55595f; }
+.brain-atlas-root.is-light-palette .brain-atlas-card { background: rgba(250, 250, 252, 0.92); border-color: rgba(0,0,0,0.12); }
+.brain-atlas-root.is-light-palette .brain-atlas-card-header:hover { background: rgba(0,0,0,0.05); }
 .brain-atlas-root.is-light-palette .brain-atlas-history-label { color: #1a1a1f; }
 
-/* Config panel (graph-view-style Layout & Display controls), pinned to the top of the right dock. */
-.brain-atlas-config-panel {
-  flex: 0 0 auto;
-  max-height: 42%;
-  overflow-y: auto;
-  padding: 8px 10px 10px;
-  border-radius: 8px;
-  background: rgba(10, 10, 14, 0.9);
-  border: 1px solid rgba(201, 184, 150, 0.28);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(6px);
-}
-.brain-atlas-config-title {
-  font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: #c9b896;
-  margin-bottom: 8px;
-}
+/* Config (Layout & Display) card body: the graph-view-style spacing/size sliders. */
 .brain-atlas-config-row { margin-bottom: 10px; }
 .brain-atlas-config-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 3px; }
 .brain-atlas-config-label { font-size: 10px; color: #e8e6e0; }
@@ -705,7 +696,6 @@
   font-size: 8.5px; color: #6f757c; line-height: 1.35; margin-top: 4px;
   border-top: 1px solid rgba(255,255,255,0.08); padding-top: 6px;
 }
-.brain-atlas-root.is-light-palette .brain-atlas-config-panel { background: rgba(250, 250, 252, 0.95); border-color: rgba(0,0,0,0.12); }
 .brain-atlas-root.is-light-palette .brain-atlas-config-label { color: #1a1a1f; }
 
 @media (max-width: 700px) {
