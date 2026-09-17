@@ -245,7 +245,7 @@ export class BrainRenderer extends RenderCore {
     const baseA = (isFocus ? (isFar ? 0.55 : 0.85)
       : isHover ? (isFar ? 0.25 : 0.40)
         : (isFar ? 0.05 : 0.13)) * lobeM * interBoost;
-    ctx.lineWidth = isFocus ? 1.3 : (isFar ? 0.55 : 0.7);
+    ctx.lineWidth = (isFocus ? 1.3 : (isFar ? 0.55 : 0.7)) * (this.options.linkThickness || 1);
     for (let index = 0; index < edge.pts.length - 1; index += 1) {
       const p0 = edge.pts[index];
       const p1 = edge.pts[index + 1];

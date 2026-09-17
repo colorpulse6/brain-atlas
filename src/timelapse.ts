@@ -23,6 +23,10 @@ export interface TimelapseRow {
   id: string;
   label: string;
   color: string;
+  /** The node's 3D position when it happened (present for live spawns/ends the view placed). */
+  x?: number;
+  y?: number;
+  z?: number;
 }
 
 /** Serialize history entries to JSONL text (one compact object per line, trailing newline). */
@@ -32,7 +36,9 @@ export function serializeHistory(entries: HistoryEntry[]): string {
 }
 
 function toRow(e: HistoryEntry): TimelapseRow {
-  return { seq: e.seq, at: e.at, event: e.event, kind: e.kind, id: e.id, label: e.label, color: e.color };
+  const row: TimelapseRow = { seq: e.seq, at: e.at, event: e.event, kind: e.kind, id: e.id, label: e.label, color: e.color };
+  if (e.x !== undefined) { row.x = e.x; row.y = e.y; row.z = e.z; }
+  return row;
 }
 
 /** Parse JSONL timelapse text back into rows, oldest first; malformed lines are skipped. */
@@ -50,7 +56,7 @@ export function parseTimelapse(text: string): TimelapseRow[] {
     if (!data || typeof data !== "object") continue;
     const p = data as Record<string, unknown>;
     if (typeof p.seq !== "number" || typeof p.event !== "string" || typeof p.id !== "string") continue;
-    out.push({
+    const row: TimelapseRow = {
       seq: p.seq,
       at: typeof p.at === "number" ? p.at : 0,
       event: p.event,
@@ -58,7 +64,11 @@ export function parseTimelapse(text: string): TimelapseRow[] {
       id: p.id,
       label: typeof p.label === "string" ? p.label : p.id,
       color: typeof p.color === "string" ? p.color : "#ffb02e"
-    });
+    };
+    if (typeof p.x === "number" && typeof p.y === "number" && typeof p.z === "number") {
+      row.x = p.x; row.y = p.y; row.z = p.z;
+    }
+    out.push(row);
   }
   out.sort((a, b) => a.seq - b.seq);
   return out;

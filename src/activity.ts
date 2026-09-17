@@ -50,6 +50,11 @@ export interface LiveEntry {
   endAt: number | null;
   /** Current glow level in [0, 1], recomputed by tick(). */
   level: number;
+  /** Resolved 3D position: recorded by the view once it grid-places the node, or supplied at spawn during
+   *  timelapse playback so the node reappears exactly where it was. Undefined until placed. */
+  x?: number;
+  y?: number;
+  z?: number;
 }
 
 export interface ActivityEntry {
@@ -86,6 +91,11 @@ export interface HistoryEntry {
   label: string;
   /** color to tint the row (kind/agent color, or read/write color). */
   color: string;
+  /** The node's 3D position when the event happened (recorded once the view places it) -- so playback can
+   *  reproduce WHERE each node was, especially the transient temporal-lobe live nodes that no longer exist. */
+  x?: number;
+  y?: number;
+  z?: number;
 }
 
 export interface ActivityOptions {
@@ -401,7 +411,7 @@ export class ActivityState {
    * Spawn or refresh a transient live node (a command Claude is running, a launched terminal, a subagent).
    * `region` is a LobeName string the renderer floats the node in. `now` is tick's clock.
    */
-  spawnLive(id: string, label: string, kind: LiveKind, region: string, now: number, detail = ""): void {
+  spawnLive(id: string, label: string, kind: LiveKind, region: string, now: number, detail = "", pos?: { x: number; y: number; z: number }): void {
     if (!id) return;
     this.lastLive = label || id;
     const existing = this.liveEntries.get(id);
@@ -415,11 +425,30 @@ export class ActivityState {
       bornAt: existing?.bornAt ?? now,
       seq: existing?.seq ?? (this.liveSeq += 1),
       endAt: null,
-      level: 1
+      level: 1,
+      // A pos supplied here (timelapse playback) pins the node; otherwise the view records it once it places it.
+      x: pos?.x ?? existing?.x,
+      y: pos?.y ?? existing?.y,
+      z: pos?.z ?? existing?.z
     });
     if (!existing) {
       this.fires.push({ target: id, kind: "spawn" }); // fire a signal when a new task appears
-      this.pushHistory(now, "spawn", kind, id, label || id, this.liveColorFor({ kind, label: label || id }));
+      this.pushHistory(now, "spawn", kind, id, label || id, this.liveColorFor({ kind, label: label || id }), pos);
+    }
+  }
+
+  /** Record the resolved 3D position of a live node (the view calls this after grid-placing it) and backfill
+   *  the node's spawn history row so the timelapse captures WHERE each node was. */
+  setLivePos(id: string, x: number, y: number, z: number): void {
+    const entry = this.liveEntries.get(id);
+    if (entry) { entry.x = x; entry.y = y; entry.z = z; }
+    // Backfill the most recent spawn row for this id that has no position yet (cheap; happens once per node).
+    for (let i = this.historyLog.length - 1; i >= 0; i -= 1) {
+      const h = this.historyLog[i];
+      if (h.id === id && h.event === "spawn") {
+        if (h.x === undefined) { h.x = x; h.y = y; h.z = z; }
+        break;
+      }
     }
   }
 
@@ -432,9 +461,11 @@ export class ActivityState {
   }
 
   /** Append one action to the rolling history log (capped). */
-  private pushHistory(at: number, event: string, kind: string, id: string, label: string, color: string): void {
+  private pushHistory(at: number, event: string, kind: string, id: string, label: string, color: string, pos?: { x: number; y: number; z: number }): void {
     this.historySeq += 1;
-    this.historyLog.push({ seq: this.historySeq, at, event, kind, id, label: label || id, color });
+    const row: HistoryEntry = { seq: this.historySeq, at, event, kind, id, label: label || id, color };
+    if (pos) { row.x = pos.x; row.y = pos.y; row.z = pos.z; }
+    this.historyLog.push(row);
     if (this.historyLog.length > this.historyCap) this.historyLog.splice(0, this.historyLog.length - this.historyCap);
   }
 
@@ -466,7 +497,8 @@ export class ActivityState {
     if (!entry || !entry.active) return;
     entry.active = false;
     entry.endAt = now;
-    this.pushHistory(now, "end", entry.kind, id, entry.label, this.liveColorFor(entry));
+    const pos = entry.x !== undefined ? { x: entry.x, y: entry.y as number, z: entry.z as number } : undefined;
+    this.pushHistory(now, "end", entry.kind, id, entry.label, this.liveColorFor(entry), pos);
   }
 
   /** Live nodes currently worth drawing (level >= 0.01), newest first (stable by spawn order). */

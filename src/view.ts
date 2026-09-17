@@ -35,8 +35,12 @@ export class BrainAtlasView extends ItemView {
   private emptyEl: HTMLDivElement | null = null;
   private taskPanelEl: HTMLDivElement | null = null;    // bottom-left: commands / terminals / agents
   private rightDockEl: HTMLDivElement | null = null;    // right column under the controls
+  private configEl: HTMLDivElement | null = null;       // collapsible layout/display config panel (top of the dock)
   private historyEl: HTMLDivElement | null = null;      // scrollable action history
   private shellPanelEl: HTMLDivElement | null = null;   // bottom-right: background shells
+  /** Keeps the right dock positioned just below the controls no matter how many rows they wrap to. */
+  private controlsResizeObserver: ResizeObserver | null = null;
+  private configVisible = false;
   /** Signatures so we only rebuild each panel when its set/status changes. */
   private taskPanelSig = "";
   private shellPanelSig = "";
@@ -53,6 +57,7 @@ export class BrainAtlasView extends ItemView {
   private namesButton: HTMLButtonElement | null = null;
   private spinButton: HTMLButtonElement | null = null;
   private tasksButton: HTMLButtonElement | null = null;
+  private configButton: HTMLButtonElement | null = null;
   private allButton: HTMLButtonElement | null = null;
   private noneButton: HTMLButtonElement | null = null;
   private lobeButtons: Partial<Record<LobeName, HTMLButtonElement>> = {};
@@ -99,23 +104,44 @@ export class BrainAtlasView extends ItemView {
     this.focusEl = root.createDiv({ cls: "brain-atlas-focus-card" });
     this.taskPanelEl = root.createDiv({ cls: "brain-atlas-task-panel" });
     this.taskPanelEl.hide();
-    // Right column under the controls: a large scrollable action history + a shells task manager (bottom ~25%).
+    // Right column under the controls: an optional config panel, a large scrollable action history, and a
+    // shells task manager (bottom ~25%). Its top is positioned just below the controls (see positionRightDock).
     this.rightDockEl = root.createDiv({ cls: "brain-atlas-right-dock" });
+    this.configEl = this.rightDockEl.createDiv({ cls: "brain-atlas-config-panel" });
+    this.configEl.hide();
     this.historyEl = this.rightDockEl.createDiv({ cls: "brain-atlas-history" });
     this.shellPanelEl = this.rightDockEl.createDiv({ cls: "brain-atlas-shell-panel" });
     this.emptyEl = root.createDiv({ cls: "brain-atlas-empty" });
     this.emptyEl.setText("Your brain is empty. Add notes with #project, #person, or #source tags to start mapping.");
 
+    this.buildConfigPanel();
+    // Keep the dock docked right below the controls, however many rows the region buttons wrap to.
+    this.positionRightDock();
+    if (typeof ResizeObserver === "function" && this.controlsEl) {
+      this.controlsResizeObserver = new ResizeObserver(() => this.positionRightDock());
+      this.controlsResizeObserver.observe(this.controlsEl);
+    }
+
     this.canvas.addEventListener("click", this.onCanvasClick);
     this.rebuild();
   }
 
+  /** Position the right dock's top edge just under the controls block so the two never overlap. */
+  private positionRightDock(): void {
+    if (!this.rightDockEl || !this.controlsEl) return;
+    const top = this.controlsEl.offsetTop + this.controlsEl.offsetHeight + 8;
+    this.rightDockEl.style.top = `${Math.max(44, top)}px`;
+  }
+
   async onClose(): Promise<void> {
     this.canvas?.removeEventListener("click", this.onCanvasClick);
+    this.controlsResizeObserver?.disconnect();
+    this.controlsResizeObserver = null;
     this.renderer.stop();
     this.rendererStarted = false;
     this.taskPanelEl = null;
     this.rightDockEl = null;
+    this.configEl = null;
     this.historyEl = null;
     this.shellPanelEl = null;
     this.taskPanelSig = "";
@@ -175,6 +201,7 @@ export class BrainAtlasView extends ItemView {
       showLobeLabels: this.plugin.settings.showLobeLabels,
       showAllLabels: this.showAllLabels,
       nodeSizeScale: this.plugin.settings.nodeSizeScale,
+      linkThickness: this.plugin.settings.linkThickness,
       enabledLobes: this.plugin.settings.enabledLobes,
       performancePreset: this.plugin.settings.performancePreset,
       mobileMode: this.isMobileRuntime(),
@@ -263,6 +290,12 @@ export class BrainAtlasView extends ItemView {
     const kindLabel = entry.kind === "shell" ? "background shell"
       : entry.kind === "agent" ? "agent"
         : entry.kind === "terminal" ? "terminal" : "command";
+    // A recorded position (timelapse playback) pins the node exactly where it was; otherwise grid-place it and
+    // record that position so the timelapse captures WHERE this transient node lived.
+    const pos = entry.x !== undefined
+      ? { x: entry.x, y: entry.y as number, z: entry.z as number }
+      : liveGridPosition(side, index, total);
+    if (entry.x === undefined) this.plugin.activity?.setLivePos(entry.id, pos.x, pos.y, pos.z);
     return {
       id: entry.id,
       name: entry.label,
@@ -276,7 +309,7 @@ export class BrainAtlasView extends ItemView {
       path: entry.detail || entry.label,
       classificationSource: "frontmatter",
       _lobeName: "temporal",
-      _3dLobe: liveGridPosition(side, index, total)
+      _3dLobe: pos
     };
   }
 
@@ -356,6 +389,71 @@ export class BrainAtlasView extends ItemView {
         row.createSpan({ cls: "brain-atlas-task-status", text: node.active ? "running" : "done" });
       }
     }
+  }
+
+  /** Build the in-view Layout & Display config panel (the graph-view-style spacing/size controls). */
+  private buildConfigPanel(): void {
+    const el = this.configEl;
+    if (!el) return;
+    el.empty();
+    el.createDiv({ cls: "brain-atlas-config-title", text: "LAYOUT & DISPLAY" });
+    // Node size + Spacing change the layout, so apply on release (they rebuild the graph).
+    this.addConfigSlider(el, "Node size", 0.4, 3, 0.1, this.plugin.settings.nodeSizeScale, (v) => {
+      this.plugin.settings.nodeSizeScale = v;
+      void this.persistViewSettings();
+    });
+    this.addConfigSlider(el, "Spacing / density", 0.5, 2.5, 0.1, this.plugin.settings.layoutSpread, (v) => {
+      this.plugin.settings.layoutSpread = v;
+      void this.persistViewSettings();
+    }, { desc: "Low = clustered tight in each region; high = spread through the 3D volume." });
+    // Link thickness is cheap (a render option), so apply it live while dragging.
+    this.addConfigSlider(el, "Link thickness", 0.4, 3, 0.1, this.plugin.settings.linkThickness, (v) => {
+      this.plugin.settings.linkThickness = v;
+      this.renderer.setOptions({ linkThickness: v });
+      this.renderer.requestFrame();
+      void this.plugin.saveSettings();
+    }, { live: true });
+    el.createDiv({
+      cls: "brain-atlas-config-note",
+      text: "The brain is anatomical, so graph-view forces (center / repel / link force) don't apply — Spacing controls how far notes fan out within each region."
+    });
+  }
+
+  /** One labelled slider row. `live` applies on every drag tick (cheap options); else on release (layout). */
+  private addConfigSlider(
+    parent: HTMLElement,
+    label: string,
+    min: number,
+    max: number,
+    step: number,
+    value: number,
+    apply: (v: number) => void,
+    opts: { live?: boolean; desc?: string } = {}
+  ): void {
+    const row = parent.createDiv({ cls: "brain-atlas-config-row" });
+    const head = row.createDiv({ cls: "brain-atlas-config-head" });
+    head.createSpan({ cls: "brain-atlas-config-label", text: label });
+    const val = head.createSpan({ cls: "brain-atlas-config-val", text: value.toFixed(1) });
+    const input = row.createEl("input", { cls: "brain-atlas-config-slider" });
+    input.type = "range";
+    input.min = String(min);
+    input.max = String(max);
+    input.step = String(step);
+    input.value = String(value);
+    input.addEventListener("input", () => val.setText(Number(input.value).toFixed(1)));
+    input.addEventListener(opts.live ? "input" : "change", () => apply(Number(input.value)));
+    if (opts.desc) row.createDiv({ cls: "brain-atlas-config-desc", text: opts.desc });
+  }
+
+  /** Show/hide the config panel (top of the right dock). View-local. */
+  private toggleConfig(): void {
+    this.configVisible = !this.configVisible;
+    if (this.configEl) {
+      if (this.configVisible) this.configEl.show();
+      else this.configEl.hide();
+    }
+    this.configButton?.toggleClass("is-active", this.configVisible);
+    this.configButton?.setAttr("aria-pressed", String(this.configVisible));
   }
 
   /** Hide the task-manager panels (the Tasks quick toggle is off). Live nodes + history stay. */
@@ -542,6 +640,7 @@ export class BrainAtlasView extends ItemView {
     this.namesButton = this.createControlButton(primary, "Names", () => this.toggleNames());
     this.spinButton = this.createControlButton(primary, "Spin", () => this.toggleSpin());
     this.tasksButton = this.createControlButton(primary, "Tasks", () => this.toggleTasks());
+    this.configButton = this.createControlButton(primary, "Config", () => this.toggleConfig());
     this.createControlButton(primary, "Reset", () => this.renderer.resetView());
 
     const regionsRow = this.controlsEl.createDiv({ cls: "brain-atlas-control-group" });
@@ -593,6 +692,8 @@ export class BrainAtlasView extends ItemView {
     this.spinButton?.setAttr("aria-pressed", String(this.plugin.settings.idleAutoRotate));
     this.tasksButton?.toggleClass("is-active", this.liveUiVisible);
     this.tasksButton?.setAttr("aria-pressed", String(this.liveUiVisible));
+    this.configButton?.toggleClass("is-active", this.configVisible);
+    this.configButton?.setAttr("aria-pressed", String(this.configVisible));
     const enabledCount = LOBES.filter((lobe) => enabled[lobe]).length;
     this.allButton?.toggleClass("is-active", enabledCount === LOBES.length);
     this.noneButton?.toggleClass("is-active", enabledCount === 0);

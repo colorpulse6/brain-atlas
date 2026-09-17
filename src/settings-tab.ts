@@ -185,12 +185,21 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Layout spread")
-      .setDesc("Clustered (tight lobes) at the low end, spread (fills the 3D volume) at the high end.")
+      .setDesc("Clustered (tight lobes) at the low end, spread (fills the 3D volume) at the high end. Also on the in-view Config button.")
       .addSlider((slider) => slider
         .setLimits(0.5, 2.5, 0.1)
         .setValue(this.plugin.settings.layoutSpread)
         .setDynamicTooltip()
         .onChange((value) => this.update({ layoutSpread: value })));
+
+    new Setting(containerEl)
+      .setName("Link thickness")
+      .setDesc("Scale the drawn width of the links between notes.")
+      .addSlider((slider) => slider
+        .setLimits(0.4, 3, 0.1)
+        .setValue(this.plugin.settings.linkThickness)
+        .setDynamicTooltip()
+        .onChange((value) => this.update({ linkThickness: value })));
 
     new Setting(containerEl)
       .setName("Idle auto-rotate")

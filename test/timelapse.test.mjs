@@ -34,6 +34,16 @@ test("serialize/parse is a lossless round-trip of the history rows", () => {
   assert.ok(rows.every((r) => /^#[0-9a-f]{6}$/i.test(r.color)));
 });
 
+test("serialize/parse round-trips recorded node positions (xyz)", () => {
+  const state = new ActivityState();
+  state.setGraph(["a.md"], { "a.md": [] });
+  state.spawnLive("cmd-1", "git status", "command", "temporal", 1000);
+  state.setLivePos("cmd-1", 0.42, -0.1, 0.9);   // the view placed it here
+  const rows = parseTimelapse(serializeHistory(state.fullHistory()));
+  const spawn = rows.find((r) => r.event === "spawn");
+  assert.deepEqual([spawn.x, spawn.y, spawn.z], [0.42, -0.1, 0.9]);
+});
+
 test("parseTimelapse skips malformed lines and sorts by seq", () => {
   const text = [
     "not json",

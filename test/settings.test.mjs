@@ -91,9 +91,13 @@ test("normalizeSettings clamps node size and layout spread into range", () => {
   assert.equal(normalizeSettings({ layoutSpread: 2 }).layoutSpread, 2);
   assert.equal(normalizeSettings({ layoutSpread: 10 }).layoutSpread, 2.5);      // upper clamp
   assert.equal(normalizeSettings({ layoutSpread: "nope" }).layoutSpread, DEFAULT_SETTINGS.layoutSpread);
-  // defaults are the neutral 1
+  assert.equal(normalizeSettings({ linkThickness: 2 }).linkThickness, 2);
+  assert.equal(normalizeSettings({ linkThickness: 99 }).linkThickness, 3);      // upper clamp
+  assert.equal(normalizeSettings({ linkThickness: 0 }).linkThickness, 0.4);     // lower clamp
+  // node size neutral 1; spread defaults a little spread-out; link thickness neutral 1
   assert.equal(DEFAULT_SETTINGS.nodeSizeScale, 1);
-  assert.equal(DEFAULT_SETTINGS.layoutSpread, 1);
+  assert.equal(DEFAULT_SETTINGS.layoutSpread, 1.4);
+  assert.equal(DEFAULT_SETTINGS.linkThickness, 1);
 });
 
 test("normalizeSettings validates frontmatter value and folder region mappings", () => {

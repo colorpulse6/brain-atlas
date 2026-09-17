@@ -119,6 +119,8 @@ export interface BrainRendererOptions {
   showAllLabels: boolean;
   /** Multiplies every node's drawn radius (graph-view "node size"). 1 = default. */
   nodeSizeScale: number;
+  /** Multiplies the drawn edge/link width (graph-view "link thickness"). 1 = default. */
+  linkThickness: number;
   enabledLobes: LobeVisibility;
   performancePreset: PerformancePreset;
   mobileMode: boolean;
@@ -165,6 +167,7 @@ export abstract class RenderCore {
     showLobeLabels: true,
     showAllLabels: false,
     nodeSizeScale: 1,
+    linkThickness: 1,
     enabledLobes: allLobesEnabled(),
     performancePreset: "smooth",
     mobileMode: false

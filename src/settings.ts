@@ -43,9 +43,11 @@ export interface BrainAtlasSettings {
   inferKindsFromLinks: boolean;
   rendererMode: RendererMode;
   /** Graph-view-style layout controls. nodeSizeScale multiplies every node's radius; layoutSpread
-   *  scatters notes wider inside each lobe (clustered < 1 < spread), using more of the 3D volume. */
+   *  scatters notes wider inside each lobe (clustered < 1 < spread), using more of the 3D volume;
+   *  linkThickness scales the drawn edge width. */
   nodeSizeScale: number;
   layoutSpread: number;
+  linkThickness: number;
   /** Live activity: light nodes as Claude Code (or any tool) reads and writes notes. */
   activityEnabled: boolean;
   activityPort: number;
@@ -117,7 +119,8 @@ export const DEFAULT_SETTINGS: BrainAtlasSettings = {
   inferKindsFromLinks: true,
   rendererMode: "auto",
   nodeSizeScale: 1,
-  layoutSpread: 1,
+  layoutSpread: 1.4,
+  linkThickness: 1,
   activityEnabled: true,
   activityPort: 8766,
   activityReadColor: "#00ff00",
@@ -160,6 +163,7 @@ export function normalizeSettings(input: Partial<BrainAtlasSettings> | null | un
     rendererMode: normalizeRendererMode(input?.rendererMode) ?? DEFAULT_SETTINGS.rendererMode,
     nodeSizeScale: normalizeNumber(input?.nodeSizeScale, 0.4, 3) ?? DEFAULT_SETTINGS.nodeSizeScale,
     layoutSpread: normalizeNumber(input?.layoutSpread, 0.5, 2.5) ?? DEFAULT_SETTINGS.layoutSpread,
+    linkThickness: normalizeNumber(input?.linkThickness, 0.4, 3) ?? DEFAULT_SETTINGS.linkThickness,
     activityEnabled: typeof input?.activityEnabled === "boolean" ? input.activityEnabled : DEFAULT_SETTINGS.activityEnabled,
     activityPort: normalizePort(input?.activityPort) ?? DEFAULT_SETTINGS.activityPort,
     activityReadColor: normalizeHexColor(input?.activityReadColor) ?? DEFAULT_SETTINGS.activityReadColor,

@@ -1228,6 +1228,7 @@ export class BrainGLRenderer extends RenderCore {
       "uCy",
       "uDist",
       "uIsFar",
+      "uEdgeScale",
       "uFocusNodeIndex",
       "uHoverNodeIndex",
       "uLobeMul[0]"
@@ -1353,6 +1354,7 @@ export class BrainGLRenderer extends RenderCore {
     gl.uniform1f(ep.uniforms.uCy, proj.cy);
     gl.uniform1f(ep.uniforms.uDist, proj.dist);
     gl.uniform1f(ep.uniforms.uIsFar, wantFar ? 1 : 0);
+    gl.uniform1f(ep.uniforms.uEdgeScale, this.options.linkThickness || 1);
     gl.uniform1f(ep.uniforms.uFocusNodeIndex, focusIdx);
     gl.uniform1f(ep.uniforms.uHoverNodeIndex, hoverIdx);
     gl.uniform1fv(ep.uniforms["uLobeMul[0]"], lobeMul);

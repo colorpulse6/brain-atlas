@@ -209,23 +209,24 @@ export default class BrainAtlasPlugin extends Plugin {
     new Notice(`Brain Atlas: playing ${schedule.length} actions over 30s.`);
     for (const step of schedule) {
       const timer = window.setTimeout(() => {
-        this.applyPlaybackStep(step.row.event, step.row.id, step.row.kind, step.row.label);
+        this.applyPlaybackStep(step.row);
         this.pokeActiveBrainViews();
       }, step.at);
       this.playbackTimers.push(timer);
     }
   }
 
-  /** Feed one recorded row back into the live activity state. */
-  private applyPlaybackStep(event: string, id: string, kind: string, label: string): void {
+  /** Feed one recorded row back into the live activity state, pinned to its recorded position when we have one. */
+  private applyPlaybackStep(row: { event: string; id: string; kind: string; label: string; x?: number; y?: number; z?: number }): void {
     const now = performance.now();
-    if (event === "read" || event === "write") {
-      this.activity.activate(id, event, now);
-    } else if (event === "spawn") {
-      const live = (LIVE_KINDS.has(kind as LiveKind) ? kind : "command") as LiveKind;
-      this.activity.spawnLive(id, label, live, "temporal", now);
-    } else if (event === "end") {
-      this.activity.endLive(id, now);
+    const pos = row.x !== undefined && row.y !== undefined && row.z !== undefined ? { x: row.x, y: row.y, z: row.z } : undefined;
+    if (row.event === "read" || row.event === "write") {
+      this.activity.activate(row.id, row.event, now);
+    } else if (row.event === "spawn") {
+      const live = (LIVE_KINDS.has(row.kind as LiveKind) ? row.kind : "command") as LiveKind;
+      this.activity.spawnLive(row.id, row.label, live, "temporal", now, "", pos);
+    } else if (row.event === "end") {
+      this.activity.endLive(row.id, now);
     }
   }
 

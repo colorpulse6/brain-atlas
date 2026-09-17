@@ -375,6 +375,27 @@ test("history log is capped and re-spawning the same id does not duplicate a spa
   assert.ok(state.historyCount() >= 31);
 });
 
+test("setLivePos records a node's xyz and backfills its spawn history row", () => {
+  const state = stateWithGraph();
+  state.spawnLive("cmd-1", "git status", "command", "temporal", 1000);
+  // spawn row has no position yet
+  let row = state.recentHistory(1)[0];
+  assert.equal(row.x, undefined);
+  // the view places the node -> records its position, backfilling the spawn row
+  state.setLivePos("cmd-1", 0.5, -0.2, 0.3);
+  row = state.fullHistory().find((h) => h.id === "cmd-1" && h.event === "spawn");
+  assert.deepEqual([row.x, row.y, row.z], [0.5, -0.2, 0.3]);
+});
+
+test("spawnLive with an explicit position (playback) pins the node and records it", () => {
+  const state = stateWithGraph();
+  state.spawnLive("cmd-2", "npm run", "command", "temporal", 5, "npm run build", { x: 1, y: 2, z: 3 });
+  const live = state.liveNodes().find((e) => e.id === "cmd-2");
+  assert.deepEqual([live.x, live.y, live.z], [1, 2, 3]);
+  const row = state.fullHistory().find((h) => h.id === "cmd-2" && h.event === "spawn");
+  assert.deepEqual([row.x, row.y, row.z], [1, 2, 3]);
+});
+
 test("clear() empties the history log and resets the counter", () => {
   const state = stateWithGraph();
   state.activate("a.md", "read", 1);
