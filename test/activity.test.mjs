@@ -341,6 +341,51 @@ test("listener POST /live invokes onLive with the parsed event", async () => {
   assert.equal(events[1].op, "end");
 });
 
+test("history log records reads, writes, spawns and ends in order, newest first", () => {
+  const state = stateWithGraph();
+  assert.equal(state.historyCount(), 0);
+  assert.deepEqual(state.recentHistory(), []);
+
+  state.activate("a.md", "read", 1000);
+  state.activate("folder/b.md", "write", 1100);
+  state.spawnLive("live-1", "git status", "command", "temporal", 1200, "git status --porcelain");
+  state.endLive("live-1", 1300);
+
+  assert.equal(state.historyCount(), 4);
+  const recent = state.recentHistory();
+  assert.deepEqual(recent.map((h) => h.event), ["end", "spawn", "write", "read"]); // newest first
+  assert.deepEqual(recent.map((h) => h.label), ["git status", "git status", "folder/b.md", "a.md"]);
+  // spawn/end carry the live kind; reads/writes don't
+  assert.equal(recent[1].kind, "command");
+  assert.equal(recent[3].kind, "");
+  // every row has a monotonically increasing seq and a color
+  const full = state.fullHistory();
+  assert.deepEqual(full.map((h) => h.seq), [1, 2, 3, 4]); // oldest first
+  assert.ok(full.every((h) => /^#[0-9a-f]{6}$/i.test(h.color)));
+});
+
+test("history log is capped and re-spawning the same id does not duplicate a spawn row", () => {
+  const state = stateWithGraph();
+  state.spawnLive("dup", "npm run", "command", "temporal", 10);
+  state.spawnLive("dup", "npm run", "command", "temporal", 20); // refresh, not a new row
+  assert.equal(state.historyCount(), 1);
+  // recentHistory(n) returns at most n
+  for (let i = 0; i < 30; i += 1) state.activate("a.md", "read", 100 + i);
+  assert.equal(state.recentHistory(5).length, 5);
+  assert.ok(state.historyCount() >= 31);
+});
+
+test("clear() empties the history log and resets the counter", () => {
+  const state = stateWithGraph();
+  state.activate("a.md", "read", 1);
+  state.spawnLive("x", "cmd", "command", "temporal", 2);
+  assert.ok(state.historyCount() > 0);
+  state.clear();
+  assert.equal(state.historyCount(), 0);
+  assert.deepEqual(state.recentHistory(), []);
+  assert.deepEqual(state.fullHistory(), []);
+});
+
 function postJson(port, path, body) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);

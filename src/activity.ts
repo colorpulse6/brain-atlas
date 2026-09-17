@@ -70,6 +70,24 @@ export interface FireEvent {
   kind: ActivityKind | "spawn";
 }
 
+/** One line in the action history / timelapse: what happened, to what, when. */
+export interface HistoryEntry {
+  /** Monotonic id (also the timelapse ordering). */
+  seq: number;
+  /** tick-clock timestamp (ms). */
+  at: number;
+  /** read | write | spawn | end */
+  event: string;
+  /** the live kind for spawn/end (command/shell/terminal/agent), else "". */
+  kind: string;
+  /** node id / path the event touched. */
+  id: string;
+  /** short human label. */
+  label: string;
+  /** color to tint the row (kind/agent color, or read/write color). */
+  color: string;
+}
+
 export interface ActivityOptions {
   holdSeconds: number;
   decaySeconds: number;
@@ -281,6 +299,10 @@ export class ActivityState {
   private liveSeq = 0;
   /** Actions (reads/writes/spawns) waiting for the renderer to fire a signal along the brain. */
   private fires: FireEvent[] = [];
+  /** Rolling log of every action, newest last (the top-right history column + the timelapse recorder read this). */
+  private historyLog: HistoryEntry[] = [];
+  private historyCap = 1000;
+  private historySeq = 0;
 
   constructor(options: Partial<ActivityOptions> = {}) {
     this.options = { ...DEFAULT_ACTIVITY_OPTIONS, ...options };
@@ -318,6 +340,7 @@ export class ActivityState {
     }
     this.entries.set(id, { peak: 1, level: 1, kind, at: now });
     this.fires.push({ target: id, kind }); // the renderer fires a signal to this node (a visible action)
+    this.pushHistory(now, kind, "", id, id, kind === "write" ? this.options.writeColor : this.options.readColor);
     const cascade = Math.max(0, Math.min(1, this.options.cascade));
     if (cascade > 0) {
       for (const neighbour of this.adj[id] ?? []) {
@@ -394,7 +417,10 @@ export class ActivityState {
       endAt: null,
       level: 1
     });
-    if (!existing) this.fires.push({ target: id, kind: "spawn" }); // fire a signal when a new task appears
+    if (!existing) {
+      this.fires.push({ target: id, kind: "spawn" }); // fire a signal when a new task appears
+      this.pushHistory(now, "spawn", kind, id, label || id, this.liveColorFor({ kind, label: label || id }));
+    }
   }
 
   /** Drain the pending fire events (the renderer turns each into a signal along the brain). */
@@ -405,12 +431,42 @@ export class ActivityState {
     return out;
   }
 
+  /** Append one action to the rolling history log (capped). */
+  private pushHistory(at: number, event: string, kind: string, id: string, label: string, color: string): void {
+    this.historySeq += 1;
+    this.historyLog.push({ seq: this.historySeq, at, event, kind, id, label: label || id, color });
+    if (this.historyLog.length > this.historyCap) this.historyLog.splice(0, this.historyLog.length - this.historyCap);
+  }
+
+  /** The last `n` history entries, newest first (the top-right history column reads this). */
+  recentHistory(n = 200): HistoryEntry[] {
+    const start = Math.max(0, this.historyLog.length - n);
+    return this.historyLog.slice(start).reverse();
+  }
+
+  /** The whole history log, oldest first (the timelapse recorder/playback reads this). */
+  fullHistory(): HistoryEntry[] {
+    return this.historyLog.slice();
+  }
+
+  /** History entries with seq > `afterSeq`, oldest first (the recorder flushes only what's new). */
+  historySince(afterSeq: number): HistoryEntry[] {
+    if (afterSeq <= 0) return this.historyLog.slice();
+    return this.historyLog.filter((h) => h.seq > afterSeq);
+  }
+
+  /** Monotonic count of history events (cheap change-detection for the view). */
+  historyCount(): number {
+    return this.historySeq;
+  }
+
   /** Mark a live node finished; it fades over liveDecaySeconds and is then removed. */
   endLive(id: string, now: number): void {
     const entry = this.liveEntries.get(id);
     if (!entry || !entry.active) return;
     entry.active = false;
     entry.endAt = now;
+    this.pushHistory(now, "end", entry.kind, id, entry.label, this.liveColorFor(entry));
   }
 
   /** Live nodes currently worth drawing (level >= 0.01), newest first (stable by spawn order). */
@@ -480,6 +536,8 @@ export class ActivityState {
     this.entries.clear();
     this.liveEntries.clear();
     this.fires = [];
+    this.historyLog = [];
+    this.historySeq = 0;
   }
 
   status(): ActivityStatus {

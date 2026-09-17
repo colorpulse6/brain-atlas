@@ -140,7 +140,12 @@ export function makeProjector(options: {
   };
 }
 
-export function assignLobePositions(nodes: BrainNode[]): void {
+/**
+ * Place every node inside its lobe. `spread` (clustered < 1 < spread) scales the intra-lobe scatter so
+ * notes fan out to use more of the 3D volume without moving the lobes themselves (the brain keeps its shape).
+ */
+export function assignLobePositions(nodes: BrainNode[], spread = 1): void {
+  const s = Math.max(0.5, Math.min(2.5, spread));
   for (const node of nodes) {
     const h = stableHash(node.id);
     const r1 = (h & 0xffff) / 0xffff;
@@ -152,7 +157,7 @@ export function assignLobePositions(nodes: BrainNode[]): void {
     const cluster = clusterPoint(node, lobe, center.r);
     const u = r1 * Math.PI * 2;
     const v = Math.acos(2 * r2 - 1);
-    const radius = center.r * (node.hub ? 0.08 : 0.08 + r3 * 0.13);
+    const radius = center.r * (node.hub ? 0.08 : 0.08 + r3 * 0.13) * s;
     const dx = radius * Math.sin(v) * Math.cos(u);
     const dy = radius * Math.sin(v) * Math.sin(u);
     const dz = radius * Math.cos(v);
@@ -160,9 +165,9 @@ export function assignLobePositions(nodes: BrainNode[]): void {
     if (center.mirror && r1 > 0.5) cx = -cx;
 
     node._3dLobe = {
-      x: cx + cluster.x + dx,
-      y: center.c.y + cluster.y + dy,
-      z: center.c.z + cluster.z + dz
+      x: cx + cluster.x * s + dx,
+      y: center.c.y + cluster.y * s + dy,
+      z: center.c.z + cluster.z * s + dz
     };
     node._lobeName = lobe;
   }
@@ -193,6 +198,30 @@ export function liveNodePosition(id: string, region: string, side: "left" | "rig
     x: cx + radius * Math.sin(v) * Math.cos(u),
     y: center.c.y + radius * Math.sin(v) * Math.sin(u),
     z: center.c.z + radius * Math.cos(v)
+  };
+}
+
+/**
+ * A GRID position for a live node on the temporal outer face -- "random but grid-like" so labels don't
+ * overlap. `side` picks the hemisphere (right = live/foreground tasks, left = background shells + agents).
+ * `index` is the node's slot within its side group; `total` sizes the grid. A tiny deterministic jitter
+ * keeps it from looking mechanical. Spread wide to use the volume the 3D brain gives us.
+ */
+export function liveGridPosition(side: "left" | "right", index: number, total: number): Vec3 {
+  const c = LOBE_CENTERS.temporal.c;
+  const cols = Math.min(4, Math.max(1, Math.ceil(Math.sqrt(Math.max(1, total)))));
+  const rows = Math.max(1, Math.ceil(total / cols));
+  const col = index % cols;
+  const row = Math.floor(index / cols);
+  const stepY = 0.20;
+  const stepZ = 0.24;
+  const h = stableHash("livegrid:" + side + ":" + index);
+  const jy = (((h & 0xff) / 0xff) - 0.5) * 0.05;
+  const jz = ((((h >>> 8) & 0xff) / 0xff) - 0.5) * 0.05;
+  return {
+    x: (side === "left" ? -1 : 1) * (Math.abs(c.x) + 0.24),
+    y: c.y + (row - (rows - 1) / 2) * stepY + jy,
+    z: c.z + (col - (cols - 1) / 2) * stepZ + jz
   };
 }
 
@@ -236,6 +265,7 @@ export const Brain3D = {
   makeProjector,
   assignLobePositions,
   liveNodePosition,
+  liveGridPosition,
   LOBE_CENTERS,
   KIND_TO_LOBE
 };

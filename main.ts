@@ -1,14 +1,20 @@
 import { Notice, Platform, Plugin, type EventRef, type Vault, type WorkspaceLeaf } from "obsidian";
-import { ActivityListener, ActivityState, type ActivityOptions, type HttpLike } from "./src/activity.ts";
+import { ActivityListener, ActivityState, type ActivityOptions, type HttpLike, type LiveKind } from "./src/activity.ts";
 import { normalizeSettings, type BrainAtlasSettings } from "./src/settings.ts";
 import { BrainAtlasSettingTab } from "./src/settings-tab.ts";
 import { BRAIN_ATLAS_VIEW_TYPE, BrainAtlasView } from "./src/view.ts";
+import { buildPlaybackSchedule, parseTimelapse, TimelapseRecorder, type TimelapseSink } from "./src/timelapse.ts";
+
+const LIVE_KINDS = new Set<LiveKind>(["command", "shell", "terminal", "agent"]);
 
 export default class BrainAtlasPlugin extends Plugin {
   settings: BrainAtlasSettings = normalizeSettings(null);
   /** Live activity: node glow driven by POST /read events from Claude Code hooks. */
   activity: ActivityState = new ActivityState();
   private activityListener: ActivityListener | null = null;
+  /** Timelapse: appends the action history to a JSONL file so the project's life can be replayed. */
+  private recorder: TimelapseRecorder | null = null;
+  private playbackTimers: number[] = [];
 
   async onload(): Promise<void> {
     const data = (await this.loadData()) as Partial<BrainAtlasSettings> | null;
@@ -20,6 +26,16 @@ export default class BrainAtlasPlugin extends Plugin {
       name: "Open atlas",
       callback: () => this.activateView()
     });
+    this.addCommand({
+      id: "play-timelapse",
+      name: "Play timelapse",
+      callback: () => void this.playTimelapse()
+    });
+    this.addCommand({
+      id: "clear-timelapse",
+      name: "Clear timelapse recording",
+      callback: () => void this.clearTimelapse()
+    });
     this.addRibbonIcon("brain", "Open atlas", () => this.activateView());
     this.addSettingTab(new BrainAtlasSettingTab(this));
 
@@ -30,11 +46,15 @@ export default class BrainAtlasPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("rename", () => this.debouncedRefresh()));
     this.registerConfigChangeRefresh();
     this.applyActivitySettings();
+    void this.startTimelapseRecorder();
   }
 
   onunload(): void {
     this.activityListener?.stop();
     this.activityListener = null;
+    this.cancelPlayback();
+    void this.recorder?.flush();
+    this.recorder = null;
   }
 
   /**
@@ -132,6 +152,102 @@ export default class BrainAtlasPlugin extends Plugin {
       const view = leaf.view;
       if (view instanceof BrainAtlasView) view.poke();
     }
+  }
+
+  /** Where the timelapse JSONL lives (inside the plugin's own data dir, so it never clutters the vault). */
+  private timelapsePath(): string {
+    const dir = this.manifest.dir ?? ".obsidian/plugins/brain-atlas";
+    return `${dir}/timelapse.jsonl`;
+  }
+
+  /**
+   * Begin recording the action history to disk: prime from any existing file (so a reload doesn't re-append
+   * old rows) and flush new entries every few seconds. Append-only; safe if the file or dir is missing.
+   */
+  private async startTimelapseRecorder(): Promise<void> {
+    const path = this.timelapsePath();
+    const adapter = this.app.vault.adapter;
+    const sink: TimelapseSink = { append: (text) => adapter.append(path, text) };
+    const recorder = new TimelapseRecorder(this.activity, sink);
+    try {
+      if (await adapter.exists(path)) recorder.primeFrom(parseTimelapse(await adapter.read(path)));
+    } catch (error) {
+      console.warn("Brain Atlas: could not prime timelapse from existing file.", error);
+    }
+    this.recorder = recorder;
+    // registerInterval ties the timer to the plugin lifecycle (cleared on unload).
+    this.registerInterval(window.setInterval(() => {
+      if (this.settings.activityEnabled) void recorder.flush();
+    }, 4000));
+  }
+
+  /** Replay the recorded history over ~30s, re-feeding events into the live activity so the brain re-glows. */
+  private async playTimelapse(): Promise<void> {
+    this.cancelPlayback();
+    const path = this.timelapsePath();
+    const adapter = this.app.vault.adapter;
+    let rows;
+    try {
+      // Flush anything pending first so the newest actions are included.
+      await this.recorder?.flush();
+      if (!(await adapter.exists(path))) {
+        new Notice("Brain Atlas: no timelapse recorded yet.");
+        return;
+      }
+      rows = parseTimelapse(await adapter.read(path));
+    } catch (error) {
+      console.warn("Brain Atlas: could not read timelapse.", error);
+      new Notice("Brain Atlas: could not read the timelapse file.");
+      return;
+    }
+    const schedule = buildPlaybackSchedule(rows, { totalMs: 30000 });
+    if (schedule.length === 0) {
+      new Notice("Brain Atlas: the timelapse is empty.");
+      return;
+    }
+    if (this.app.workspace.getLeavesOfType(BRAIN_ATLAS_VIEW_TYPE).length === 0) await this.activateView();
+    new Notice(`Brain Atlas: playing ${schedule.length} actions over 30s.`);
+    for (const step of schedule) {
+      const timer = window.setTimeout(() => {
+        this.applyPlaybackStep(step.row.event, step.row.id, step.row.kind, step.row.label);
+        this.pokeActiveBrainViews();
+      }, step.at);
+      this.playbackTimers.push(timer);
+    }
+  }
+
+  /** Feed one recorded row back into the live activity state. */
+  private applyPlaybackStep(event: string, id: string, kind: string, label: string): void {
+    const now = performance.now();
+    if (event === "read" || event === "write") {
+      this.activity.activate(id, event, now);
+    } else if (event === "spawn") {
+      const live = (LIVE_KINDS.has(kind as LiveKind) ? kind : "command") as LiveKind;
+      this.activity.spawnLive(id, label, live, "temporal", now);
+    } else if (event === "end") {
+      this.activity.endLive(id, now);
+    }
+  }
+
+  private cancelPlayback(): void {
+    for (const timer of this.playbackTimers) window.clearTimeout(timer);
+    this.playbackTimers = [];
+  }
+
+  /** Delete the timelapse recording and start a fresh one. */
+  private async clearTimelapse(): Promise<void> {
+    this.cancelPlayback();
+    const path = this.timelapsePath();
+    const adapter = this.app.vault.adapter;
+    try {
+      if (await adapter.exists(path)) await adapter.remove(path);
+      new Notice("Brain Atlas: timelapse cleared.");
+    } catch (error) {
+      console.warn("Brain Atlas: could not clear timelapse.", error);
+      new Notice("Brain Atlas: could not clear the timelapse file.");
+    }
+    // Re-prime the recorder against the now-empty file.
+    void this.startTimelapseRecorder();
   }
 
   private debouncedRefresh = debounce(() => {

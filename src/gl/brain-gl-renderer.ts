@@ -1474,7 +1474,7 @@ export class BrainGLRenderer extends RenderCore {
     }
 
     const program = createProgram(gl, NODE_VS, NODE_FS);
-    const buf = buildNodeBuffer(graph.nodes);
+    const buf = buildNodeBuffer(graph.nodes, this.options.nodeSizeScale || 1);
     const nodeCount = buf.count;
     this.activityPatched.clear(); // fresh VBO: nothing is patched yet
 

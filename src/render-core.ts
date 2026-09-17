@@ -117,6 +117,8 @@ export interface BrainRendererOptions {
   showLobeLabels: boolean;
   /** When false (default) node labels show only for in-use / hovered / focused nodes; true = the old dense mode. */
   showAllLabels: boolean;
+  /** Multiplies every node's drawn radius (graph-view "node size"). 1 = default. */
+  nodeSizeScale: number;
   enabledLobes: LobeVisibility;
   performancePreset: PerformancePreset;
   mobileMode: boolean;
@@ -162,6 +164,7 @@ export abstract class RenderCore {
     idleAutoRotate: false,
     showLobeLabels: true,
     showAllLabels: false,
+    nodeSizeScale: 1,
     enabledLobes: allLobesEnabled(),
     performancePreset: "smooth",
     mobileMode: false

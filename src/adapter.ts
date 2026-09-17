@@ -79,7 +79,7 @@ export function buildGraphFromFiles(notes: NoteInput[], settings: BrainAtlasSett
     color: palette.kinds[node.kind] ?? palette.kinds.unknown
   }));
   nodes = markHubs(nodes, settings.hubThresholdPercent);
-  assignLobePositions(nodes);
+  assignLobePositions(nodes, settings.layoutSpread);
   applyPinnedNodePositions(nodes, settings.pinnedNodePositions);
 
   const idx = Object.fromEntries(nodes.map((node) => [node.id, node]));

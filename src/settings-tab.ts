@@ -175,6 +175,24 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         .onChange((value) => this.update({ edgeCap: value })));
 
     new Setting(containerEl)
+      .setName("Node size")
+      .setDesc("Scale every node's dot. Larger reads better on a big 3D canvas.")
+      .addSlider((slider) => slider
+        .setLimits(0.4, 3, 0.1)
+        .setValue(this.plugin.settings.nodeSizeScale)
+        .setDynamicTooltip()
+        .onChange((value) => this.update({ nodeSizeScale: value })));
+
+    new Setting(containerEl)
+      .setName("Layout spread")
+      .setDesc("Clustered (tight lobes) at the low end, spread (fills the 3D volume) at the high end.")
+      .addSlider((slider) => slider
+        .setLimits(0.5, 2.5, 0.1)
+        .setValue(this.plugin.settings.layoutSpread)
+        .setDynamicTooltip()
+        .onChange((value) => this.update({ layoutSpread: value })));
+
+    new Setting(containerEl)
       .setName("Idle auto-rotate")
       .setDesc("Resume slow rotation after interaction pauses.")
       .addToggle((toggle) => toggle

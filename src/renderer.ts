@@ -278,7 +278,7 @@ export class BrainRenderer extends RenderCore {
     const color = act
       ? (act.live ? node.color : lerpHexColor(node.color, act.kind === "write" ? this.activity!.options.writeColor : this.activity!.options.readColor, level))
       : node.color;
-    const radius = nodeRadius(node) * Math.max(0.55, projected.scale) * (isHover ? 1.18 : isFocus ? 1.25 : 1) * swell;
+    const radius = nodeRadius(node) * (this.options.nodeSizeScale || 1) * Math.max(0.55, projected.scale) * (isHover ? 1.18 : isFocus ? 1.25 : 1) * swell;
     const fade = Math.max(0.32, 1 - projected.depth * 0.75);
     const dim = node.status === "archived" ? 0.30 : node.status === "dormantRelevant" ? 0.55 : 1;
     const alpha = Math.min(1, fade * dim * lobeMul(node._lobeName) + level * 0.5);

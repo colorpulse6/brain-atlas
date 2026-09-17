@@ -6,7 +6,7 @@ import { BrainRenderer } from "./renderer.ts";
 import { RenderCore, type BrainRendererOptions, type LiveScreenNode } from "./render-core.ts";
 import { BrainGLRenderer } from "./gl/brain-gl-renderer.ts";
 import type { ActivityState, LiveEntry } from "./activity.ts";
-import { LOBE_CENTERS, liveNodePosition } from "./shape.ts";
+import { LOBE_CENTERS, liveGridPosition } from "./shape.ts";
 import type { BrainAtlasSettings, PinnedNodePosition } from "./settings.ts";
 import type { BrainGraph, BrainNode, LobeName } from "./types.ts";
 
@@ -33,9 +33,14 @@ export class BrainAtlasView extends ItemView {
   private focusEl: HTMLDivElement | null = null;
   private infoEl: HTMLDivElement | null = null;
   private emptyEl: HTMLDivElement | null = null;
-  private taskPanelEl: HTMLDivElement | null = null;
-  /** Signature of the last task-panel render, so we only rebuild it when the task set/status changes. */
+  private taskPanelEl: HTMLDivElement | null = null;    // bottom-left: commands / terminals / agents
+  private rightDockEl: HTMLDivElement | null = null;    // right column under the controls
+  private historyEl: HTMLDivElement | null = null;      // scrollable action history
+  private shellPanelEl: HTMLDivElement | null = null;   // bottom-right: background shells
+  /** Signatures so we only rebuild each panel when its set/status changes. */
   private taskPanelSig = "";
+  private shellPanelSig = "";
+  private historyRendered = -1;
   /** View-local quick toggles (not persisted): dense node labels, and the task-manager panel. */
   private showAllLabels = false;
   private liveUiVisible = true;
@@ -94,6 +99,10 @@ export class BrainAtlasView extends ItemView {
     this.focusEl = root.createDiv({ cls: "brain-atlas-focus-card" });
     this.taskPanelEl = root.createDiv({ cls: "brain-atlas-task-panel" });
     this.taskPanelEl.hide();
+    // Right column under the controls: a large scrollable action history + a shells task manager (bottom ~25%).
+    this.rightDockEl = root.createDiv({ cls: "brain-atlas-right-dock" });
+    this.historyEl = this.rightDockEl.createDiv({ cls: "brain-atlas-history" });
+    this.shellPanelEl = this.rightDockEl.createDiv({ cls: "brain-atlas-shell-panel" });
     this.emptyEl = root.createDiv({ cls: "brain-atlas-empty" });
     this.emptyEl.setText("Your brain is empty. Add notes with #project, #person, or #source tags to start mapping.");
 
@@ -106,7 +115,12 @@ export class BrainAtlasView extends ItemView {
     this.renderer.stop();
     this.rendererStarted = false;
     this.taskPanelEl = null;
+    this.rightDockEl = null;
+    this.historyEl = null;
+    this.shellPanelEl = null;
     this.taskPanelSig = "";
+    this.shellPanelSig = "";
+    this.historyRendered = -1;
     this.rootEl = null;
     this.canvas = null;
     this.canvasContextKind = null;
@@ -132,6 +146,8 @@ export class BrainAtlasView extends ItemView {
     const live = this.plugin.activity?.liveNodes() ?? [];
     const sig = live.map((e) => `${e.id}:${e.active ? 1 : 0}:${e.kind}`).join("|");
     if (sig !== this.mergedLiveSig) this.composeGraph();
+    // Reads/writes don't create live nodes, so refresh the history here too (change-gated internally).
+    this.syncHistory();
     this.renderer.requestFrame();
   }
 
@@ -158,6 +174,7 @@ export class BrainAtlasView extends ItemView {
       idleAutoRotate: this.plugin.settings.idleAutoRotate,
       showLobeLabels: this.plugin.settings.showLobeLabels,
       showAllLabels: this.showAllLabels,
+      nodeSizeScale: this.plugin.settings.nodeSizeScale,
       enabledLobes: this.plugin.settings.enabledLobes,
       performancePreset: this.plugin.settings.performancePreset,
       mobileMode: this.isMobileRuntime(),
@@ -179,13 +196,70 @@ export class BrainAtlasView extends ItemView {
       this.composeGraph();
       this.renderer.requestFrame();
     }
-    if (this.liveUiVisible) this.syncTaskPanel(nodes);
-    else this.clearLiveUi();
+    if (this.liveUiVisible) {
+      this.syncTaskPanel(nodes.filter((n) => n.kind !== "shell")); // bottom-left: commands / terminals / agents
+      this.syncShellPanel(nodes.filter((n) => n.kind === "shell")); // bottom-right: background shells
+    } else {
+      this.clearLiveUi();
+    }
+    this.syncHistory(); // the history column stays under the buttons regardless of the Tasks toggle
   }
 
-  /** A live task/agent as a real BrainNode: temporal-right for tasks, temporal-left (mirror) for agents. */
-  private makeLiveNode(entry: LiveEntry): BrainNode {
-    const side = entry.kind === "agent" ? "left" : "right";
+  /** Bottom-right: the background-shell task manager (scrollable). */
+  private syncShellPanel(shells: LiveScreenNode[]): void {
+    const panel = this.shellPanelEl;
+    if (!panel) return;
+    const sig = shells.map((n) => `${n.id}:${n.active ? 1 : 0}`).join("|");
+    if (sig === this.shellPanelSig) return;
+    this.shellPanelSig = sig;
+    panel.empty();
+    const running = shells.filter((n) => n.active).length;
+    const header = panel.createDiv({ cls: "brain-atlas-task-header" });
+    header.createSpan({ cls: "brain-atlas-task-title", text: "SHELLS" });
+    header.createSpan({ cls: "brain-atlas-task-count", text: `${running} active` });
+    for (const node of shells) {
+      const row = panel.createDiv({ cls: "brain-atlas-task-row" });
+      row.toggleClass("is-ending", !node.active);
+      row.setAttr("data-kind", "shell");
+      row.style.setProperty("--live-color", node.color);
+      row.createSpan({ cls: "brain-atlas-task-dot" });
+      const body = row.createDiv({ cls: "brain-atlas-task-body" });
+      body.createSpan({ cls: "brain-atlas-task-name", text: node.label });
+      if (node.detail && node.detail !== node.label) body.createSpan({ cls: "brain-atlas-task-detail", text: node.detail });
+      row.createSpan({ cls: "brain-atlas-task-status", text: node.active ? "running" : "done" });
+    }
+  }
+
+  /** Top-right: a scrollable log of every action (reads/writes/spawns/ends), newest first. */
+  private syncHistory(): void {
+    const el = this.historyEl;
+    const activity = this.plugin.activity;
+    if (!el || !activity) return;
+    const count = activity.historyCount();
+    if (count === this.historyRendered) return;
+    this.historyRendered = count;
+    el.empty();
+    el.createDiv({ cls: "brain-atlas-history-title", text: `HISTORY - ${count}` });
+    const rows = activity.recentHistory(200);
+    if (rows.length === 0) {
+      el.createDiv({ cls: "brain-atlas-history-empty", text: "no activity yet" });
+      return;
+    }
+    for (const h of rows) {
+      const row = el.createDiv({ cls: "brain-atlas-history-row" });
+      row.setAttr("data-event", h.event);
+      row.style.setProperty("--live-color", h.color);
+      row.createSpan({ cls: "brain-atlas-history-verb", text: HISTORY_VERB[h.event] ?? h.event });
+      row.createSpan({ cls: "brain-atlas-history-label", text: h.label });
+    }
+  }
+
+  /**
+   * A live task/agent as a real BrainNode, grid-placed on a temporal side: RIGHT for foreground commands +
+   * terminals, LEFT for background shells + deployed agents. The on-node name is short (the program/type);
+   * the full command lives in entry.detail (shown in the task manager, not on the map).
+   */
+  private makeLiveNode(entry: LiveEntry, side: "left" | "right", index: number, total: number): BrainNode {
     const kindLabel = entry.kind === "shell" ? "background shell"
       : entry.kind === "agent" ? "agent"
         : entry.kind === "terminal" ? "terminal" : "command";
@@ -202,14 +276,14 @@ export class BrainAtlasView extends ItemView {
       path: entry.detail || entry.label,
       classificationSource: "frontmatter",
       _lobeName: "temporal",
-      _3dLobe: liveNodePosition(entry.id, "temporal", side)
+      _3dLobe: liveGridPosition(side, index, total)
     };
   }
 
   /**
    * Merge the current live task/agent nodes on top of the vault graph so they render as real nodes (glow,
-   * depth, hover). A NEW graph object is produced so the WebGL renderer rebuilds its buffers; live glow then
-   * animates per-frame via the activity system with no further rebuild until the set changes.
+   * depth, hover), grid-placed so labels do not overlap. A NEW graph object is produced so the WebGL renderer
+   * rebuilds its buffers; live glow then animates per-frame via the activity system with no further rebuild.
    */
   private composeGraph(): void {
     const vault = this.vaultGraph;
@@ -221,7 +295,12 @@ export class BrainAtlasView extends ItemView {
       this.plugin.activity?.setGraph(Object.keys(vault.idx), vault.adj);
       return;
     }
-    const liveNodes = live.map((entry) => this.makeLiveNode(entry));
+    const bySide: Record<"left" | "right", LiveEntry[]> = { left: [], right: [] };
+    for (const e of live) bySide[liveSideForKind(e.kind)].push(e);
+    const liveNodes: BrainNode[] = [];
+    for (const side of ["left", "right"] as const) {
+      bySide[side].forEach((entry, i) => liveNodes.push(this.makeLiveNode(entry, side, i, bySide[side].length)));
+    }
     const idx: Record<string, BrainNode> = { ...vault.idx };
     for (const node of liveNodes) idx[node.id] = node;
     this.graph = { ...vault, nodes: [...vault.nodes, ...liveNodes], idx, adj: vault.adj };
@@ -279,13 +358,17 @@ export class BrainAtlasView extends ItemView {
     }
   }
 
-  /** Hide the task-manager panel (the Tasks quick toggle is off). Live nodes stay in the brain. */
+  /** Hide the task-manager panels (the Tasks quick toggle is off). Live nodes + history stay. */
   private clearLiveUi(): void {
     if (this.taskPanelEl) {
       this.taskPanelEl.hide();
       this.taskPanelEl.empty();
     }
+    if (this.shellPanelEl && this.shellPanelSig !== "") {
+      this.shellPanelEl.empty();
+    }
     this.taskPanelSig = "";
+    this.shellPanelSig = "";
   }
 
   /** Select the desired renderer kind based on rendererMode + mobile detection. */
@@ -697,6 +780,19 @@ export class BrainAtlasView extends ItemView {
     this.plugin.refreshActiveBrainViews();
   }
 }
+
+/** Which temporal side a live kind sits on: foreground work (commands/terminals) right, background (shells) + agents left. */
+function liveSideForKind(kind: string): "left" | "right" {
+  return kind === "command" || kind === "terminal" ? "right" : "left";
+}
+
+/** Short verb shown at the start of each history row. */
+const HISTORY_VERB: Record<string, string> = {
+  read: "read",
+  write: "wrote",
+  spawn: "ran",
+  end: "done"
+};
 
 function emptyGraph(settings: BrainAtlasSettings): BrainGraph {
   return {

@@ -84,6 +84,18 @@ test("normalizeSettings validates palette and performance settings", () => {
   assert.equal(fallback.performancePreset, "smooth");
 });
 
+test("normalizeSettings clamps node size and layout spread into range", () => {
+  assert.equal(normalizeSettings({ nodeSizeScale: 1.5 }).nodeSizeScale, 1.5);
+  assert.equal(normalizeSettings({ nodeSizeScale: 99 }).nodeSizeScale, 3);      // upper clamp
+  assert.equal(normalizeSettings({ nodeSizeScale: 0 }).nodeSizeScale, 0.4);     // lower clamp
+  assert.equal(normalizeSettings({ layoutSpread: 2 }).layoutSpread, 2);
+  assert.equal(normalizeSettings({ layoutSpread: 10 }).layoutSpread, 2.5);      // upper clamp
+  assert.equal(normalizeSettings({ layoutSpread: "nope" }).layoutSpread, DEFAULT_SETTINGS.layoutSpread);
+  // defaults are the neutral 1
+  assert.equal(DEFAULT_SETTINGS.nodeSizeScale, 1);
+  assert.equal(DEFAULT_SETTINGS.layoutSpread, 1);
+});
+
 test("normalizeSettings validates frontmatter value and folder region mappings", () => {
   const settings = normalizeSettings({
     ...DEFAULT_SETTINGS,
