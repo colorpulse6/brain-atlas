@@ -218,7 +218,9 @@ export function drawNodeLabels(
 
   for (const projected of nodeProjs) {
     if (!labels.has(projected.node.id)) continue;
-    if (projected.z > 0.25 && !projected.node.hub) continue;
+    // far-side nodes lose their label -- except a live task/agent (activeIds): the far temporal face keeps
+    // its labels, dimmed by depth, so what Claude is doing stays readable from any angle
+    if (projected.z > 0.25 && !projected.node.hub && !(opts.activeIds && opts.activeIds.has(projected.node.id))) continue;
     const radius = nodeRadius(projected.node) * Math.max(0.6, projected.scale);
     const alpha = Math.max(0.2, 1 - projected.depth * 0.7) * lobeMul(projected.node._lobeName);
     if (alpha < 0.1) continue;

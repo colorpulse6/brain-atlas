@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assignLobePositions, placeLiveNode, liveLabelFootprint, liveFootprintsOverlap } from "../src/shape.ts";
+import { assignLobePositions, placeLiveNode, liveLabelRect, liveRectsCollide, liveSpotClear, makeProjector, LIVE_CANON } from "../src/shape.ts";
 
 function node(path) {
   return {
@@ -45,23 +45,44 @@ const LABELS = ["python evidence", "git status", "node", "powershell", "time.sle
   "pytest", "docker compose", "head", "grep", "code-reviewer", "Explore", "git log --oneline", "echo",
   "python -m pytest", "cat"];
 
-function placeMany(n) {
+function placeMany(n, side = "right") {
   const placed = [];
   for (let i = 0; i < n; i += 1) {
     const label = LABELS[i % LABELS.length];
-    const p = placeLiveNode("right", label, placed.map((o) => ({ label: o.label, y: o.y, z: o.z })));
+    const p = placeLiveNode(side, label, placed.map((o) => ({ label: o.label, x: o.x, y: o.y, z: o.z })));
     placed.push({ label, ...p });
   }
   return placed;
 }
 
-test("no two live labels overlap, however many tasks arrive", () => {
-  const placed = placeMany(16);
-  for (let i = 0; i < placed.length; i += 1) {
-    for (let j = i + 1; j < placed.length; j += 1) {
-      const a = liveLabelFootprint(placed[i].label, placed[i].y, placed[i].z);
-      const b = liveLabelFootprint(placed[j].label, placed[j].y, placed[j].z);
-      assert.ok(!liveFootprintsOverlap(a, b), `${placed[i].label} overlaps ${placed[j].label}`);
+// The label box exactly as overlay-labels draws it: 10px mono (~6.2px/char) + 4px pad each side, 13px tall,
+// starting radius+4 below the dot; the dot itself sits above it.
+function drawnRect(label, pos, project) {
+  return liveLabelRect(label, pos, project);
+}
+
+function framings() {
+  const out = [];
+  for (const scale of [200, 300]) {
+    for (const rotY of [...LIVE_CANON.rotYs, 0.45]) {
+      out.push({ scale, rotY, project: makeProjector({ rotX: LIVE_CANON.rotX, rotY, scale, cx: 0, cy: 0, dist: LIVE_CANON.dist }) });
+    }
+  }
+  return out;
+}
+
+test("no two live labels overlap ON SCREEN at the reset framing (both faces, two pane sizes)", () => {
+  for (const side of ["left", "right"]) {
+    const placed = placeMany(14, side);
+    for (const f of framings()) {
+      for (let i = 0; i < placed.length; i += 1) {
+        for (let j = i + 1; j < placed.length; j += 1) {
+          const a = drawnRect(placed[i].label, placed[i], f.project);
+          const b = drawnRect(placed[j].label, placed[j], f.project);
+          assert.ok(!liveRectsCollide(a, b, 0),
+            `${side}: "${placed[i].label}" overlaps "${placed[j].label}" at rotY ${f.rotY}, scale ${f.scale}`);
+        }
+      }
     }
   }
 });
@@ -76,14 +97,25 @@ test("a new task takes the nearest free spot, not a far corner", () => {
 test("a spot freed by an ended task is reused by the next arrival", () => {
   const [a, b, c] = placeMany(3);
   // b ends and fades out: only a and c occupy the face now
-  const d = placeLiveNode("right", b.label, [a, c].map((o) => ({ label: o.label, y: o.y, z: o.z })));
+  const d = placeLiveNode("right", b.label, [a, c].map((o) => ({ label: o.label, x: o.x, y: o.y, z: o.z })));
   assert.ok(distance(d, b) < 1e-9, "the vacated spot is the nearest free one, so it is taken again");
 });
 
-test("live placement is deterministic and label length widens the footprint", () => {
+test("live placement is deterministic and a longer label needs a wider box", () => {
   const occ = [{ label: "git status", y: 0.2, z: 0.1 }];
   assert.deepEqual(placeLiveNode("left", "npm run build", occ), placeLiveNode("left", "npm run build", occ));
-  assert.ok(liveLabelFootprint("git log --oneline --graph", 0, 0).w > liveLabelFootprint("git", 0, 0).w);
+  const pr = framings()[0].project;
+  const wide = liveLabelRect("git log --oneline --graph", { x: 1.3, y: 0, z: 0 }, pr);
+  const narrow = liveLabelRect("git", { x: 1.3, y: 0, z: 0 }, pr);
+  assert.ok(wide.x1 - wide.x0 > narrow.x1 - narrow.x0);
+});
+
+test("a pinned spot that no longer reads clear is rejected, a clear one is kept", () => {
+  const [a] = placeMany(1);
+  const occ = [{ label: a.label, x: a.x, y: a.y, z: a.z }];
+  assert.equal(liveSpotClear("python evidence", { x: a.x, y: a.y, z: a.z }, occ), false, "same spot collides");
+  assert.equal(liveSpotClear("python evidence", { x: a.x, y: a.y - 0.05, z: a.z + 0.05 }, occ), false, "a nudge still collides");
+  assert.equal(liveSpotClear("python evidence", { x: a.x, y: a.y - 0.6, z: a.z }, occ), true, "far below is clear");
 });
 
 test("live placement stays inside the temporal region for a normal load", () => {

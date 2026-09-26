@@ -222,45 +222,83 @@ export const LIVE_FACE = {
   step: 0.11       // candidate-lattice pitch: finer than a label, so "nearest free spot" really is nearby
 };
 
-// Label footprint, sized from how overlay-labels draws node labels: 10px JetBrains Mono, 4px pad each side,
-// a 13px box starting radius+4 below the dot. Model units via px-per-unit at zoom 1 (min(w,h)*0.32, ~940px),
-// with a safety factor so labels still read a notch zoomed in.
-const PX_PER_UNIT = 300;
-const LABEL_CHAR_PX = 6.2;
-const LABEL_PAD_PX = 8;
-const LABEL_H_PX = 13 + 5 + 8;
-const SAFETY = 1.35;
+// Where a spot is judged: ON SCREEN. Labels are drawn in screen pixels (10px JetBrains Mono, 4px pad, a 13px box
+// radius+4 below the dot), so two nodes that are far apart on the face plane can still collide once the camera
+// foreshortens the face (at the reset framing the face's z axis shows at ~half size). Placement therefore projects
+// every candidate with the renderer's RESET framing (rotX -0.15, rotY 0.55, dist 3.4) at a deliberately small pane
+// (200 px/unit = a ~625px pane at zoom 1) and with a second, flatter framing (rotY 0.3, the brain turned toward
+// the front), and accepts a spot only when its drawn box is clear of every occupant's box in both. The camera is
+// canonical, not live, so placement stays deterministic: pinned spots and the timelapse never move because the
+// user rotated or resized the view.
+export const LIVE_CANON = { rotX: -0.15, rotYs: [0.55, 0.3] as const, dist: 3.4, scale: 200 };
+const LABEL_CHAR_PX = 6.2;      // 10px JetBrains Mono advance per character
+const LABEL_PAD_PX = 4;         // the box is labelWidth + 8
+const LABEL_H_PX = 13;          // box height, drawn at sy + radius + 4
+const LABEL_GAP_PX = 6;         // breathing room between two boxes
+const LIVE_DOT_PX = 2.6 * 1.6;  // nodeRadius of a degree-0 node, allowing a larger node-size setting
+const Z_WEIGHT = 2;             // rank candidates so a column (y) fills before stepping sideways (z): y survives
+                                // every yaw rotation of the brain, z is foreshortened or collapses entirely
 
-export interface LiveFootprint { y: number; z: number; w: number; h: number; }
-export interface LiveOccupant { label: string; y: number; z: number; }
+export interface LiveOccupant { label: string; x?: number; y: number; z: number; }
+export interface LiveRect { x0: number; y0: number; x1: number; y1: number; }
 
-/** The box a live node + its label occupy on the face plane (model units, centred at y,z). */
-export function liveLabelFootprint(label: string, y: number, z: number): LiveFootprint {
-  const chars = Math.max(3, (label || "").length);
-  const w = ((chars * LABEL_CHAR_PX + LABEL_PAD_PX) / PX_PER_UNIT) * SAFETY;
-  const h = (LABEL_H_PX / PX_PER_UNIT) * SAFETY;
-  return { y, z, w, h };
+type Project = (p: Vec3) => ProjectedPoint;
+let canonProjectors: Project[] | null = null;
+function liveCanonProjectors(): Project[] {
+  if (!canonProjectors) {
+    canonProjectors = LIVE_CANON.rotYs.map((rotY) =>
+      makeProjector({ rotX: LIVE_CANON.rotX, rotY, scale: LIVE_CANON.scale, cx: 0, cy: 0, dist: LIVE_CANON.dist }));
+  }
+  return canonProjectors;
 }
 
-/** True when two footprints would touch on screen (with a small breathing gap). */
-export function liveFootprintsOverlap(a: LiveFootprint, b: LiveFootprint, gap = 0.02): boolean {
-  return Math.abs(a.z - b.z) < (a.w + b.w) / 2 + gap && Math.abs(a.y - b.y) < (a.h + b.h) / 2 + gap;
+/** The screen box a live node + its label cover under `project` (same geometry as overlay-labels draws). */
+export function liveLabelRect(label: string, pos: Vec3, project: Project): LiveRect {
+  const q = project(pos);
+  const halfW = (Math.max(3, (label || "").length) * LABEL_CHAR_PX) / 2 + LABEL_PAD_PX;
+  const radius = LIVE_DOT_PX * Math.max(0.6, q.scale);
+  return { x0: q.sx - halfW, y0: q.sy - radius, x1: q.sx + halfW, y1: q.sy + radius + 4 + LABEL_H_PX };
+}
+
+/** True when two drawn boxes touch (with a small breathing gap). */
+export function liveRectsCollide(a: LiveRect, b: LiveRect, gap = LABEL_GAP_PX): boolean {
+  return a.x0 < b.x1 + gap && b.x0 < a.x1 + gap && a.y0 < b.y1 + gap && b.y0 < a.y1 + gap;
+}
+
+function occupantRects(occupants: LiveOccupant[], faceX: number): LiveRect[][] {
+  const projs = liveCanonProjectors();
+  return occupants.map((o) => projs.map((pr) => liveLabelRect(o.label, { x: o.x ?? faceX, y: o.y, z: o.z }, pr)));
+}
+
+function clearOf(label: string, pos: Vec3, taken: LiveRect[][]): boolean {
+  const projs = liveCanonProjectors();
+  for (let i = 0; i < projs.length; i += 1) {
+    const me = liveLabelRect(label, pos, projs[i]);
+    for (const t of taken) if (liveRectsCollide(me, t[i])) return false;
+  }
+  return true;
+}
+
+/** True when a node at `pos` with this label reads clear of every occupant on screen (canonical framings). */
+export function liveSpotClear(label: string, pos: Vec3, occupants: LiveOccupant[]): boolean {
+  return clearOf(label, pos, occupantRects(occupants, pos.x));
 }
 
 /**
- * Where a NEW live node goes on a temporal side so that its label overlaps nobody: start at the region's seed
- * (top-centre) and walk a lattice of candidate spots outward by distance, returning the first one whose label
- * box is clear of every occupant ("if it would overlap, find a spot nearby that won't"). Occupants are the
- * other live nodes on that side (their pinned positions + labels); a task that ends and fades out leaves the
- * set, so its spot is free for the next task. Deterministic for a given (label, occupants); if the region is
- * genuinely full the bounds widen until a spot exists.
+ * Where a NEW live node goes on a temporal side so that its label overlaps nobody ON SCREEN: start at the
+ * region's seed (top-centre) and walk a lattice of candidate spots outward -- down the column first, then
+ * sideways -- returning the first one whose drawn box is clear of every occupant's box under the canonical
+ * framings ("if it would overlap, find a spot nearby that won't"). Occupants are the other live nodes on that
+ * side (their pinned positions + labels); a task that ends and fades out leaves the set, so its spot is free for
+ * the next task. Deterministic for a given (label, occupants); if the region is genuinely full the bounds widen
+ * until a spot exists.
  */
 export function placeLiveNode(side: "left" | "right", label: string, occupants: LiveOccupant[]): Vec3 {
   const c = LOBE_CENTERS.temporal.c;
   const x = (side === "left" ? -1 : 1) * (Math.abs(c.x) + LIVE_FACE.xOffset);
   const seedY = c.y + LIVE_FACE.seedY;
   const seedZ = c.z;
-  const taken = occupants.map((o) => liveLabelFootprint(o.label, o.y, o.z));
+  const taken = occupantRects(occupants, x);
   for (let grow = 1; grow <= 4; grow += 1) {
     const yLo = c.y + LIVE_FACE.boundsY[0] * grow;
     const yHi = c.y + LIVE_FACE.boundsY[1] * (grow === 1 ? 1 : 1 + (grow - 1) * 0.5);
@@ -270,21 +308,18 @@ export function placeLiveNode(side: "left" | "right", label: string, occupants: 
     for (let y = yHi; y >= yLo - 1e-9; y -= LIVE_FACE.step) {
       for (let z = zLo; z <= zHi + 1e-9; z += LIVE_FACE.step) {
         const dy = y - seedY;
-        const dz = z - seedZ;
+        const dz = (z - seedZ) * Z_WEIGHT;
         cands.push({ y, z, d: dy * dy + dz * dz });
       }
     }
-    // nearest to the seed first; ties: higher up, then nearer the centre line, then left-to-right
+    // nearest to the seed first (column-weighted); ties: higher up, then nearer the centre line, then left-to-right
     cands.sort((a, b) => a.d - b.d || b.y - a.y || Math.abs(a.z) - Math.abs(b.z) || a.z - b.z);
     for (const k of cands) {
-      const me = liveLabelFootprint(label, k.y, k.z);
-      let clear = true;
-      for (const t of taken) { if (liveFootprintsOverlap(me, t)) { clear = false; break; } }
-      if (clear) return { x, y: round4(k.y), z: round4(k.z) };
+      if (clearOf(label, { x, y: k.y, z: k.z }, taken)) return { x, y: round4(k.y), z: round4(k.z) };
     }
   }
   // Unreachable in practice (bounds quadrupled); drop below everything rather than overlap.
-  const lowest = taken.reduce((m, t) => Math.min(m, t.y), seedY);
+  const lowest = occupants.reduce((m, o) => Math.min(m, o.y), seedY);
   return { x, y: round4(lowest - 0.3), z: round4(seedZ) };
 }
 
@@ -331,7 +366,8 @@ export const Brain3D = {
   assignLobePositions,
   liveNodePosition,
   placeLiveNode,
-  liveLabelFootprint,
+  liveLabelRect,
+  liveSpotClear,
   LOBE_CENTERS,
   KIND_TO_LOBE
 };

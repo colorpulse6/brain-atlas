@@ -6,7 +6,7 @@ import { BrainRenderer } from "./renderer.ts";
 import { RenderCore, type BrainRendererOptions, type LiveScreenNode } from "./render-core.ts";
 import { BrainGLRenderer } from "./gl/brain-gl-renderer.ts";
 import type { ActivityState, LiveEntry } from "./activity.ts";
-import { LOBE_CENTERS, placeLiveNode, type LiveOccupant } from "./shape.ts";
+import { LOBE_CENTERS, placeLiveNode, liveSpotClear, type LiveOccupant } from "./shape.ts";
 import { DEFAULT_SETTINGS } from "./settings.ts";
 import type { BrainAtlasSettings, PinnedNodePosition } from "./settings.ts";
 import type { BrainGraph, BrainNode, LobeName } from "./types.ts";
@@ -362,7 +362,7 @@ export class BrainAtlasView extends ItemView {
 
   /**
    * Merge the current live task/agent nodes on top of the vault graph so they render as real nodes (glow,
-   * depth, hover), grid-placed so labels do not overlap. A NEW graph object is produced so the WebGL renderer
+   * depth, hover), placed so their labels do not overlap on screen. A NEW graph object is produced so the WebGL renderer
    * rebuilds its buffers; live glow then animates per-frame via the activity system with no further rebuild.
    */
   private composeGraph(): void {
@@ -386,17 +386,20 @@ export class BrainAtlasView extends ItemView {
       const pos = new Map<string, { x: number; y: number; z: number }>();
       const ordered = [...bySide[side]].sort((a, b) => a.seq - b.seq);
       for (const e of ordered) {
-        if (e.x !== undefined) {
-          pos.set(e.id, { x: e.x, y: e.y as number, z: e.z as number });
-          occupants.push({ label: e.label, y: e.y as number, z: e.z as number });
-        }
+        if (e.x === undefined) continue;
+        const p = { x: e.x, y: e.y as number, z: e.z as number };
+        // A pinned spot is kept only while it still reads clear of the (older) nodes accepted so far: a spot
+        // replayed by the timelapse onto a busy face, or one placed by an older model, is re-placed below.
+        if (!liveSpotClear(e.label, p, occupants)) continue;
+        pos.set(e.id, p);
+        occupants.push({ label: e.label, x: p.x, y: p.y, z: p.z });
       }
       for (const e of ordered) {
         if (pos.has(e.id)) continue;
         const p = placeLiveNode(side, e.label, occupants);
         this.plugin.activity?.setLivePos(e.id, p.x, p.y, p.z); // pin it + record xyz for the timelapse
         pos.set(e.id, p);
-        occupants.push({ label: e.label, y: p.y, z: p.z });
+        occupants.push({ label: e.label, x: p.x, y: p.y, z: p.z });
       }
       for (const entry of bySide[side]) liveNodes.push(this.makeLiveNode(entry, pos.get(entry.id)!));
     }
@@ -884,6 +887,12 @@ export class BrainAtlasView extends ItemView {
   }
 
   private pinNode(node: BrainNode, position: PinnedNodePosition): void {
+    const act = this.plugin.activity;
+    if (node.kind === "workThread" && act && act.liveNodes().some((e) => e.id === node.id)) {
+      // a dragged live node is pinned in the activity state (and the timelapse), never in the vault settings
+      act.setLivePos(node.id, position.x, position.y, position.z);
+      return;
+    }
     this.plugin.settings = {
       ...this.plugin.settings,
       pinnedNodePositions: {
