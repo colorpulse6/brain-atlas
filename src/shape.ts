@@ -213,28 +213,82 @@ export function liveNodePosition(id: string, region: string, side: "left" | "rig
   };
 }
 
-/** Fixed columns per side for the live-task grid; two keeps labels far enough apart to read. */
-export const LIVE_GRID_COLS = 2;
+/** The temporal outer face where live nodes float: x is fixed per side; nodes spread over the (y, z) plane. */
+export const LIVE_FACE = {
+  xOffset: 0.34,   // how far outside the temporal lobe the face sits
+  seedY: 0.35,     // the first task lands this far above the lobe centre (top of the region), the rest fan out
+  boundsY: [-0.85, 0.75] as const,  // face extent relative to the lobe centre (widened if it ever fills)
+  boundsZ: [-1.05, 1.05] as const,
+  step: 0.11       // candidate-lattice pitch: finer than a label, so "nearest free spot" really is nearby
+};
+
+// Label footprint, sized from how overlay-labels draws node labels: 10px JetBrains Mono, 4px pad each side,
+// a 13px box starting radius+4 below the dot. Model units via px-per-unit at zoom 1 (min(w,h)*0.32, ~940px),
+// with a safety factor so labels still read a notch zoomed in.
+const PX_PER_UNIT = 300;
+const LABEL_CHAR_PX = 6.2;
+const LABEL_PAD_PX = 8;
+const LABEL_H_PX = 13 + 5 + 8;
+const SAFETY = 1.35;
+
+export interface LiveFootprint { y: number; z: number; w: number; h: number; }
+export interface LiveOccupant { label: string; y: number; z: number; }
+
+/** The box a live node + its label occupy on the face plane (model units, centred at y,z). */
+export function liveLabelFootprint(label: string, y: number, z: number): LiveFootprint {
+  const chars = Math.max(3, (label || "").length);
+  const w = ((chars * LABEL_CHAR_PX + LABEL_PAD_PX) / PX_PER_UNIT) * SAFETY;
+  const h = (LABEL_H_PX / PX_PER_UNIT) * SAFETY;
+  return { y, z, w, h };
+}
+
+/** True when two footprints would touch on screen (with a small breathing gap). */
+export function liveFootprintsOverlap(a: LiveFootprint, b: LiveFootprint, gap = 0.02): boolean {
+  return Math.abs(a.z - b.z) < (a.w + b.w) / 2 + gap && Math.abs(a.y - b.y) < (a.h + b.h) / 2 + gap;
+}
 
 /**
- * The position of a live node's SLOT on the temporal outer face. `slot` is a stable index the view assigns
- * per side (0,1,2,... reused as tasks end), so a running task never jumps and a new task fills a freed slot.
- * Deterministic (slot -> point), widely spaced (labels don't overlap), and it grows DOWNWARD as slots fill,
- * so new tasks spread out instead of stacking. `side` picks the hemisphere (right = foreground, left = bg).
+ * Where a NEW live node goes on a temporal side so that its label overlaps nobody: start at the region's seed
+ * (top-centre) and walk a lattice of candidate spots outward by distance, returning the first one whose label
+ * box is clear of every occupant ("if it would overlap, find a spot nearby that won't"). Occupants are the
+ * other live nodes on that side (their pinned positions + labels); a task that ends and fades out leaves the
+ * set, so its spot is free for the next task. Deterministic for a given (label, occupants); if the region is
+ * genuinely full the bounds widen until a spot exists.
  */
-export function liveGridPosition(side: "left" | "right", slot: number): Vec3 {
+export function placeLiveNode(side: "left" | "right", label: string, occupants: LiveOccupant[]): Vec3 {
   const c = LOBE_CENTERS.temporal.c;
-  const cols = LIVE_GRID_COLS;
-  const stepY = 0.34;   // generous vertical gap -> labels on different rows never touch
-  const stepZ = 0.60;   // generous horizontal gap between the two columns
-  const col = slot % cols;
-  const row = Math.floor(slot / cols);
-  return {
-    x: (side === "left" ? -1 : 1) * (Math.abs(c.x) + 0.34),
-    y: c.y + 0.55 - row * stepY,                    // slot 0 near the top; each new row drops down
-    z: c.z + (col - (cols - 1) / 2) * stepZ
-  };
+  const x = (side === "left" ? -1 : 1) * (Math.abs(c.x) + LIVE_FACE.xOffset);
+  const seedY = c.y + LIVE_FACE.seedY;
+  const seedZ = c.z;
+  const taken = occupants.map((o) => liveLabelFootprint(o.label, o.y, o.z));
+  for (let grow = 1; grow <= 4; grow += 1) {
+    const yLo = c.y + LIVE_FACE.boundsY[0] * grow;
+    const yHi = c.y + LIVE_FACE.boundsY[1] * (grow === 1 ? 1 : 1 + (grow - 1) * 0.5);
+    const zLo = c.z + LIVE_FACE.boundsZ[0] * grow;
+    const zHi = c.z + LIVE_FACE.boundsZ[1] * grow;
+    const cands: Array<{ y: number; z: number; d: number }> = [];
+    for (let y = yHi; y >= yLo - 1e-9; y -= LIVE_FACE.step) {
+      for (let z = zLo; z <= zHi + 1e-9; z += LIVE_FACE.step) {
+        const dy = y - seedY;
+        const dz = z - seedZ;
+        cands.push({ y, z, d: dy * dy + dz * dz });
+      }
+    }
+    // nearest to the seed first; ties: higher up, then nearer the centre line, then left-to-right
+    cands.sort((a, b) => a.d - b.d || b.y - a.y || Math.abs(a.z) - Math.abs(b.z) || a.z - b.z);
+    for (const k of cands) {
+      const me = liveLabelFootprint(label, k.y, k.z);
+      let clear = true;
+      for (const t of taken) { if (liveFootprintsOverlap(me, t)) { clear = false; break; } }
+      if (clear) return { x, y: round4(k.y), z: round4(k.z) };
+    }
+  }
+  // Unreachable in practice (bounds quadrupled); drop below everything rather than overlap.
+  const lowest = taken.reduce((m, t) => Math.min(m, t.y), seedY);
+  return { x, y: round4(lowest - 0.3), z: round4(seedZ) };
 }
+
+function round4(v: number): number { return Math.round(v * 10000) / 10000; }
 
 function clusterPoint(node: BrainNode, lobe: LobeName, lobeRadius: number): Vec3 {
   const key = `${lobe}:${topFolder(node.path) ?? node.kind}`;
@@ -276,7 +330,8 @@ export const Brain3D = {
   makeProjector,
   assignLobePositions,
   liveNodePosition,
-  liveGridPosition,
+  placeLiveNode,
+  liveLabelFootprint,
   LOBE_CENTERS,
   KIND_TO_LOBE
 };
