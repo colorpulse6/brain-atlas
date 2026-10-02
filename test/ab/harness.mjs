@@ -50,6 +50,76 @@ window._lastGLRenderer = null;
 window._contextLossSession = null;
 
 /**
+ * Resize test session: a live renderer (normal frame loop, no forced frames)
+ * in a container sized like an Obsidian pane, so Playwright can grow the pane
+ * and hide/show it the way a tab switch does.
+ */
+window._resizeSession = null;
+
+/** @param {{ renderer: "canvas2d" | "webgl2", width: number, height: number }} cfg */
+window.resizeSessionStart = function resizeSessionStart(cfg) {
+  const graph = buildFixtureGraph("graphite");
+  assignLobePositions(graph.nodes);
+
+  const container = document.createElement("div");
+  container.style.position = "absolute";
+  container.style.left = "0";
+  container.style.top = "0";
+  container.style.width = `${cfg.width}px`;
+  container.style.height = `${cfg.height}px`;
+  document.body.appendChild(container);
+
+  // Sized only by the .brain-atlas-canvas rule (100% of the container), as in the plugin.
+  const canvas = document.createElement("canvas");
+  canvas.classList.add("brain-atlas-canvas");
+  container.appendChild(canvas);
+
+  const r = cfg.renderer === "webgl2" ? new BrainGLRenderer() : new BrainRenderer();
+  r.start(canvas, () => graph, {
+    idleAutoRotate: false,
+    showLobeLabels: true,
+    enabledLobes: allLobesEnabled(),
+    performancePreset: "smooth",
+    mobileMode: false
+  });
+  r.setDeterministic(true);
+  r.setView({ dpr: 1 });
+  window._resizeSession = { r, canvas, container };
+};
+
+window.resizeSessionSetSize = function resizeSessionSetSize(width, height) {
+  const { container } = window._resizeSession;
+  container.style.width = `${width}px`;
+  container.style.height = `${height}px`;
+};
+
+/** Hide/show the container the way Obsidian hides a background tab. */
+window.resizeSessionSetHidden = function resizeSessionSetHidden(hidden) {
+  window._resizeSession.container.style.display = hidden ? "none" : "";
+};
+
+window.resizeSessionState = function resizeSessionState() {
+  const { r, canvas } = window._resizeSession;
+  const overlay = r instanceof BrainGLRenderer ? r.getOverlayCanvasForTest() : null;
+  return {
+    width: r.width,
+    height: r.height,
+    canvasCss: [canvas.clientWidth, canvas.clientHeight],
+    canvasBacking: [canvas.width, canvas.height],
+    overlayCss: overlay ? [overlay.clientWidth, overlay.clientHeight] : null,
+    looping: r.raf != null || r.frameTimeout != null
+  };
+};
+
+window.resizeSessionStop = function resizeSessionStop() {
+  const s = window._resizeSession;
+  if (!s) return;
+  s.r.stop();
+  s.container.remove();
+  window._resizeSession = null;
+};
+
+/**
  * Start a persistent WebGL renderer session for context-loss testing.
  * Returns the initial rendered image as a PNG data URL (image A).
  * The session lives until contextLossSessionStop() is called.

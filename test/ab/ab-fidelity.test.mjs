@@ -1262,3 +1262,52 @@ test.describe("WebGL context-loss recovery", () => {
     }
   });
 });
+
+test.describe("Canvas follows the pane: grow, then hide and show (tab switch)", () => {
+  let page;
+
+  test.beforeAll(async ({ browser }) => {
+    page = await browser.newPage();
+    await page.goto(`file://${HARNESS_HTML}`);
+    await page.waitForFunction(() => typeof window.resizeSessionStart === "function");
+  });
+
+  test.afterAll(async () => {
+    await page?.close();
+  });
+
+  for (const renderer of ["canvas2d", "webgl2"]) {
+    test(`${renderer}: tracks a growing pane and survives being hidden`, async () => {
+      const state = () => page.evaluate(() => window.resizeSessionState());
+      try {
+        await page.evaluate((r) => window.resizeSessionStart({ renderer: r, width: 400, height: 300 }), renderer);
+        await page.waitForFunction(() => window.resizeSessionState().width === 400);
+
+        // Bug 1: the pane grows after the view opened (window maximised, sidebar collapsed).
+        await page.evaluate(() => window.resizeSessionSetSize(800, 600));
+        await page.waitForFunction(() => window.resizeSessionState().width === 800, null, { timeout: 2000 });
+        let s = await state();
+        expect(s.height).toBe(600);
+        expect(s.canvasCss).toEqual([800, 600]);
+        expect(s.canvasBacking).toEqual([800, 600]);
+        if (renderer === "webgl2") expect(s.overlayCss).toEqual([800, 600]);
+
+        // Hidden tab: keep the last real size and stop drawing.
+        await page.evaluate(() => window.resizeSessionSetHidden(true));
+        await page.waitForFunction(() => !window.resizeSessionState().looping, null, { timeout: 2000 });
+        s = await state();
+        expect([s.width, s.height]).toEqual([800, 600]);
+
+        // Bug 2: back to the tab. The canvas must still fill the pane and the loop must restart.
+        await page.evaluate(() => window.resizeSessionSetHidden(false));
+        await page.waitForFunction(() => window.resizeSessionState().looping, null, { timeout: 2000 });
+        s = await state();
+        expect([s.width, s.height]).toEqual([800, 600]);
+        expect(s.canvasCss).toEqual([800, 600]);
+        if (renderer === "webgl2") expect(s.overlayCss).toEqual([800, 600]);
+      } finally {
+        await page.evaluate(() => window.resizeSessionStop());
+      }
+    });
+  }
+});
