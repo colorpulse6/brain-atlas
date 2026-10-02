@@ -149,3 +149,10 @@ test("WebGL2 renderer overlay is pointer-transparent and sits above the WebGL ca
   // .brain-atlas-root is position:relative so absolute children are contained
   assert.match(stylesSource, /\.brain-atlas-root[\s\S]*?position:\s*relative/);
 });
+
+test("the Motion button in the controls toggles ambient animation and shows its state", () => {
+  assert.match(viewSource, /this\.motionButton = this\.createControlButton\(primary, "Motion", \(\) => this\.toggleMotion\(\)\)/);
+  assert.match(viewSource, /this\.plugin\.settings\.ambientAnimation = !this\.plugin\.settings\.ambientAnimation;/);
+  assert.match(viewSource, /this\.renderer\.setOptions\(\{ ambientAnimation: this\.plugin\.settings\.ambientAnimation \}\)/);
+  assert.match(viewSource, /this\.motionButton\?\.setAttr\("aria-pressed", String\(this\.plugin\.settings\.ambientAnimation\)\)/);
+});

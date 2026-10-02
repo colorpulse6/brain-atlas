@@ -144,6 +144,7 @@ Controls:
 - Shift-drag, Alt-drag or middle-drag to pan.
 - `Reset` (or right-click) resets rotation, zoom and pan.
 - `Labels` toggles all canvas labels.
+- `Motion` toggles ambient animation (the cloud twinkle and the signals between regions), the same as the setting.
 - `All` restores every region.
 - `None` dims every region.
 - `FRO`, `PAR`, `TEM`, `OCC`, `CER`, and `STM` toggle individual brain regions.

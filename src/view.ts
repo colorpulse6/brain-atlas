@@ -55,6 +55,7 @@ export class BrainAtlasView extends ItemView {
   private mergedLiveSig = "";
   private infoButton: HTMLButtonElement | null = null;
   private labelButton: HTMLButtonElement | null = null;
+  private motionButton: HTMLButtonElement | null = null;
   private allButton: HTMLButtonElement | null = null;
   private noneButton: HTMLButtonElement | null = null;
   private lobeButtons: Partial<Record<LobeName, HTMLButtonElement>> = {};
@@ -574,6 +575,8 @@ export class BrainAtlasView extends ItemView {
     const primary = this.controlsEl.createDiv({ cls: "brain-atlas-control-group" });
     this.infoButton = this.createControlButton(primary, "Info", () => this.toggleInfo());
     this.labelButton = this.createControlButton(primary, "Labels", () => this.toggleLabels());
+    this.motionButton = this.createControlButton(primary, "Motion", () => this.toggleMotion());
+    this.motionButton.setAttr("aria-label", "Ambient animation: cloud twinkle and signals between regions");
     this.allButton = this.createControlButton(primary, "All", () => this.setAllRegions(true));
     this.noneButton = this.createControlButton(primary, "None", () => this.setAllRegions(false));
     this.createControlButton(primary, "Reset", () => this.renderer.resetView())
@@ -619,6 +622,8 @@ export class BrainAtlasView extends ItemView {
     this.infoButton?.setAttr("aria-pressed", String(this.showInfo));
     this.labelButton?.toggleClass("is-active", this.plugin.settings.showLobeLabels);
     this.labelButton?.setAttr("aria-pressed", String(this.plugin.settings.showLobeLabels));
+    this.motionButton?.toggleClass("is-active", this.plugin.settings.ambientAnimation);
+    this.motionButton?.setAttr("aria-pressed", String(this.plugin.settings.ambientAnimation));
     const enabledCount = LOBES.filter((lobe) => enabled[lobe]).length;
     this.allButton?.toggleClass("is-active", enabledCount === LOBES.length);
     this.noneButton?.toggleClass("is-active", enabledCount === 0);
@@ -760,6 +765,13 @@ export class BrainAtlasView extends ItemView {
   private toggleLabels(): void {
     this.plugin.settings.showLobeLabels = !this.plugin.settings.showLobeLabels;
     this.renderer.setOptions({ showLobeLabels: this.plugin.settings.showLobeLabels });
+    this.syncOverlays();
+    void this.persistViewSettings();
+  }
+
+  private toggleMotion(): void {
+    this.plugin.settings.ambientAnimation = !this.plugin.settings.ambientAnimation;
+    this.renderer.setOptions({ ambientAnimation: this.plugin.settings.ambientAnimation });
     this.syncOverlays();
     void this.persistViewSettings();
   }
