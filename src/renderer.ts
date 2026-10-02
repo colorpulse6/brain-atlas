@@ -77,9 +77,9 @@ export class BrainRenderer extends RenderCore {
     // Pass: haze (lobe glow gradients, additive).
     if (this.passEnabled("haze")) this.drawLobeHaze(ctx, project, scale, graph, lobeMul);
 
-    // Live activity freezes the twinkle clock at 0 so the brain is still at rest (the WebGL cloud
-    // shader gets the same frozen clock); otherwise the cloud twinkles as before.
-    const twinkleClock = this.options.liveActivity ? 0 : now;
+    // Ambient animation off freezes the twinkle clock at 0 so the brain is still at rest (the WebGL
+    // cloud shader gets the same frozen clock); otherwise the cloud twinkles.
+    const twinkleClock = this.options.ambientAnimation ? now : 0;
     const cloudProj = this.cloud.map((p) => ({
       p,
       pr: project(p),

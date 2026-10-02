@@ -209,6 +209,13 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         .onChange((value) => this.update({ idleAutoRotate: value })));
 
     new Setting(containerEl)
+      .setName("Ambient animation")
+      .setDesc("Twinkle the note cloud and send signal pulses between regions. Turn off for a still brain; with live activity on, only real reads and writes then animate.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.ambientAnimation)
+        .onChange((value) => this.update({ ambientAnimation: value })));
+
+    new Setting(containerEl)
       .setName("Show labels")
       .setDesc("Draw region callouts and note labels on the brain canvas.")
       .addToggle((toggle) => toggle

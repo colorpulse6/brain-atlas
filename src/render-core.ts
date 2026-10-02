@@ -116,11 +116,16 @@ export interface BrainRendererOptions {
   idleAutoRotate: boolean;
   showLobeLabels: boolean;
   /**
-   * Live activity mode (the feature toggle). Off = the classic animated brain: ambient signals and a
-   * twinkling cloud. On = a still brain where only activity animates: each read/write/spawn fires a
-   * signal, the cloud twinkle is frozen, and glowing notes are labelled.
+   * Live activity mode (the feature toggle). On = each read/write/spawn fires a signal to the note it
+   * touched and glowing notes are labelled. Off = no activity signals or labels.
    */
   liveActivity: boolean;
+  /**
+   * The cloud twinkle and the ambient signals between regions. Independent of live activity; off
+   * freezes the twinkle clock and stops ambient signals, so with live activity on only real reads
+   * and writes animate.
+   */
+  ambientAnimation: boolean;
   /** Multiplies every node's drawn radius (graph-view "node size"). 1 = default. */
   nodeSizeScale: number;
   /** Multiplies the drawn edge/link width (graph-view "link thickness"). 1 = default. */
@@ -170,6 +175,7 @@ export abstract class RenderCore {
     idleAutoRotate: true,
     showLobeLabels: true,
     liveActivity: false,
+    ambientAnimation: true,
     nodeSizeScale: 1,
     linkThickness: 1,
     enabledLobes: allLobesEnabled(),
@@ -773,13 +779,13 @@ export abstract class RenderCore {
   private signalHubGraph: BrainGraph | null = null;
 
   /**
-   * Live activity off: ambient signals travel a random inter-lobe edge every 900 ms.
-   * Live activity on: signals are ACTION-DRIVEN instead. Each read/write/spawn recorded by ActivityState fires
-   * one signal from the brain's routing hub to the touched node, so every action visibly does something and the
-   * brain sits still when nothing is happening. Deterministic mode (the A/B harness) never spawns.
+   * Ambient animation on: ambient signals travel a random inter-lobe edge every 900 ms.
+   * Live activity on: each read/write/spawn recorded by ActivityState also fires one signal from the brain's
+   * routing hub to the touched node, so every action visibly does something. With ambient animation off as well,
+   * the brain sits still when nothing is happening. Deterministic mode (the A/B harness) never spawns.
    */
   protected spawnSignals(now: number, graph: BrainGraph, interLobeEdges: BrainEdge[]): void {
-    if (!this.deterministic && !this.options.liveActivity && interLobeEdges.length && now - this.lastSpawn > 900) {
+    if (!this.deterministic && this.options.ambientAnimation && interLobeEdges.length && now - this.lastSpawn > 900) {
       this.lastSpawn = now;
       const edge = interLobeEdges[Math.floor(Math.random() * interLobeEdges.length)];
       const forward = Math.random() < 0.5;

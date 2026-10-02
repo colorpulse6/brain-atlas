@@ -105,6 +105,9 @@ test("live activity is opt-in and the classic defaults are unchanged", () => {
   assert.equal(normalizeSettings(null).activityEnabled, false);
   assert.equal(normalizeSettings({ activityEnabled: true }).activityEnabled, true);
   assert.equal(DEFAULT_SETTINGS.idleAutoRotate, true);
+  assert.equal(DEFAULT_SETTINGS.ambientAnimation, true, "twinkle and ambient signals stay on by default");
+  assert.equal(normalizeSettings({ ambientAnimation: false }).ambientAnimation, false);
+  assert.equal(normalizeSettings({ ambientAnimation: "no" }).ambientAnimation, true, "a non-boolean falls back to the default");
   assert.equal(normalizeSettings({ activityPort: 80 }).activityPort, DEFAULT_SETTINGS.activityPort, "privileged port rejected");
   assert.equal(normalizeSettings({ activityReadColor: "green" }).activityReadColor, DEFAULT_SETTINGS.activityReadColor);
 });

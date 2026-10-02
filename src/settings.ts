@@ -33,6 +33,8 @@ export interface BrainAtlasSettings {
   nodeCap: number;
   edgeCap: number;
   idleAutoRotate: boolean;
+  /** Cloud twinkle and ambient signals between regions. */
+  ambientAnimation: boolean;
   showLobeLabels: boolean;
   showLegendChip: boolean;
   enabledLobes: LobeVisibility;
@@ -109,6 +111,7 @@ export const DEFAULT_SETTINGS: BrainAtlasSettings = {
   nodeCap: 1500,
   edgeCap: 4000,
   idleAutoRotate: true,
+  ambientAnimation: true,
   showLobeLabels: true,
   showLegendChip: true,
   enabledLobes: allLobesEnabled(),
@@ -164,6 +167,7 @@ export function normalizeSettings(input: Partial<BrainAtlasSettings> | null | un
     nodeSizeScale: normalizeNumber(input?.nodeSizeScale, 0.4, 3) ?? DEFAULT_SETTINGS.nodeSizeScale,
     layoutSpread: normalizeNumber(input?.layoutSpread, 0.5, 2.5) ?? DEFAULT_SETTINGS.layoutSpread,
     linkThickness: normalizeNumber(input?.linkThickness, 0.4, 3) ?? DEFAULT_SETTINGS.linkThickness,
+    ambientAnimation: typeof input?.ambientAnimation === "boolean" ? input.ambientAnimation : DEFAULT_SETTINGS.ambientAnimation,
     activityEnabled: typeof input?.activityEnabled === "boolean" ? input.activityEnabled : DEFAULT_SETTINGS.activityEnabled,
     activityPort: normalizePort(input?.activityPort) ?? DEFAULT_SETTINGS.activityPort,
     activityReadColor: normalizeHexColor(input?.activityReadColor) ?? DEFAULT_SETTINGS.activityReadColor,

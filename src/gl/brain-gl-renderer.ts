@@ -925,8 +925,8 @@ export class BrainGLRenderer extends RenderCore {
     gl.uniform1f(cp.uniforms.uCx, proj.cx);
     gl.uniform1f(cp.uniforms.uCy, proj.cy);
     gl.uniform1f(cp.uniforms.uDist, proj.dist);
-    // Live activity freezes the twinkle clock at 0 (a still brain), the same as Canvas2D.
-    gl.uniform1f(cp.uniforms.uTime, this.options.liveActivity ? 0 : now);
+    // Ambient animation off freezes the twinkle clock at 0 (a still brain), the same as Canvas2D.
+    gl.uniform1f(cp.uniforms.uTime, this.options.ambientAnimation ? now : 0);
     gl.uniform1f(cp.uniforms.uHemisphere, hemisphere);
     gl.uniform1fv(cp.uniforms["uLobeMul[0]"], lobeMul);
     gl.uniform3fv(cp.uniforms["uLobeColors[0]"], lobeColors);

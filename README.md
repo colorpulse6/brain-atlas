@@ -54,7 +54,7 @@ This release focuses on making Brain Atlas work with real vault taxonomies inste
 
 Off by default. Turn it on in `Settings -> Brain Atlas -> Live activity`. Desktop only.
 
-When it is on, Brain Atlas starts a small HTTP listener on `127.0.0.1` (this computer only, default port `8766`) and lights up notes as an external tool works in the vault. The brain then holds still: the background signals and twinkle stop, and each event fires a signal to the note it touched. Three cards appear under the controls: `Active` (running commands, terminals and agents), `Shells` (background shells) and `History` (the last 200 events, kept in memory only).
+When it is on, Brain Atlas starts a small HTTP listener on `127.0.0.1` (this computer only, default port `8766`) and lights up notes as an external tool works in the vault. Each event fires a signal to the note it touched. Turn off `Ambient animation` for a still brain where only these signals move. Three cards appear under the controls: `Active` (running commands, terminals and agents), `Shells` (background shells) and `History` (the last 200 events, kept in memory only).
 
 Note reads and writes use the payload Claude Code passes to its hooks:
 
@@ -156,6 +156,7 @@ Settings:
 - `Classification report` explains how notes were grouped and suggests mappings for unknown frontmatter values.
 - `Frontmatter value mappings` let existing vault metadata drive categories without renaming fields or values.
 - `Folder region mappings` help folder-heavy vaults spread notes across anatomical regions.
+- `Ambient animation` (on by default) twinkles the note cloud and sends signal pulses between regions. Turn it off for a still brain.
 - `Node size`, `Layout spread` and `Link thickness` adjust the drawing. All three default to 1, the standard look.
 - `Live activity` (off by default) lights up notes as Claude Code reads and writes them. See "Live activity (Claude Code)".
 

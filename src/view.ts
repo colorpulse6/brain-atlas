@@ -190,6 +190,7 @@ export class BrainAtlasView extends ItemView {
       idleAutoRotate: this.plugin.settings.idleAutoRotate,
       showLobeLabels: this.plugin.settings.showLobeLabels,
       liveActivity: this.plugin.settings.activityEnabled,
+      ambientAnimation: this.plugin.settings.ambientAnimation,
       nodeSizeScale: this.plugin.settings.nodeSizeScale,
       linkThickness: this.plugin.settings.linkThickness,
       enabledLobes: this.plugin.settings.enabledLobes,
