@@ -4,6 +4,7 @@ import type { BrainGraph, BrainNode, LobeName, ProjectedPoint, Vec3 } from "./ty
 import type { SurfacePoint } from "./shape.ts";
 import { buildBrainCloud } from "./cloud.ts";
 import { RenderCore, type ProjectedNode, type ProjectedEdge } from "./render-core.ts";
+import { lerpHexColor } from "./activity.ts";
 import {
   drawLobeLabels as sharedDrawLobeLabels,
   drawNodeLabels as sharedDrawNodeLabels,
@@ -49,8 +50,7 @@ export class BrainRenderer extends RenderCore {
 
     const pal = graph.activePalette;
     const scale = Math.min(this.width, this.height) * 0.32 * this.zoom;
-    const cx = this.width / 2;
-    const cy = this.height / 2 - this.height * 0.04;
+    const { cx, cy } = this.viewCenter();
     const project = Brain3D.makeProjector({ rotX: this.rot.x, rotY: this.rot.y, scale, cx, cy, dist: 3.4 });
     const lobeStats = this.getLobeStats();
     const interLobeEdges = graph.edges.filter((edge) => {
@@ -77,10 +77,13 @@ export class BrainRenderer extends RenderCore {
     // Pass: haze (lobe glow gradients, additive).
     if (this.passEnabled("haze")) this.drawLobeHaze(ctx, project, scale, graph, lobeMul);
 
+    // Ambient animation off freezes the twinkle clock at 0 so the brain is still at rest (the WebGL
+    // cloud shader gets the same frozen clock); otherwise the cloud twinkles.
+    const twinkleClock = this.options.ambientAnimation ? now : 0;
     const cloudProj = this.cloud.map((p) => ({
       p,
       pr: project(p),
-      tw: 0.65 + 0.35 * Math.sin(now * 0.0005 * (p.twFreq ?? 1) + (p.twPhase ?? 0))
+      tw: 0.65 + 0.35 * Math.sin(twinkleClock * 0.0005 * (p.twFreq ?? 1) + (p.twPhase ?? 0))
     }));
     const nodeProjs = graph.nodes
       .filter((node) => node._3dLobe)
@@ -136,10 +139,11 @@ export class BrainRenderer extends RenderCore {
     // Pass: signals (additive particle trails).
     if (this.passEnabled("signals")) this.drawSignals(ctx, now, project, lobeMul);
 
-    // Pass: labels (lobe labels + node labels).
+    // Pass: labels. The label setting gates both lobe labels and node labels; with live activity on,
+    // glowing notes and live nodes are labelled even when the automatic labels are off.
     if (this.passEnabled("labels")) {
       if (this.options.showLobeLabels) this.drawLobeLabels(ctx, project, graph, lobeStats, lobeMul);
-      if (this.options.showLobeLabels) this.drawNodeLabels(ctx, nodeProjs, graph, lobeMul);
+      if (this.options.showLobeLabels || this.options.liveActivity) this.drawNodeLabels(ctx, nodeProjs, graph, lobeMul);
     }
 
     // Pass: compass (orientation gizmo).
@@ -246,7 +250,7 @@ export class BrainRenderer extends RenderCore {
     const baseA = (isFocus ? (isFar ? 0.55 : 0.85)
       : isHover ? (isFar ? 0.25 : 0.40)
         : (isFar ? 0.05 : 0.13)) * lobeM * interBoost;
-    ctx.lineWidth = isFocus ? 1.3 : (isFar ? 0.55 : 0.7);
+    ctx.lineWidth = (isFocus ? 1.3 : (isFar ? 0.55 : 0.7)) * (this.options.linkThickness || 1);
     for (let index = 0; index < edge.pts.length - 1; index += 1) {
       const p0 = edge.pts[index];
       const p1 = edge.pts[index + 1];
@@ -270,22 +274,34 @@ export class BrainRenderer extends RenderCore {
     const node = projected.node;
     const isHover = node.id === this.hoverId;
     const isFocus = node.id === this.focusId;
-    const radius = nodeRadius(node) * Math.max(0.55, projected.scale) * (isHover ? 1.18 : isFocus ? 1.25 : 1);
+    // Live activity: swell the radius and lerp the color toward the read/write color by the level.
+    const act = this.activity?.get(node.id);
+    const level = act ? act.level : 0;
+    const swell = act ? 1 + this.activity!.options.swell * level : 1;
+    // A live task node keeps its own kind/agent color while it works (just swells + glows); a read/write
+    // glow lerps the note's color toward green/red.
+    const color = act
+      ? (act.live ? node.color : lerpHexColor(node.color, act.kind === "write" ? this.activity!.options.writeColor : this.activity!.options.readColor, level))
+      : node.color;
+    const radius = nodeRadius(node) * (this.options.nodeSizeScale || 1) * Math.max(0.55, projected.scale) * (isHover ? 1.18 : isFocus ? 1.25 : 1) * swell;
     const fade = Math.max(0.32, 1 - projected.depth * 0.75);
     const dim = node.status === "archived" ? 0.30 : node.status === "dormantRelevant" ? 0.55 : 1;
-    const alpha = fade * dim * lobeMul(node._lobeName);
+    const lobeM = lobeMul(node._lobeName);
+    // The glow boost is scaled by the region multiplier too, so a hidden or dimmed region stays dim
+    // (as in WebGL, where uLobeMul scales the whole node alpha).
+    const alpha = act ? Math.min(1, lobeM * (fade * dim + level * 0.5)) : fade * dim * lobeM;
     if (alpha < 0.05) return;
 
     const haloRadius = radius * 3.6 * graph.CHAOS.halo;
     const halo = ctx.createRadialGradient(projected.sx, projected.sy, 0, projected.sx, projected.sy, haloRadius);
-    halo.addColorStop(0, hexA(node.color, 0.32 * alpha * graph.CHAOS.bloom));
-    halo.addColorStop(1, hexA(node.color, 0));
+    halo.addColorStop(0, hexA(color, Math.min(1, (0.32 + 0.4 * level) * alpha * graph.CHAOS.bloom)));
+    halo.addColorStop(1, hexA(color, 0));
     ctx.fillStyle = halo;
     ctx.beginPath();
     ctx.arc(projected.sx, projected.sy, haloRadius, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.fillStyle = hexA(node.color, Math.min(1, alpha * 0.93));
+    ctx.fillStyle = hexA(color, Math.min(1, alpha * 0.93));
     ctx.beginPath();
     ctx.arc(projected.sx, projected.sy, radius, 0, Math.PI * 2);
     ctx.fill();
@@ -378,7 +394,9 @@ export class BrainRenderer extends RenderCore {
       focusId: this.focusId,
       zoom: this.zoom,
       width: this.width,
-      mobile: this.effectivePerformancePreset() === "mobile"
+      mobile: this.effectivePerformancePreset() === "mobile",
+      activeIds: this.options.liveActivity ? this.activeNoteIds() : undefined,
+      showAll: this.options.showLobeLabels
     });
   }
 

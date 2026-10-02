@@ -305,8 +305,24 @@ test.describe("WebGL cloud matches Canvas2D", () => {
     // z = 0, exercising the FAR (z>0) and NEAR (z<=0) hemisphere passes.
     { palette: "graphite", rot: { x: 0.3, y: 1.2 }, overrides: {} },
     // Highlight: drives uLobeMul to 1 for "frontal", 0.16 for the rest.
-    { palette: "graphite", rot: { x: -0.15, y: 0.55 }, overrides: { highlightLobe: "frontal" } }
+    { palette: "graphite", rot: { x: -0.15, y: 0.55 }, overrides: { highlightLobe: "frontal" } },
+    // Ambient animation off: both renderers freeze the twinkle clock at 0 (a still brain).
+    { palette: "graphite", rot: { x: -0.15, y: 0.55 }, overrides: { ambientAnimation: false } },
+    // Live activity on with ambient animation on: the cloud still twinkles, the same in both renderers.
+    { palette: "graphite", rot: { x: -0.15, y: 0.55 }, overrides: { liveActivity: true } }
   ];
+
+  test("ambient animation off freezes the twinkle; live activity alone does not", async () => {
+    const base = { renderer: "canvas2d", palette: "graphite", rot: { x: -0.15, y: 0.55 }, zoom: 1, dpr: 1, now: 1000, width: 480, height: 360, enabledPasses: ["background", "haze", "cloud"] };
+    const animated = decodePng(await renderFrame(page, base));
+    const still = decodePng(await renderFrame(page, { ...base, ambientAnimation: false }));
+    // The twinkle is a subtle alpha change on tiny dots, so compare exactly (threshold 0). Measured: ~6600 px.
+    const differing = pixelmatch(animated.data, still.data, null, animated.width, animated.height, { threshold: 0 });
+    expect(differing, "ambientAnimation: false had no visible effect on the cloud").toBeGreaterThan(1000);
+    const live = decodePng(await renderFrame(page, { ...base, liveActivity: true }));
+    const liveDiffering = pixelmatch(animated.data, live.data, null, animated.width, animated.height, { threshold: 0 });
+    expect(liveDiffering, "live activity alone changed the cloud").toBe(0);
+  });
 
   for (const { palette, rot, overrides } of CLOUD_CASES) {
     const caseName = [

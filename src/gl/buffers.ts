@@ -623,9 +623,10 @@ export function buildCloudBuffer(cloud: SurfacePoint[]): CloudBuffer {
  * nodeRadius formula: hub → 6.5; else 2.6 + min(3.4, degree * 0.42).
  * Status encoding: 0=active, 1=dormantRelevant, 2=archived.
  */
-export function buildNodeBuffer(nodes: BrainNode[]): NodeBuffer {
+export function buildNodeBuffer(nodes: BrainNode[], sizeScale = 1): NodeBuffer {
   const valid = nodes.filter((n) => !!n._3dLobe);
   const count = valid.length;
+  const scale = Math.max(0.4, Math.min(3, sizeScale));
 
   const positions = new Float32Array(count * 3);
   const radius    = new Float32Array(count);
@@ -643,7 +644,7 @@ export function buildNodeBuffer(nodes: BrainNode[]): NodeBuffer {
     positions[i * 3 + 1] = node._3dLobe!.y;
     positions[i * 3 + 2] = node._3dLobe!.z;
 
-    radius[i] = nodeRadius(node);
+    radius[i] = nodeRadius(node) * scale;
     hub[i] = node.hub ? 1 : 0;
     status[i] = statusCode(node.status);
     lobeIndex[i] = LOBE_INDEX[lobe] ?? 1;

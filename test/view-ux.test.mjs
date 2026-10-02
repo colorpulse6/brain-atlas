@@ -149,3 +149,25 @@ test("WebGL2 renderer overlay is pointer-transparent and sits above the WebGL ca
   // .brain-atlas-root is position:relative so absolute children are contained
   assert.match(stylesSource, /\.brain-atlas-root[\s\S]*?position:\s*relative/);
 });
+
+test("the Motion button in the controls toggles ambient animation and shows its state", () => {
+  assert.match(viewSource, /this\.motionButton = this\.createControlButton\(primary, "Motion", \(\) => this\.toggleMotion\(\)\)/);
+  assert.match(viewSource, /this\.plugin\.settings\.ambientAnimation = !this\.plugin\.settings\.ambientAnimation;/);
+  assert.match(viewSource, /this\.renderer\.setOptions\(\{ ambientAnimation: this\.plugin\.settings\.ambientAnimation \}\)/);
+  assert.match(viewSource, /this\.motionButton\?\.setAttr\("aria-pressed", String\(this\.plugin\.settings\.ambientAnimation\)\)/);
+});
+
+test("the Layout & Display card puts node size, layout spread and link thickness in the view", () => {
+  assert.match(viewSource, /this\.makeCard\(this\.dockEl, "config", "Layout & Display", !this\.plugin\.settings\.layoutPanelOpen\)/);
+  for (const key of ["nodeSizeScale", "layoutSpread", "linkThickness"]) {
+    assert.match(viewSource, new RegExp(`addConfigSlider\\(body, "${key}"`), `${key} slider`);
+  }
+  // reset restores all three defaults and rebuilds; the panel follows changes made in Settings
+  assert.match(viewSource, /this\.plugin\.settings\.layoutSpread = DEFAULT_SETTINGS\.layoutSpread;/);
+  assert.match(viewSource, /private syncConfigPanel\(\): void/);
+  assert.match(viewSource, /this\.syncConfigPanel\(\);/);
+  // the live cards are still hidden unless live activity is on; the dock itself is always there
+  assert.match(viewSource, /card\.toggleClass\("is-hidden", !this\.plugin\.settings\.activityEnabled\)/);
+  assert.match(stylesSource, /\.brain-atlas-card\.is-hidden \{\s*display: none;/);
+  assert.doesNotMatch(stylesSource, /brain-atlas-live-dock/);
+});

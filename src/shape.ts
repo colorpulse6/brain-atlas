@@ -140,7 +140,25 @@ export function makeProjector(options: {
   };
 }
 
-export function assignLobePositions(nodes: BrainNode[]): void {
+/**
+ * Place every node inside its lobe. `spread` (clustered < 1 < spread) fans notes out WITHIN their own region.
+ * spread = 1 (the default) is the original layout, unchanged. Above 1, two things keep the spread even and
+ * "relative to the section":
+ *   - the per-node scatter scales by `spread` and blends in the region's population (cube root, for constant
+ *     density), so a 400-note region opens up proportionally more than a 5-note one instead of staying a tight ball;
+ *   - the folder-cluster offset barely moves with `spread`, so clusters stay inside their lobe rather than
+ *     flinging outward (which read as "spreading toward the camera" once perspective magnified the near ones).
+ */
+export function assignLobePositions(nodes: BrainNode[], spread = 1): void {
+  const s = Math.max(0.5, Math.min(2.5, spread));
+  // Per-lobe population, so denser sections spread proportionally.
+  const counts: Record<string, number> = {};
+  for (const node of nodes) {
+    const lobe = node._lobeName ?? KIND_TO_LOBE[node.kind] ?? "parietal";
+    counts[lobe] = (counts[lobe] ?? 0) + 1;
+  }
+  const clusterScale = 1 + (s - 1) * 0.35; // clusters stay in-section; spacing mostly opens up the scatter
+  const densityMix = Math.max(0, Math.min(1, (s - 1) / 0.5)); // 0 at spread <= 1, full by spread 1.5
   for (const node of nodes) {
     const h = stableHash(node.id);
     const r1 = (h & 0xffff) / 0xffff;
@@ -150,9 +168,10 @@ export function assignLobePositions(nodes: BrainNode[]): void {
     const lobe = node._lobeName ?? KIND_TO_LOBE[node.kind] ?? "parietal";
     const center = LOBE_CENTERS[lobe];
     const cluster = clusterPoint(node, lobe, center.r);
+    const density = Math.max(0.7, Math.min(1.9, Math.cbrt((counts[lobe] ?? 1) / 36)));
     const u = r1 * Math.PI * 2;
     const v = Math.acos(2 * r2 - 1);
-    const radius = center.r * (node.hub ? 0.08 : 0.08 + r3 * 0.13);
+    const radius = center.r * (node.hub ? 0.08 : 0.08 + r3 * 0.13) * s * (1 + (density - 1) * densityMix);
     const dx = radius * Math.sin(v) * Math.cos(u);
     const dy = radius * Math.sin(v) * Math.sin(u);
     const dz = radius * Math.cos(v);
@@ -160,13 +179,153 @@ export function assignLobePositions(nodes: BrainNode[]): void {
     if (center.mirror && r1 > 0.5) cx = -cx;
 
     node._3dLobe = {
-      x: cx + cluster.x + dx,
-      y: center.c.y + cluster.y + dy,
-      z: center.c.z + cluster.z + dz
+      x: cx + cluster.x * clusterScale + dx,
+      y: center.c.y + cluster.y * clusterScale + dy,
+      z: center.c.z + cluster.z * clusterScale + dz
     };
     node._lobeName = lobe;
   }
 }
+
+/**
+ * A deterministic 3D position for a transient live node in `region`. `side` picks a hemisphere for a
+ * mirrored region (temporal): "right" (+x) for live/background tasks, "left" (-x) for deployed workflow
+ * agents, "auto" hashes. Floated a little outside the note cluster so it reads as "hovering in" the region.
+ */
+export function liveNodePosition(id: string, region: string, side: "left" | "right" | "auto" = "auto"): Vec3 {
+  const lobe = (LOBE_CENTERS[region as LobeName] ? region : "temporal") as LobeName;
+  const center = LOBE_CENTERS[lobe];
+  const h = stableHash("live:" + id);
+  const r1 = (h & 0xffff) / 0xffff;
+  const r2 = ((h >>> 16) & 0xffff) / 0xffff;
+  const u = r1 * Math.PI * 2;
+  const v = Math.acos(2 * r2 - 1);
+  const radius = center.r * 1.15;
+  let cx = center.c.x;
+  if (center.mirror) {
+    const mag = Math.abs(center.c.x);
+    if (side === "left") cx = -mag;
+    else if (side === "right") cx = mag;
+    else cx = r1 > 0.5 ? -mag : mag;
+  }
+  return {
+    x: cx + radius * Math.sin(v) * Math.cos(u),
+    y: center.c.y + radius * Math.sin(v) * Math.sin(u),
+    z: center.c.z + radius * Math.cos(v)
+  };
+}
+
+/** The temporal outer face where live nodes float: x is fixed per side; nodes spread over the (y, z) plane. */
+export const LIVE_FACE = {
+  xOffset: 0.34,   // how far outside the temporal lobe the face sits
+  seedY: 0.35,     // the first task lands this far above the lobe centre (top of the region), the rest fan out
+  boundsY: [-0.85, 0.75] as const,  // face extent relative to the lobe centre (widened if it ever fills)
+  boundsZ: [-1.05, 1.05] as const,
+  step: 0.11       // candidate-lattice pitch: finer than a label, so "nearest free spot" really is nearby
+};
+
+// Where a spot is judged: ON SCREEN. Labels are drawn in screen pixels (10px JetBrains Mono, 4px pad, a 13px box
+// radius+4 below the dot), so two nodes that are far apart on the face plane can still collide once the camera
+// foreshortens the face (at the reset framing the face's z axis shows at ~half size). Placement therefore projects
+// every candidate with the renderer's RESET framing (rotX -0.15, rotY 0.55, dist 3.4) at a deliberately small pane
+// (200 px/unit = a ~625px pane at zoom 1) and with a second, flatter framing (rotY 0.3, the brain turned toward
+// the front), and accepts a spot only when its drawn box is clear of every occupant's box in both. The camera is
+// canonical, not live, so placement stays deterministic: pinned spots never move because the
+// user rotated or resized the view.
+export const LIVE_CANON = { rotX: -0.15, rotYs: [0.55, 0.3] as const, dist: 3.4, scale: 200 };
+const LABEL_CHAR_PX = 6.2;      // 10px JetBrains Mono advance per character
+const LABEL_PAD_PX = 4;         // the box is labelWidth + 8
+const LABEL_H_PX = 13;          // box height, drawn at sy + radius + 4
+const LABEL_GAP_PX = 6;         // breathing room between two boxes
+const LIVE_DOT_PX = 2.6 * 1.6;  // nodeRadius of a degree-0 node, allowing a larger node-size setting
+const Z_WEIGHT = 2;             // rank candidates so a column (y) fills before stepping sideways (z): y survives
+                                // every yaw rotation of the brain, z is foreshortened or collapses entirely
+
+export interface LiveOccupant { label: string; x?: number; y: number; z: number; }
+export interface LiveRect { x0: number; y0: number; x1: number; y1: number; }
+
+type Project = (p: Vec3) => ProjectedPoint;
+let canonProjectors: Project[] | null = null;
+function liveCanonProjectors(): Project[] {
+  if (!canonProjectors) {
+    canonProjectors = LIVE_CANON.rotYs.map((rotY) =>
+      makeProjector({ rotX: LIVE_CANON.rotX, rotY, scale: LIVE_CANON.scale, cx: 0, cy: 0, dist: LIVE_CANON.dist }));
+  }
+  return canonProjectors;
+}
+
+/** The screen box a live node + its label cover under `project` (same geometry as overlay-labels draws). */
+export function liveLabelRect(label: string, pos: Vec3, project: Project): LiveRect {
+  const q = project(pos);
+  const halfW = (Math.max(3, (label || "").length) * LABEL_CHAR_PX) / 2 + LABEL_PAD_PX;
+  const radius = LIVE_DOT_PX * Math.max(0.6, q.scale);
+  return { x0: q.sx - halfW, y0: q.sy - radius, x1: q.sx + halfW, y1: q.sy + radius + 4 + LABEL_H_PX };
+}
+
+/** True when two drawn boxes touch (with a small breathing gap). */
+export function liveRectsCollide(a: LiveRect, b: LiveRect, gap = LABEL_GAP_PX): boolean {
+  return a.x0 < b.x1 + gap && b.x0 < a.x1 + gap && a.y0 < b.y1 + gap && b.y0 < a.y1 + gap;
+}
+
+function occupantRects(occupants: LiveOccupant[], faceX: number): LiveRect[][] {
+  const projs = liveCanonProjectors();
+  return occupants.map((o) => projs.map((pr) => liveLabelRect(o.label, { x: o.x ?? faceX, y: o.y, z: o.z }, pr)));
+}
+
+function clearOf(label: string, pos: Vec3, taken: LiveRect[][]): boolean {
+  const projs = liveCanonProjectors();
+  for (let i = 0; i < projs.length; i += 1) {
+    const me = liveLabelRect(label, pos, projs[i]);
+    for (const t of taken) if (liveRectsCollide(me, t[i])) return false;
+  }
+  return true;
+}
+
+/** True when a node at `pos` with this label reads clear of every occupant on screen (canonical framings). */
+export function liveSpotClear(label: string, pos: Vec3, occupants: LiveOccupant[]): boolean {
+  return clearOf(label, pos, occupantRects(occupants, pos.x));
+}
+
+/**
+ * Where a NEW live node goes on a temporal side so that its label overlaps nobody ON SCREEN: start at the
+ * region's seed (top-centre) and walk a lattice of candidate spots outward -- down the column first, then
+ * sideways -- returning the first one whose drawn box is clear of every occupant's box under the canonical
+ * framings ("if it would overlap, find a spot nearby that won't"). Occupants are the other live nodes on that
+ * side (their pinned positions + labels); a task that ends and fades out leaves the set, so its spot is free for
+ * the next task. Deterministic for a given (label, occupants); if the region is genuinely full the bounds widen
+ * until a spot exists.
+ */
+export function placeLiveNode(side: "left" | "right", label: string, occupants: LiveOccupant[]): Vec3 {
+  const c = LOBE_CENTERS.temporal.c;
+  const x = (side === "left" ? -1 : 1) * (Math.abs(c.x) + LIVE_FACE.xOffset);
+  const seedY = c.y + LIVE_FACE.seedY;
+  const seedZ = c.z;
+  const taken = occupantRects(occupants, x);
+  for (let grow = 1; grow <= 4; grow += 1) {
+    const yLo = c.y + LIVE_FACE.boundsY[0] * grow;
+    const yHi = c.y + LIVE_FACE.boundsY[1] * (grow === 1 ? 1 : 1 + (grow - 1) * 0.5);
+    const zLo = c.z + LIVE_FACE.boundsZ[0] * grow;
+    const zHi = c.z + LIVE_FACE.boundsZ[1] * grow;
+    const cands: Array<{ y: number; z: number; d: number }> = [];
+    for (let y = yHi; y >= yLo - 1e-9; y -= LIVE_FACE.step) {
+      for (let z = zLo; z <= zHi + 1e-9; z += LIVE_FACE.step) {
+        const dy = y - seedY;
+        const dz = (z - seedZ) * Z_WEIGHT;
+        cands.push({ y, z, d: dy * dy + dz * dz });
+      }
+    }
+    // nearest to the seed first (column-weighted); ties: higher up, then nearer the centre line, then left-to-right
+    cands.sort((a, b) => a.d - b.d || b.y - a.y || Math.abs(a.z) - Math.abs(b.z) || a.z - b.z);
+    for (const k of cands) {
+      if (clearOf(label, { x, y: k.y, z: k.z }, taken)) return { x, y: round4(k.y), z: round4(k.z) };
+    }
+  }
+  // Unreachable in practice (bounds quadrupled); drop below everything rather than overlap.
+  const lowest = occupants.reduce((m, o) => Math.min(m, o.y), seedY);
+  return { x, y: round4(lowest - 0.3), z: round4(seedZ) };
+}
+
+function round4(v: number): number { return Math.round(v * 10000) / 10000; }
 
 function clusterPoint(node: BrainNode, lobe: LobeName, lobeRadius: number): Vec3 {
   const key = `${lobe}:${topFolder(node.path) ?? node.kind}`;
@@ -207,6 +366,10 @@ export const Brain3D = {
   lobeFor,
   makeProjector,
   assignLobePositions,
+  liveNodePosition,
+  placeLiveNode,
+  liveLabelRect,
+  liveSpotClear,
   LOBE_CENTERS,
   KIND_TO_LOBE
 };

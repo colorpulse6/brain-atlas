@@ -368,6 +368,7 @@ uniform float uCx;
 uniform float uCy;
 uniform float uDist;       // 3.4
 uniform float uIsFar;      // +1.0 = far pass (mean z > 0), 0.0 = near pass
+uniform float uEdgeScale;  // link-thickness multiplier (graph-view "link thickness")
 uniform float uLobeMul[6]; // lobeVisibilityMultiplier per lobe
 uniform float uFocusNodeIndex; // node index of focus node, or -1
 uniform float uHoverNodeIndex; // node index of hover node, or -1
@@ -423,7 +424,7 @@ void main() {
   }
   baseA *= lobeM * interBoost;
 
-  float lineWidthCss = isFocus ? 1.3 : (isFar ? 0.55 : 0.7);
+  float lineWidthCss = (isFocus ? 1.3 : (isFar ? 0.55 : 0.7)) * uEdgeScale;
 
   // FLAT per-segment alpha (stair-step): avg of the segment's two endpoint depths.
   // At the provoking vertex (tIdx k+1) aPosition = p1 (segment END), aSegStartRef = p0.

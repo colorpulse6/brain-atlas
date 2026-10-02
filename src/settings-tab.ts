@@ -1,12 +1,15 @@
-import { PluginSettingTab, Setting } from "obsidian";
+import { Notice, PluginSettingTab, Setting, type TextComponent } from "obsidian";
 import type BrainAtlasPlugin from "../main.ts";
 import { normalizeKind } from "./classify.ts";
 import { buildClassificationReport } from "./diagnostics.ts";
 import { LOBES, setLobeEnabled } from "./lobe-visibility.ts";
 import { PALETTES } from "./palette.ts";
 import {
+  DEFAULT_SETTINGS,
   normalizeFrontmatterValueKey,
+  normalizeHexColor,
   normalizeLobeValue,
+  normalizePort,
   type BrainAtlasSettings,
   type PaletteName,
   type PerformancePreset,
@@ -21,6 +24,102 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
   constructor(plugin: BrainAtlasPlugin) {
     super(plugin.app, plugin);
     this.plugin = plugin;
+  }
+
+  /**
+   * Live activity (Claude Code): a loopback listener lights the node of every note an
+   * external tool reads (green) or writes (red). Only the toggle and the port restart the
+   * listener; the other controls just update the glow.
+   */
+  private renderActivitySection(containerEl: HTMLElement): void {
+    new Setting(containerEl).setName("Live activity").setHeading();
+    new Setting(containerEl)
+      .setName("Light up notes as Claude Code reads and writes them")
+      .setDesc("Off by default. Turning it on starts a local HTTP listener on 127.0.0.1 at the port below (this computer only, desktop only). A Claude Code hook posts each Read, Edit and Write to it and the note glows: green on read, red on write. Commands and subagents posted to /live appear as temporary nodes. Nothing leaves this computer and nothing is written to your vault.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.activityEnabled)
+        .onChange(async (value) => {
+          this.plugin.settings.activityEnabled = value;
+          await this.plugin.saveSettings();
+          this.plugin.restartActivityListener();
+          this.plugin.refreshActiveBrainViews();
+        }));
+    new Setting(containerEl)
+      .setName("Listener port")
+      .setDesc("The hook posts to http://127.0.0.1:<port>/read (default 8766; Neural Vault uses 8765). 1024 to 65535.")
+      .addText((text) => {
+        text.setPlaceholder("8766").setValue(String(this.plugin.settings.activityPort));
+        // Validate when the field is committed (blur or Enter), not on every keystroke.
+        text.inputEl.addEventListener("change", () => {
+          const port = normalizePort(text.getValue().trim());
+          if (port === null) {
+            new Notice("Brain Atlas: the port must be a whole number from 1024 to 65535.");
+            text.setValue(String(this.plugin.settings.activityPort));
+            return;
+          }
+          if (port === this.plugin.settings.activityPort) return;
+          this.plugin.settings.activityPort = port;
+          void this.plugin.saveSettings().then(() => this.plugin.restartActivityListener());
+        });
+      });
+    new Setting(containerEl)
+      .setName("Read and write colors")
+      .setDesc("Hex colors the node shifts toward while it glows (read, then write).")
+      .addText((text) => this.addColorField(text, "activityReadColor"))
+      .addText((text) => this.addColorField(text, "activityWriteColor"));
+    new Setting(containerEl)
+      .setName("Hold (seconds)")
+      .setDesc("How long a lit node stays at full glow before it starts to fade.")
+      .addSlider((slider) => slider
+        .setLimits(0, 10, 0.5)
+        .setValue(this.plugin.settings.activityHoldSeconds)
+        .setDynamicTooltip()
+        .onChange((value) => this.updateActivityOptions({ activityHoldSeconds: value })));
+    new Setting(containerEl)
+      .setName("Decay (seconds)")
+      .setDesc("Time constant of the exponential fade after the hold.")
+      .addSlider((slider) => slider
+        .setLimits(0.1, 5, 0.1)
+        .setValue(this.plugin.settings.activityDecaySeconds)
+        .setDynamicTooltip()
+        .onChange((value) => this.updateActivityOptions({ activityDecaySeconds: value })));
+    new Setting(containerEl)
+      .setName("Cascade")
+      .setDesc("Glow level passed to the linked neighbours of a lit node (0 = none, 1 = same as the node).")
+      .addSlider((slider) => slider
+        .setLimits(0, 1, 0.05)
+        .setValue(this.plugin.settings.activityCascade)
+        .setDynamicTooltip()
+        .onChange((value) => this.updateActivityOptions({ activityCascade: value })));
+    new Setting(containerEl)
+      .setName("Swell")
+      .setDesc("Radius multiplier at full glow is 1 + swell.")
+      .addSlider((slider) => slider
+        .setLimits(0, 6, 0.25)
+        .setValue(this.plugin.settings.activitySwell)
+        .setDynamicTooltip()
+        .onChange((value) => this.updateActivityOptions({ activitySwell: value })));
+  }
+
+  /** A hex color field, validated when committed (blur or Enter). */
+  private addColorField(text: TextComponent, key: "activityReadColor" | "activityWriteColor"): void {
+    text.setPlaceholder(DEFAULT_SETTINGS[key]).setValue(this.plugin.settings[key]);
+    text.inputEl.addEventListener("change", () => {
+      const color = normalizeHexColor(text.getValue());
+      if (color === null) {
+        new Notice("Brain Atlas: colors must be hex values like #00ff00.");
+        text.setValue(this.plugin.settings[key]);
+        return;
+      }
+      void this.updateActivityOptions({ [key]: color });
+    });
+  }
+
+  /** Save glow settings and push them into the shared activity state. The listener keeps running. */
+  private async updateActivityOptions(patch: Partial<BrainAtlasSettings>): Promise<void> {
+    this.plugin.settings = { ...this.plugin.settings, ...patch };
+    await this.plugin.saveSettings();
+    this.plugin.applyActivityOptions();
   }
 
   display(): void {
@@ -76,11 +175,45 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         .onChange((value) => this.update({ edgeCap: value })));
 
     new Setting(containerEl)
+      .setName("Node size")
+      .setDesc("Scale every node's dot. Larger reads better on a big 3D canvas.")
+      .addSlider((slider) => slider
+        .setLimits(0.4, 3, 0.1)
+        .setValue(this.plugin.settings.nodeSizeScale)
+        .setDynamicTooltip()
+        .onChange((value) => this.update({ nodeSizeScale: value })));
+
+    new Setting(containerEl)
+      .setName("Layout spread")
+      .setDesc("Clustered (tight lobes) at the low end, spread (fills the 3D volume) at the high end. 1 is the default layout.")
+      .addSlider((slider) => slider
+        .setLimits(0.5, 2.5, 0.1)
+        .setValue(this.plugin.settings.layoutSpread)
+        .setDynamicTooltip()
+        .onChange((value) => this.update({ layoutSpread: value })));
+
+    new Setting(containerEl)
+      .setName("Link thickness")
+      .setDesc("Scale the drawn width of the links between notes.")
+      .addSlider((slider) => slider
+        .setLimits(0.4, 3, 0.1)
+        .setValue(this.plugin.settings.linkThickness)
+        .setDynamicTooltip()
+        .onChange((value) => this.update({ linkThickness: value })));
+
+    new Setting(containerEl)
       .setName("Idle auto-rotate")
       .setDesc("Resume slow rotation after interaction pauses.")
       .addToggle((toggle) => toggle
         .setValue(this.plugin.settings.idleAutoRotate)
         .onChange((value) => this.update({ idleAutoRotate: value })));
+
+    new Setting(containerEl)
+      .setName("Ambient animation")
+      .setDesc("Twinkle the note cloud and send signal pulses between regions. Turn off for a still brain; with live activity on, only real reads and writes then animate.")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.ambientAnimation)
+        .onChange((value) => this.update({ ambientAnimation: value })));
 
     new Setting(containerEl)
       .setName("Show labels")
@@ -126,6 +259,8 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         .addOption("hover-preview", "Hover preview")
         .setValue(this.plugin.settings.clickAction)
         .onChange((value) => this.update({ clickAction: value as BrainAtlasSettings["clickAction"] })));
+
+    this.renderActivitySection(containerEl);
 
     new Setting(containerEl)
       .setName("Categorization")

@@ -2,6 +2,7 @@ import { assignLobePositions, Brain3D, KIND_TO_LOBE } from "./shape.ts";
 import { allLobesEnabled, type LobeVisibility } from "./lobe-visibility.ts";
 import { clampPinnedNodePosition, type PerformancePreset, type PinnedNodePosition } from "./settings.ts";
 import type { BrainEdge, BrainGraph, BrainNode, LobeName, ProjectedPoint, Vec3 } from "./types.ts";
+import type { ActivityState } from "./activity.ts";
 
 export interface SignalParticle {
   id: number;
@@ -15,6 +16,28 @@ export interface SignalParticle {
 
 export interface ProjectedNode extends ProjectedPoint {
   node: BrainNode;
+}
+
+/** A transient live node projected to screen space, handed to the view to draw as a reticle + task row. */
+export interface LiveScreenNode {
+  id: string;
+  label: string;
+  detail: string;
+  kind: string;
+  region: string;
+  color: string;
+  seq: number;
+  sx: number;
+  sy: number;
+  depth: number;
+  level: number;
+  active: boolean;
+}
+
+/** Where to anchor the live-node stack (the temporal lobe's projected screen point). */
+export interface LiveAnchor {
+  sx: number;
+  sy: number;
 }
 
 export interface ProjectedEdge {
@@ -48,7 +71,17 @@ export interface NodeDragState {
   pointerId: number;
 }
 
-export type DragState = RotateDragState | NodeDragState;
+export interface PanDragState {
+  mode: "pan";
+  startX: number;
+  startY: number;
+  panX: number;
+  panY: number;
+  moved: boolean;
+  pointerId: number;
+}
+
+export type DragState = RotateDragState | NodeDragState | PanDragState;
 
 /** Pointer travel, in CSS pixels, that maps to one radian of rotation. */
 export const DRAG_PIXELS_PER_RADIAN = 180;
@@ -82,11 +115,33 @@ export function rotationFromDrag(
 export interface BrainRendererOptions {
   idleAutoRotate: boolean;
   showLobeLabels: boolean;
+  /**
+   * Live activity mode (the feature toggle). On = each read/write/spawn fires a signal to the note it
+   * touched and glowing notes are labelled. Off = no activity signals or labels.
+   */
+  liveActivity: boolean;
+  /**
+   * The cloud twinkle and the ambient signals between regions. Independent of live activity; off
+   * freezes the twinkle clock and stops ambient signals, so with live activity on only real reads
+   * and writes animate.
+   */
+  ambientAnimation: boolean;
+  /** Multiplies every node's drawn radius (graph-view "node size"). 1 = default. */
+  nodeSizeScale: number;
+  /** Multiplies the drawn edge/link width (graph-view "link thickness"). 1 = default. */
+  linkThickness: number;
   enabledLobes: LobeVisibility;
   performancePreset: PerformancePreset;
   mobileMode: boolean;
   onChange?: () => void;
   onPinNode?: (node: BrainNode, position: PinnedNodePosition) => void;
+  /**
+   * Called once per frame with the transient live nodes projected to screen space and the temporal-lobe
+   * anchor to stack them from (the view renders reticle markers + a task panel). Fires with [] once when the
+   * last live node fades, so the view can clear its layer. Both renderers use the same CPU projector, so the
+   * markers track the volume in Canvas2D and WebGL alike.
+   */
+  onLiveNodes?: (nodes: LiveScreenNode[], anchor: LiveAnchor) => void;
   /**
    * Called when the WebGL renderer determines it cannot recover (context
    * permanently lost or resource rebuild failed). The view should fall back
@@ -119,6 +174,10 @@ export abstract class RenderCore {
   protected options: BrainRendererOptions = {
     idleAutoRotate: true,
     showLobeLabels: true,
+    liveActivity: false,
+    ambientAnimation: true,
+    nodeSizeScale: 1,
+    linkThickness: 1,
     enabledLobes: allLobesEnabled(),
     performancePreset: "smooth",
     mobileMode: false
@@ -128,6 +187,9 @@ export abstract class RenderCore {
   protected resizeObserver: ResizeObserver | null = null;
   protected rot = { x: -0.15, y: 0.55 };
   protected zoom = 1;
+  /** Screen-space pan offset (shift-drag or middle-drag), in CSS pixels. */
+  protected panX = 0;
+  protected panY = 0;
   protected drag: DragState | null = null;
   protected lastUserAt = 0;
   protected suppressClickUntil = 0;
@@ -143,6 +205,23 @@ export abstract class RenderCore {
   protected forcedDpr: number | null = null;
 
   protected deterministic = false;
+
+  /**
+   * Live activity (nodes lit by external read/write events). Shared by every view;
+   * null = feature off. tick() runs once per frame in draw(); while anything glows
+   * the frame delay drops to 0 so the fade animates even on throttled presets.
+   */
+  protected activity: ActivityState | null = null;
+
+  setActivity(state: ActivityState | null): void {
+    this.activity = state;
+    this.requestImmediateFrame();
+  }
+
+  /** Wake the frame loop now (e.g. a live-activity event arrived while idle). No rebuild. */
+  requestFrame(): void {
+    this.requestImmediateFrame();
+  }
 
   /**
    * Pass-gating test seam. null = render all passes (production default).
@@ -218,18 +297,59 @@ export abstract class RenderCore {
     }
 
     const scale = Math.min(this.width, this.height) * 0.32 * this.zoom;
-    const cx = this.width / 2;
-    const cy = this.height / 2 - this.height * 0.04;
+    const { cx, cy } = this.viewCenter();
     const project = Brain3D.makeProjector({ rotX: this.rot.x, rotY: this.rot.y, scale, cx, cy, dist: 3.4 });
     const nodeProjs = graph.nodes
       .filter((node) => node._3dLobe)
       .map((node) => ({ node, ...project(node._3dLobe as Vec3) }));
     this.projCache = Object.fromEntries(nodeProjs.map((node) => [node.node.id, node]));
 
+    this.activity?.tick(now);
     this.drawScene(now);
+    this.emitLiveNodes(project);
 
     this.scheduleNextFrame(this.nextFrameDelay(now));
   };
+
+  /** How many live nodes we last handed the view (so we emit [] exactly once when they all fade). */
+  private lastLiveEmitted = 0;
+
+  /** Project the transient live nodes + the temporal anchor and hand them to the view (DOM reticles + panel). */
+  protected emitLiveNodes(project: (point: Vec3) => ProjectedPoint): void {
+    const cb = this.options.onLiveNodes;
+    if (!cb || !this.activity) return;
+    const live = this.activity.liveNodes();
+    if (live.length === 0 && this.lastLiveEmitted === 0) return;
+    this.lastLiveEmitted = live.length;
+    const anchorPt = project(Brain3D.LOBE_CENTERS.temporal.c);
+    const out: LiveScreenNode[] = live.map((entry) => {
+      const projected = project(Brain3D.liveNodePosition(entry.id, entry.region));
+      return {
+        id: entry.id,
+        label: entry.label,
+        detail: entry.detail,
+        kind: entry.kind,
+        region: entry.region,
+        color: this.activity!.liveColorFor(entry),
+        seq: entry.seq,
+        sx: projected.sx,
+        sy: projected.sy,
+        depth: projected.depth,
+        level: entry.level,
+        active: entry.active
+      };
+    });
+    cb(out, { sx: anchorPt.sx, sy: anchorPt.sy });
+  }
+
+  /** Ids of nodes currently lit by read/write activity ("in use"), for minimal node labels. */
+  protected activeNoteIds(): Set<string> {
+    const ids = new Set<string>();
+    if (this.activity) {
+      for (const [id] of this.activity.active()) ids.add(id);
+    }
+    return ids;
+  }
 
   start(canvas: HTMLCanvasElement, getGraph: () => BrainGraph, options: Partial<BrainRendererOptions> = {}): void {
     this.stop();
@@ -369,6 +489,7 @@ export abstract class RenderCore {
     const preset = this.effectivePerformancePreset();
     if (preset === "smooth") return 0;
     if (this.drag || now - this.lastUserAt < 700) return 0;
+    if (this.activity && this.activity.activeCount() > 0) return 0;
     return PERFORMANCE_FRAME_DELAYS[preset] ?? 0;
   }
 
@@ -400,9 +521,27 @@ export abstract class RenderCore {
   }
 
   protected onPointerDown = (event: PointerEvent): void => {
-    if (!this.canvas || event.button !== 0) return;
+    if (!this.canvas) return;
+    // Middle button, or Shift/Alt + left = pan (translate the view). Left alone = rotate/drag a node.
+    const wantsPan = event.button === 1 || (event.button === 0 && (event.shiftKey || event.altKey));
+    if (event.button !== 0 && !wantsPan) return;
     event.preventDefault();
     event.stopPropagation();
+    if (wantsPan) {
+      this.drag = {
+        mode: "pan",
+        startX: event.clientX,
+        startY: event.clientY,
+        panX: this.panX,
+        panY: this.panY,
+        moved: false,
+        pointerId: event.pointerId
+      };
+      this.lastUserAt = performance.now();
+      this.canvas.setPointerCapture(event.pointerId);
+      this.requestImmediateFrame();
+      return;
+    }
     const point = this.localPoint(event);
     const hit = this.hitTestProjected(point.x, point.y);
     if (hit?.node._3dLobe) {
@@ -444,6 +583,13 @@ export abstract class RenderCore {
       const screenDx = event.clientX - this.drag.startX;
       const screenDy = event.clientY - this.drag.startY;
       this.drag.moved = this.drag.moved || Math.hypot(screenDx, screenDy) > 3;
+      if (this.drag.mode === "pan") {
+        this.panX = this.drag.panX + screenDx;
+        this.panY = this.drag.panY + screenDy;
+        this.lastUserAt = performance.now();
+        this.requestImmediateFrame();
+        return;
+      }
       if (this.drag.mode === "node") {
         const next = this.draggedNodePosition(this.drag, screenDx, screenDy);
         this.drag.latestPosition = next;
@@ -521,10 +667,7 @@ export abstract class RenderCore {
   protected onContextMenu = (event: MouseEvent): void => {
     event.preventDefault();
     event.stopPropagation();
-    this.rot = { x: -0.15, y: 0.55 };
-    this.zoom = 1;
-    this.lastUserAt = performance.now();
-    this.requestImmediateFrame();
+    this.resetView();
   };
 
   protected localPoint(event: MouseEvent | PointerEvent): { x: number; y: number } {
@@ -584,6 +727,21 @@ export abstract class RenderCore {
     return Math.min(this.width, this.height) * 0.32 * this.zoom;
   }
 
+  /** The on-screen projection center, including the pan offset. Every projector site uses this. */
+  protected viewCenter(): { cx: number; cy: number } {
+    return { cx: this.width / 2 + this.panX, cy: this.height / 2 - this.height * 0.04 + this.panY };
+  }
+
+  /** Reset rotation, zoom and pan to the default framing (right-click, or the Reset control). */
+  resetView(): void {
+    this.rot = { x: -0.15, y: 0.55 };
+    this.zoom = 1;
+    this.panX = 0;
+    this.panY = 0;
+    this.lastUserAt = performance.now();
+    this.requestImmediateFrame();
+  }
+
   protected hitTolerance(): number {
     return Math.max(7, 18 / Math.sqrt(this.zoom));
   }
@@ -617,15 +775,17 @@ export abstract class RenderCore {
     return graph.activePalette.kinds[LOBE_KIND[lobe] ?? "concept"] ?? graph.activePalette.hud;
   }
 
+  private signalHub: BrainNode | null = null;
+  private signalHubGraph: BrainGraph | null = null;
+
+  /**
+   * Ambient animation on: ambient signals travel a random inter-lobe edge every 900 ms.
+   * Live activity on: each read/write/spawn recorded by ActivityState also fires one signal from the brain's
+   * routing hub to the touched node, so every action visibly does something. With ambient animation off as well,
+   * the brain sits still when nothing is happening. Deterministic mode (the A/B harness) never spawns.
+   */
   protected spawnSignals(now: number, graph: BrainGraph, interLobeEdges: BrainEdge[]): void {
-    if (this.deterministic) {
-      // In deterministic mode, don't spawn new signals; existing ones still animate.
-      for (let index = this.signals.length - 1; index >= 0; index -= 1) {
-        if (now - this.signals[index].born > this.signals[index].dur) this.signals.splice(index, 1);
-      }
-      return;
-    }
-    if (interLobeEdges.length && now - this.lastSpawn > 900) {
+    if (!this.deterministic && this.options.ambientAnimation && interLobeEdges.length && now - this.lastSpawn > 900) {
       this.lastSpawn = now;
       const edge = interLobeEdges[Math.floor(Math.random() * interLobeEdges.length)];
       const forward = Math.random() < 0.5;
@@ -643,8 +803,44 @@ export abstract class RenderCore {
         });
       }
     }
+    if (!this.deterministic && this.options.liveActivity && this.activity) {
+      for (const ev of this.activity.drainFires()) {
+        const target = graph.idx[ev.target];
+        if (!target?._3dLobe) continue;
+        const source = this.signalSource(graph, target);
+        this.signals.push({
+          id: Math.random(),
+          a: source,
+          b: target,
+          born: now,
+          dur: ev.kind === "spawn" ? 950 : 650,
+          colA: source.color,
+          colB: target.color
+        });
+      }
+    }
     for (let index = this.signals.length - 1; index >= 0; index -= 1) {
       if (now - this.signals[index].born > this.signals[index].dur) this.signals.splice(index, 1);
     }
+  }
+
+  /** The node a fired signal travels FROM: the highest-degree hub, else a pseudo node at the brain-stem core. */
+  protected signalSource(graph: BrainGraph, target: BrainNode): BrainNode {
+    if (this.signalHubGraph !== graph) {
+      this.signalHubGraph = graph;
+      this.signalHub = null;
+      let best = -1;
+      for (const node of graph.nodes) {
+        if (!node._3dLobe) continue;
+        if ((node.degree || 0) > best) { best = node.degree || 0; this.signalHub = node; }
+      }
+    }
+    const hub = this.signalHub;
+    if (hub && hub._3dLobe && hub.id !== target.id) return hub;
+    return {
+      id: "__stem__", name: "", title: "", kind: "index", kindLabel: "", status: "active",
+      hub: false, degree: 0, color: graph.activePalette.hud, path: "", classificationSource: "default",
+      _3dLobe: { ...Brain3D.LOBE_CENTERS.stem.c }, _lobeName: "stem"
+    };
   }
 }

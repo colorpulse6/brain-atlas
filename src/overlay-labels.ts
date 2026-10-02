@@ -181,6 +181,10 @@ export interface NodeLabelOptions {
   zoom: number;
   width: number;
   mobile: boolean;
+  /** Nodes currently lit by read/write activity ("in use") — always labelled. */
+  activeIds?: Set<string>;
+  /** true = the old dense mode (auto-label the top hubs). Default/false = minimal (in-use/hover/focus only). */
+  showAll?: boolean;
 }
 
 export function drawNodeLabels(
@@ -196,8 +200,13 @@ export function drawNodeLabels(
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
 
-  const labels = new Set(automaticLabelIds(graph, nodeProjs, mobile, width, zoom));
+  // Minimal by default: label only nodes in use (read/write activity), hovered, or focused. The old dense
+  // "auto-label the top hubs" behaviour returns only when showAll is on (the Labels: all quick toggle).
+  const labels = opts.showAll
+    ? new Set(automaticLabelIds(graph, nodeProjs, mobile, width, zoom))
+    : new Set<string>();
 
+  if (opts.activeIds) for (const id of opts.activeIds) labels.add(id);
   if (hoverId) labels.add(hoverId);
   if (focusId) {
     labels.add(focusId);
@@ -209,7 +218,9 @@ export function drawNodeLabels(
 
   for (const projected of nodeProjs) {
     if (!labels.has(projected.node.id)) continue;
-    if (projected.z > 0.25 && !projected.node.hub) continue;
+    // far-side nodes lose their label -- except a live task/agent (activeIds): the far temporal face keeps
+    // its labels, dimmed by depth, so what Claude is doing stays readable from any angle
+    if (projected.z > 0.25 && !projected.node.hub && !(opts.activeIds && opts.activeIds.has(projected.node.id))) continue;
     const radius = nodeRadius(projected.node) * Math.max(0.6, projected.scale);
     const alpha = Math.max(0.2, 1 - projected.depth * 0.7) * lobeMul(projected.node._lobeName);
     if (alpha < 0.1) continue;

@@ -1,10 +1,14 @@
-import { Notice, Plugin, type EventRef, type Vault, type WorkspaceLeaf } from "obsidian";
+import { Notice, Platform, Plugin, type EventRef, type Vault, type WorkspaceLeaf } from "obsidian";
+import { ActivityListener, ActivityState, type ActivityOptions, type HttpLike } from "./src/activity.ts";
 import { normalizeSettings, type BrainAtlasSettings } from "./src/settings.ts";
 import { BrainAtlasSettingTab } from "./src/settings-tab.ts";
 import { BRAIN_ATLAS_VIEW_TYPE, BrainAtlasView } from "./src/view.ts";
 
 export default class BrainAtlasPlugin extends Plugin {
   settings: BrainAtlasSettings = normalizeSettings(null);
+  /** Live activity: node glow driven by POST /read and /live events from Claude Code hooks. Empty while off. */
+  activity: ActivityState = new ActivityState();
+  private activityListener: ActivityListener | null = null;
 
   async onload(): Promise<void> {
     const data = (await this.loadData()) as Partial<BrainAtlasSettings> | null;
@@ -25,6 +29,13 @@ export default class BrainAtlasPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("delete", () => this.debouncedRefresh()));
     this.registerEvent(this.app.vault.on("rename", () => this.debouncedRefresh()));
     this.registerConfigChangeRefresh();
+    this.applyActivityOptions();
+    this.restartActivityListener(false);
+  }
+
+  onunload(): void {
+    this.activityListener?.stop();
+    this.activityListener = null;
   }
 
   /**
@@ -54,6 +65,55 @@ export default class BrainAtlasPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  /** Push the glow settings (colors, hold, decay, cascade, swell) into the shared state. No restart. */
+  applyActivityOptions(): void {
+    this.activity.setOptions(activityOptions(this.settings));
+  }
+
+  /**
+   * Stop the loopback listener and, when live activity is on, start it on the configured
+   * port. Only the toggle and the port need this. Desktop only: the listener needs Node's
+   * http module, which mobile Obsidian does not expose. A bind failure (port in use) is
+   * logged and, when `notify` is set (the user just changed the setting), shown as a
+   * Notice; the plugin keeps working without live activity.
+   */
+  restartActivityListener(notify = true): void {
+    this.activityListener?.stop();
+    this.activityListener = null;
+    if (!this.settings.activityEnabled) {
+      this.activity.clear();
+      return;
+    }
+    const http = nodeHttp();
+    if (!Platform.isDesktop || !http) return;
+    const listener = new ActivityListener({
+      http,
+      vaultBase: vaultBasePath(this.app),
+      onEvent: (event) => {
+        this.activity.activate(event.path, event.kind, performance.now());
+        this.pokeActiveBrainViews(); // wake the loop so the read/write fires a signal
+      },
+      onLive: (event) => {
+        // Mutate the shared state only; the renderer's frame loop keeps ticking while anything glows
+        // (activeCount counts live nodes), so a rebuild here would only flicker the graph.
+        if (event.op === "spawn") {
+          this.activity.spawnLive(event.id, event.label, event.kind, event.region, performance.now(), event.detail);
+        } else {
+          this.activity.endLive(event.id, performance.now());
+        }
+        this.pokeActiveBrainViews();
+      },
+      status: () => this.activity.status()
+    });
+    this.activityListener = listener;
+    const port = this.settings.activityPort;
+    listener.start(port).catch((error: unknown) => {
+      console.warn(`Brain Atlas: live activity listener could not bind port ${port}.`, error);
+      if (this.activityListener === listener) this.activityListener = null;
+      if (notify) new Notice(`Brain Atlas: live activity could not use port ${port}. Is another app or vault using it?`);
+    });
+  }
+
   async activateView(): Promise<void> {
     const leaf = this.app.workspace.getLeaf(true);
     // A new main-area leaf set active is already shown; revealLeaf (Obsidian
@@ -69,6 +129,14 @@ export default class BrainAtlasPlugin extends Plugin {
     }
   }
 
+  /** Nudge open atlas views to render a frame now (a live-activity event) without a graph rebuild. */
+  pokeActiveBrainViews(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(BRAIN_ATLAS_VIEW_TYPE)) {
+      const view = leaf.view;
+      if (view instanceof BrainAtlasView) view.poke();
+    }
+  }
+
   private debouncedRefresh = debounce(() => {
     try {
       this.refreshActiveBrainViews();
@@ -77,6 +145,46 @@ export default class BrainAtlasPlugin extends Plugin {
       new Notice("Brain Atlas refresh failed. See console for details.");
     }
   }, 750);
+}
+
+function activityOptions(settings: BrainAtlasSettings): ActivityOptions {
+  return {
+    holdSeconds: settings.activityHoldSeconds,
+    decaySeconds: settings.activityDecaySeconds,
+    cascade: settings.activityCascade,
+    swell: settings.activitySwell,
+    readColor: settings.activityReadColor,
+    writeColor: settings.activityWriteColor,
+    liveDecaySeconds: settings.liveDecaySeconds,
+    liveMaxSeconds: settings.liveMaxSeconds,
+    liveShellMaxSeconds: settings.liveShellMaxSeconds,
+    liveCommandColor: settings.liveCommandColor,
+    liveShellColor: settings.liveShellColor,
+    liveTerminalColor: settings.liveTerminalColor,
+    liveAgentColor: settings.liveAgentColor
+  };
+}
+
+/** Node's http module on desktop (Electron exposes require on the window); null on mobile. */
+function nodeHttp(): HttpLike | null {
+  try {
+    const req = (window as unknown as { require?: (id: string) => unknown }).require;
+    if (typeof req !== "function") return null;
+    const mod = req("http") as HttpLike | undefined;
+    return mod && typeof mod.createServer === "function" ? mod : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Absolute vault folder on desktop (FileSystemAdapter.getBasePath), else null. */
+function vaultBasePath(app: Plugin["app"]): string | null {
+  const adapter = app.vault.adapter as { getBasePath?: () => string };
+  try {
+    return typeof adapter.getBasePath === "function" ? adapter.getBasePath() : null;
+  } catch {
+    return null;
+  }
 }
 
 function debounce(callback: () => void, delay: number): () => void {

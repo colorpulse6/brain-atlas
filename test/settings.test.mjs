@@ -84,6 +84,37 @@ test("normalizeSettings validates palette and performance settings", () => {
   assert.equal(fallback.performancePreset, "smooth");
 });
 
+test("normalizeSettings clamps node size and layout spread into range", () => {
+  assert.equal(normalizeSettings({ nodeSizeScale: 1.5 }).nodeSizeScale, 1.5);
+  assert.equal(normalizeSettings({ nodeSizeScale: 99 }).nodeSizeScale, 3);      // upper clamp
+  assert.equal(normalizeSettings({ nodeSizeScale: 0 }).nodeSizeScale, 0.4);     // lower clamp
+  assert.equal(normalizeSettings({ layoutSpread: 2 }).layoutSpread, 2);
+  assert.equal(normalizeSettings({ layoutSpread: 10 }).layoutSpread, 2.5);      // upper clamp
+  assert.equal(normalizeSettings({ layoutSpread: "nope" }).layoutSpread, DEFAULT_SETTINGS.layoutSpread);
+  assert.equal(normalizeSettings({ linkThickness: 2 }).linkThickness, 2);
+  assert.equal(normalizeSettings({ linkThickness: 99 }).linkThickness, 3);      // upper clamp
+  assert.equal(normalizeSettings({ linkThickness: 0 }).linkThickness, 0.4);     // lower clamp
+  // all three are neutral by default, so the atlas looks the same until the user changes them
+  assert.equal(DEFAULT_SETTINGS.nodeSizeScale, 1);
+  assert.equal(DEFAULT_SETTINGS.layoutSpread, 1);
+  assert.equal(DEFAULT_SETTINGS.linkThickness, 1);
+});
+
+test("live activity is opt-in and the classic defaults are unchanged", () => {
+  assert.equal(DEFAULT_SETTINGS.activityEnabled, false, "no listener until the user turns it on");
+  assert.equal(normalizeSettings(null).activityEnabled, false);
+  assert.equal(normalizeSettings({ activityEnabled: true }).activityEnabled, true);
+  assert.equal(DEFAULT_SETTINGS.idleAutoRotate, true);
+  assert.equal(DEFAULT_SETTINGS.ambientAnimation, true, "twinkle and ambient signals stay on by default");
+  assert.equal(normalizeSettings({ ambientAnimation: false }).ambientAnimation, false);
+  assert.equal(normalizeSettings({ ambientAnimation: "no" }).ambientAnimation, true, "a non-boolean falls back to the default");
+  assert.equal(DEFAULT_SETTINGS.layoutPanelOpen, false, "the Layout & Display card starts collapsed");
+  assert.equal(normalizeSettings({ layoutPanelOpen: true }).layoutPanelOpen, true);
+  assert.equal(normalizeSettings({ layoutPanelOpen: 1 }).layoutPanelOpen, false);
+  assert.equal(normalizeSettings({ activityPort: 80 }).activityPort, DEFAULT_SETTINGS.activityPort, "privileged port rejected");
+  assert.equal(normalizeSettings({ activityReadColor: "green" }).activityReadColor, DEFAULT_SETTINGS.activityReadColor);
+});
+
 test("normalizeSettings validates frontmatter value and folder region mappings", () => {
   const settings = normalizeSettings({
     ...DEFAULT_SETTINGS,

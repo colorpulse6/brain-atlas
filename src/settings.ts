@@ -33,6 +33,10 @@ export interface BrainAtlasSettings {
   nodeCap: number;
   edgeCap: number;
   idleAutoRotate: boolean;
+  /** Cloud twinkle and ambient signals between regions. */
+  ambientAnimation: boolean;
+  /** Whether the in-view Layout & Display card is expanded. */
+  layoutPanelOpen: boolean;
   showLobeLabels: boolean;
   showLegendChip: boolean;
   enabledLobes: LobeVisibility;
@@ -42,6 +46,29 @@ export interface BrainAtlasSettings {
   defaultKind: NodeKind;
   inferKindsFromLinks: boolean;
   rendererMode: RendererMode;
+  /** Graph-view-style layout controls. nodeSizeScale multiplies every node's radius; layoutSpread
+   *  scatters notes wider inside each lobe (clustered < 1 < spread), using more of the 3D volume;
+   *  linkThickness scales the drawn edge width. */
+  nodeSizeScale: number;
+  layoutSpread: number;
+  linkThickness: number;
+  /** Live activity: light nodes as Claude Code (or any tool) reads and writes notes. */
+  activityEnabled: boolean;
+  activityPort: number;
+  activityReadColor: string;
+  activityWriteColor: string;
+  activityHoldSeconds: number;
+  activityDecaySeconds: number;
+  activityCascade: number;
+  activitySwell: number;
+  /** Transient live nodes: commands / terminals Claude runs and subagents it spawns, glowing while active. */
+  liveDecaySeconds: number;
+  liveMaxSeconds: number;
+  liveShellMaxSeconds: number;
+  liveCommandColor: string;
+  liveShellColor: string;
+  liveTerminalColor: string;
+  liveAgentColor: string;
 }
 
 export const DEFAULT_SETTINGS: BrainAtlasSettings = {
@@ -86,6 +113,8 @@ export const DEFAULT_SETTINGS: BrainAtlasSettings = {
   nodeCap: 1500,
   edgeCap: 4000,
   idleAutoRotate: true,
+  ambientAnimation: true,
+  layoutPanelOpen: false,
   showLobeLabels: true,
   showLegendChip: true,
   enabledLobes: allLobesEnabled(),
@@ -94,7 +123,25 @@ export const DEFAULT_SETTINGS: BrainAtlasSettings = {
   pinnedNodePositions: {},
   defaultKind: "concept",
   inferKindsFromLinks: true,
-  rendererMode: "auto"
+  rendererMode: "auto",
+  nodeSizeScale: 1,
+  layoutSpread: 1,
+  linkThickness: 1,
+  activityEnabled: false,
+  activityPort: 8766,
+  activityReadColor: "#00ff00",
+  activityWriteColor: "#ff0000",
+  activityHoldSeconds: 2.5,
+  activityDecaySeconds: 0.5,
+  activityCascade: 0.45,
+  activitySwell: 2,
+  liveDecaySeconds: 1.2,
+  liveMaxSeconds: 180,
+  liveShellMaxSeconds: 900,
+  liveCommandColor: "#ffb02e",
+  liveShellColor: "#38bdf8",
+  liveTerminalColor: "#c084fc",
+  liveAgentColor: "#22d3ee"
 };
 
 export function normalizeSettings(input: Partial<BrainAtlasSettings> | null | undefined): BrainAtlasSettings {
@@ -119,8 +166,46 @@ export function normalizeSettings(input: Partial<BrainAtlasSettings> | null | un
     pinnedNodePositions: normalizePinnedNodePositions(input?.pinnedNodePositions),
     defaultKind: normalizeKindValue(input?.defaultKind) ?? DEFAULT_SETTINGS.defaultKind,
     inferKindsFromLinks: input?.inferKindsFromLinks ?? DEFAULT_SETTINGS.inferKindsFromLinks,
-    rendererMode: normalizeRendererMode(input?.rendererMode) ?? DEFAULT_SETTINGS.rendererMode
+    rendererMode: normalizeRendererMode(input?.rendererMode) ?? DEFAULT_SETTINGS.rendererMode,
+    nodeSizeScale: normalizeNumber(input?.nodeSizeScale, 0.4, 3) ?? DEFAULT_SETTINGS.nodeSizeScale,
+    layoutSpread: normalizeNumber(input?.layoutSpread, 0.5, 2.5) ?? DEFAULT_SETTINGS.layoutSpread,
+    linkThickness: normalizeNumber(input?.linkThickness, 0.4, 3) ?? DEFAULT_SETTINGS.linkThickness,
+    ambientAnimation: typeof input?.ambientAnimation === "boolean" ? input.ambientAnimation : DEFAULT_SETTINGS.ambientAnimation,
+    layoutPanelOpen: typeof input?.layoutPanelOpen === "boolean" ? input.layoutPanelOpen : DEFAULT_SETTINGS.layoutPanelOpen,
+    activityEnabled: typeof input?.activityEnabled === "boolean" ? input.activityEnabled : DEFAULT_SETTINGS.activityEnabled,
+    activityPort: normalizePort(input?.activityPort) ?? DEFAULT_SETTINGS.activityPort,
+    activityReadColor: normalizeHexColor(input?.activityReadColor) ?? DEFAULT_SETTINGS.activityReadColor,
+    activityWriteColor: normalizeHexColor(input?.activityWriteColor) ?? DEFAULT_SETTINGS.activityWriteColor,
+    activityHoldSeconds: normalizeNumber(input?.activityHoldSeconds, 0, 60) ?? DEFAULT_SETTINGS.activityHoldSeconds,
+    activityDecaySeconds: normalizeNumber(input?.activityDecaySeconds, 0.05, 60) ?? DEFAULT_SETTINGS.activityDecaySeconds,
+    activityCascade: normalizeNumber(input?.activityCascade, 0, 1) ?? DEFAULT_SETTINGS.activityCascade,
+    activitySwell: normalizeNumber(input?.activitySwell, 0, 10) ?? DEFAULT_SETTINGS.activitySwell,
+    liveDecaySeconds: normalizeNumber(input?.liveDecaySeconds, 0.05, 60) ?? DEFAULT_SETTINGS.liveDecaySeconds,
+    liveMaxSeconds: normalizeNumber(input?.liveMaxSeconds, 5, 3600) ?? DEFAULT_SETTINGS.liveMaxSeconds,
+    liveShellMaxSeconds: normalizeNumber(input?.liveShellMaxSeconds, 5, 7200) ?? DEFAULT_SETTINGS.liveShellMaxSeconds,
+    liveCommandColor: normalizeHexColor(input?.liveCommandColor) ?? DEFAULT_SETTINGS.liveCommandColor,
+    liveShellColor: normalizeHexColor(input?.liveShellColor) ?? DEFAULT_SETTINGS.liveShellColor,
+    liveTerminalColor: normalizeHexColor(input?.liveTerminalColor) ?? DEFAULT_SETTINGS.liveTerminalColor,
+    liveAgentColor: normalizeHexColor(input?.liveAgentColor) ?? DEFAULT_SETTINGS.liveAgentColor
   };
+}
+
+export function normalizePort(value: unknown): number | null {
+  const port = typeof value === "string" ? Number(value) : value;
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 1024 || port > 65535) return null;
+  return port;
+}
+
+export function normalizeHexColor(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return /^#[0-9a-fA-F]{6}$/.test(trimmed) ? trimmed.toLowerCase() : null;
+}
+
+function normalizeNumber(value: unknown, min: number, max: number): number | null {
+  const n = typeof value === "string" ? Number(value) : value;
+  if (typeof n !== "number" || !Number.isFinite(n)) return null;
+  return Math.max(min, Math.min(max, n));
 }
 
 export function normalizeFrontmatterValueKey(value: string): string | null {

@@ -13,6 +13,8 @@
  *   focusId:  string | null
  *   hoverId:  string | null
  *   highlightLobe: string | null
+ *   liveActivity: boolean (default false)
+ *   ambientAnimation: boolean (default true; false freezes the cloud twinkle clock)
  *   width:    number   (CSS pixels)
  *   height:   number   (CSS pixels)
  *   now:      number   (timestamp passed to renderOnceForTest)
@@ -272,6 +274,8 @@ window.renderFrame = function renderFrame(cfg) {
     enabledPasses = undefined,
     signals = undefined,
     showLobeLabels = true,
+    liveActivity = false,
+    ambientAnimation = true,
     presetPositions = undefined,
     moves = undefined
   } = cfg;
@@ -323,6 +327,8 @@ window.renderFrame = function renderFrame(cfg) {
   r.start(canvas, () => graph, {
     idleAutoRotate: true,
     showLobeLabels,
+    liveActivity,
+    ambientAnimation,
     enabledLobes: allLobesEnabled(),
     performancePreset: "smooth",
     mobileMode: false
