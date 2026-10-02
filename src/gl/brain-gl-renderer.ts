@@ -415,20 +415,20 @@ export class BrainGLRenderer extends RenderCore {
     const wDpr = Math.floor(this.width * this.dpr);
     const hDpr = Math.floor(this.height * this.dpr);
 
-    // WebGL canvas backing store + CSS size.
+    // WebGL canvas backing store only. The CSS box comes from styles.css
+    // (100% of the view). Pinning it in pixels here would stop the
+    // ResizeObserver from ever seeing the pane grow, or come back after the
+    // tab was hidden and measured 0x0.
     this.canvas.width = wDpr;
     this.canvas.height = hDpr;
-    this.canvas.style.width = `${this.width}px`;
-    this.canvas.style.height = `${this.height}px`;
     gl.viewport(0, 0, wDpr, hDpr);
 
-    // Overlay canvas: same backing store, same CSS box, dpr transform so 2D
-    // drawing uses CSS pixels exactly like the Canvas2D renderer.
+    // Overlay canvas: same backing store, same CSS box (styles.css
+    // .brain-atlas-gl-overlay), dpr transform so 2D drawing uses CSS pixels
+    // exactly like the Canvas2D renderer.
     if (this.overlay) {
       this.overlay.width = wDpr;
       this.overlay.height = hDpr;
-      this.overlay.style.width = `${this.width}px`;
-      this.overlay.style.height = `${this.height}px`;
     }
     if (this.overlayCtx) {
       this.overlayCtx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);

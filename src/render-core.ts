@@ -277,6 +277,9 @@ export abstract class RenderCore {
     const canvas = this.canvas;
     const graph = this.getGraph?.();
     if (!canvas || !this.isReady() || !graph) return;
+    // Hidden tab (no layout box): stop the loop instead of drawing unseen
+    // frames. Showing the tab resizes the canvas, and resize() restarts it.
+    if (canvas.getClientRects().length === 0) return;
 
     this.ensureLobePositions(graph.nodes);
     if (!this.drag && !this.deterministic && this.options.idleAutoRotate && now - this.lastUserAt > 1800) {
@@ -736,8 +739,11 @@ export abstract class RenderCore {
   protected resize(): void {
     if (!this.canvas || !this.isReady()) return;
     const rect = this.canvas.getBoundingClientRect();
-    this.width = Math.max(1, rect.width);
-    this.height = Math.max(1, rect.height);
+    // A hidden tab measures 0x0. Keep the last real size; the ResizeObserver
+    // fires again with the real size when the tab is shown.
+    if (rect.width === 0 || rect.height === 0) return;
+    this.width = rect.width;
+    this.height = rect.height;
     this.dpr = this.forcedDpr ?? Math.min(this.maxDevicePixelRatio(), window.devicePixelRatio || 1);
     this.resizeSurface();
     this.requestImmediateFrame();
