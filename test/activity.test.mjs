@@ -225,6 +225,40 @@ test("listener decodes a multi-byte path split across chunks and ignores an over
   }
 });
 
+test("a request still in flight when the listener stops changes nothing", async () => {
+  const events = [];
+  const live = [];
+  let arrived;
+  const requestArrived = new Promise((resolve) => { arrived = resolve; });
+  const tapped = { createServer: (handler) => http.createServer((req, res) => { handler(req, res); arrived(); }) };
+  const listener = new ActivityListener({
+    http: tapped,
+    onEvent: (event) => events.push(event),
+    onLive: (event) => live.push(event),
+    status: () => new ActivityState().status()
+  });
+  const port = await listener.start(0);
+  const sendSplit = (path, body) => {
+    const half = Math.floor(body.length / 2);
+    return new Promise((resolve, reject) => {
+      const req = http.request({ host: "127.0.0.1", port, method: "POST", path, headers: { "Content-Type": "application/json" } }, (res) => {
+        res.resume();
+        res.on("end", () => resolve(res.statusCode));
+      });
+      req.on("error", reject);
+      req.write(body.slice(0, half));
+      requestArrived.then(() => {
+        listener.stop(); // the user turns live activity off mid-request
+        req.end(body.slice(half));
+      });
+    });
+  };
+  const status = await sendSplit("/read", JSON.stringify({ tool_name: "Read", tool_input: { file_path: "a.md" } }));
+  assert.equal(status, 503);
+  assert.deepEqual(events, [], "the late read does not glow a note");
+  assert.deepEqual(live, []);
+});
+
 /** `body` may be a string or an array of chunks written separately; `headers` override the defaults. */
 function request(port, method, path, body, headers = {}) {
   return new Promise((resolve, reject) => {

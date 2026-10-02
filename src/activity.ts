@@ -676,6 +676,14 @@ export class ActivityListener {
   }
 
   private handle(req: HttpRequestLike, res: HttpResponseLike): void {
+    // close() keeps open connections, so a request can still arrive or finish after stop().
+    // Each request remembers the server that took it and is dropped once that server stops.
+    const server = this.server;
+    const stopped = (): boolean => server === null || this.server !== server;
+    if (stopped()) {
+      this.reply(res, 503, "stopped");
+      return;
+    }
     if (!this.isLocalClient(req)) {
       this.reply(res, 403, "forbidden");
       return;
@@ -684,6 +692,10 @@ export class ActivityListener {
     const url = (req.url || "/").split("?")[0];
     if (method === "POST" && url === "/read") {
       this.readBody(req, (body) => {
+        if (stopped()) {
+          this.reply(res, 503, "stopped");
+          return;
+        }
         const event = body === null ? null : parseEventBody(body, this.opts.vaultBase);
         if (event) {
           try {
@@ -698,6 +710,10 @@ export class ActivityListener {
     }
     if (method === "POST" && url === "/live") {
       this.readBody(req, (body) => {
+        if (stopped()) {
+          this.reply(res, 503, "stopped");
+          return;
+        }
         const event = body === null ? null : parseLiveBody(body);
         if (event && this.opts.onLive) {
           try {
