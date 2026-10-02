@@ -52,6 +52,7 @@ test("parseEventBody reads tool_input.file_path, notebook_path and a top-level f
   assert.deepEqual(parseEventBody(JSON.stringify({ tool_name: "Write", tool_input: { notebook_path: "n.ipynb" } })), { path: "n.ipynb", kind: "write" });
   assert.deepEqual(parseEventBody(JSON.stringify({ tool_name: "Edit", file_path: "a.md" })), { path: "a.md", kind: "write" });
   assert.deepEqual(parseEventBody(JSON.stringify({ tool_input: { file_path: "a.md" } })), { path: "a.md", kind: "read" });
+  assert.equal(parseEventBody(JSON.stringify({ tool_name: "Bash", tool_input: { file_path: "a.md" } })), null, "a named non-note tool is ignored");
   assert.equal(parseEventBody("not json"), null);
   assert.equal(parseEventBody(JSON.stringify({ tool_name: "Read" })), null);
 });
@@ -169,15 +170,71 @@ test("listener reports a bind failure instead of throwing", async () => {
   await new Promise((resolve) => blocker.close(resolve));
 });
 
-function request(port, method, path, body) {
+test("listener sends no CORS header and refuses browser and rebound requests", async () => {
+  const events = [];
+  const state = stateWithGraph();
+  const listener = new ActivityListener({ http, onEvent: (event) => events.push(event), status: () => state.status() });
+  const port = await listener.start(0);
+  const body = JSON.stringify({ tool_name: "Read", tool_input: { file_path: "a.md" } });
+  try {
+    const ok = await request(port, "GET", "/status");
+    assert.equal(ok.status, 200);
+    assert.equal(ok.headers["access-control-allow-origin"], undefined, "no CORS header");
+
+    const viaLocalhost = await request(port, "GET", "/status", undefined, { Host: `localhost:${port}` });
+    assert.equal(viaLocalhost.status, 200, "localhost:<port> is accepted");
+
+    const fromPage = await request(port, "GET", "/status", undefined, { Origin: "https://example.com" });
+    assert.equal(fromPage.status, 403, "a request from a web page (Origin header) is refused");
+    const postFromPage = await request(port, "POST", "/read", body, { Origin: "https://example.com" });
+    assert.equal(postFromPage.status, 403);
+
+    const rebound = await request(port, "GET", "/status", undefined, { Host: `attacker.example:${port}` });
+    assert.equal(rebound.status, 403, "a foreign Host (DNS rebinding) is refused");
+    const wrongPort = await request(port, "GET", "/status", undefined, { Host: "127.0.0.1:1" });
+    assert.equal(wrongPort.status, 403);
+
+    assert.equal(events.length, 0, "no refused request reached the handler");
+  } finally {
+    listener.stop();
+  }
+});
+
+test("listener decodes a multi-byte path split across chunks and ignores an oversized body", async () => {
+  const events = [];
+  const listener = new ActivityListener({
+    http,
+    maxBodyBytes: 200,
+    onEvent: (event) => events.push(event),
+    status: () => new ActivityState().status()
+  });
+  const port = await listener.start(0);
+  try {
+    const bytes = Buffer.from(JSON.stringify({ tool_name: "Read", tool_input: { file_path: "Café/naïve.md" } }), "utf8");
+    const split = bytes.indexOf(0xc3) + 1; // inside the two-byte "é"
+    const posted = await request(port, "POST", "/read", [bytes.subarray(0, split), bytes.subarray(split)]);
+    assert.equal(posted.status, 200);
+    assert.deepEqual(events, [{ path: "Café/naïve.md", kind: "read" }]);
+
+    const big = JSON.stringify({ tool_name: "Read", tool_input: { file_path: "a.md" }, pad: "x".repeat(400) });
+    const oversized = await request(port, "POST", "/read", big);
+    assert.equal(oversized.status, 200);
+    assert.equal(events.length, 1, "an oversized body is ignored");
+  } finally {
+    listener.stop();
+  }
+});
+
+/** `body` may be a string or an array of chunks written separately; `headers` override the defaults. */
+function request(port, method, path, body, headers = {}) {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port, method, path, headers: { "Content-Type": "application/json" } }, (res) => {
+    const req = http.request({ host: "127.0.0.1", port, method, path, headers: { "Content-Type": "application/json", ...headers } }, (res) => {
       let data = "";
       res.on("data", (chunk) => { data += chunk; });
-      res.on("end", () => resolve({ status: res.statusCode, body: data }));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
     });
     req.on("error", reject);
-    if (body) req.write(body);
+    for (const chunk of Array.isArray(body) ? body : body ? [body] : []) req.write(chunk);
     req.end();
   });
 }
@@ -359,9 +416,8 @@ test("history log records reads, writes, spawns and ends in order, newest first"
   assert.equal(recent[1].kind, "command");
   assert.equal(recent[3].kind, "");
   // every row has a monotonically increasing seq and a color
-  const full = state.fullHistory();
-  assert.deepEqual(full.map((h) => h.seq), [1, 2, 3, 4]); // oldest first
-  assert.ok(full.every((h) => /^#[0-9a-f]{6}$/i.test(h.color)));
+  assert.deepEqual(recent.map((h) => h.seq), [4, 3, 2, 1]);
+  assert.ok(recent.every((h) => /^#[0-9a-f]{6}$/i.test(h.color)));
 });
 
 test("history log is capped and re-spawning the same id does not duplicate a spawn row", () => {
@@ -375,25 +431,22 @@ test("history log is capped and re-spawning the same id does not duplicate a spa
   assert.ok(state.historyCount() >= 31);
 });
 
-test("setLivePos records a node's xyz and backfills its spawn history row", () => {
+test("setLivePos pins a live node's position until it is removed", () => {
   const state = stateWithGraph();
   state.spawnLive("cmd-1", "git status", "command", "temporal", 1000);
-  // spawn row has no position yet
-  let row = state.recentHistory(1)[0];
-  assert.equal(row.x, undefined);
-  // the view places the node -> records its position, backfilling the spawn row
+  assert.equal(state.liveNodes()[0].x, undefined);
   state.setLivePos("cmd-1", 0.5, -0.2, 0.3);
-  row = state.fullHistory().find((h) => h.id === "cmd-1" && h.event === "spawn");
-  assert.deepEqual([row.x, row.y, row.z], [0.5, -0.2, 0.3]);
+  state.spawnLive("cmd-1", "git status", "command", "temporal", 1100); // a refresh keeps the spot
+  const live = state.liveNodes()[0];
+  assert.deepEqual([live.x, live.y, live.z], [0.5, -0.2, 0.3]);
 });
 
-test("spawnLive with an explicit position (playback) pins the node and records it", () => {
+test("pending fire events are capped so a hidden view does not release a flood", () => {
   const state = stateWithGraph();
-  state.spawnLive("cmd-2", "npm run", "command", "temporal", 5, "npm run build", { x: 1, y: 2, z: 3 });
-  const live = state.liveNodes().find((e) => e.id === "cmd-2");
-  assert.deepEqual([live.x, live.y, live.z], [1, 2, 3]);
-  const row = state.fullHistory().find((h) => h.id === "cmd-2" && h.event === "spawn");
-  assert.deepEqual([row.x, row.y, row.z], [1, 2, 3]);
+  for (let i = 0; i < 200; i += 1) state.activate("a.md", "read", i);
+  const fires = state.drainFires();
+  assert.equal(fires.length, 64);
+  assert.deepEqual(state.drainFires(), []);
 });
 
 test("clear() empties the history log and resets the counter", () => {
@@ -404,7 +457,6 @@ test("clear() empties the history log and resets the counter", () => {
   state.clear();
   assert.equal(state.historyCount(), 0);
   assert.deepEqual(state.recentHistory(), []);
-  assert.deepEqual(state.fullHistory(), []);
 });
 
 function postJson(port, path, body) {

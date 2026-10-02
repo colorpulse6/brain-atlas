@@ -115,8 +115,12 @@ export function rotationFromDrag(
 export interface BrainRendererOptions {
   idleAutoRotate: boolean;
   showLobeLabels: boolean;
-  /** When false (default) node labels show only for in-use / hovered / focused nodes; true = the old dense mode. */
-  showAllLabels: boolean;
+  /**
+   * Live activity mode (the feature toggle). Off = the classic animated brain: ambient signals and a
+   * twinkling cloud. On = a still brain where only activity animates: each read/write/spawn fires a
+   * signal, the cloud twinkle is frozen, and glowing notes are labelled.
+   */
+  liveActivity: boolean;
   /** Multiplies every node's drawn radius (graph-view "node size"). 1 = default. */
   nodeSizeScale: number;
   /** Multiplies the drawn edge/link width (graph-view "link thickness"). 1 = default. */
@@ -163,9 +167,9 @@ export abstract class RenderCore {
   protected canvas: HTMLCanvasElement | null = null;
   protected getGraph: (() => BrainGraph) | null = null;
   protected options: BrainRendererOptions = {
-    idleAutoRotate: false,
+    idleAutoRotate: true,
     showLobeLabels: true,
-    showAllLabels: false,
+    liveActivity: false,
     nodeSizeScale: 1,
     linkThickness: 1,
     enabledLobes: allLobesEnabled(),
@@ -769,12 +773,31 @@ export abstract class RenderCore {
   private signalHubGraph: BrainGraph | null = null;
 
   /**
-   * Signals are now ACTION-DRIVEN, not ambient: each read/write/spawn recorded by ActivityState fires one
-   * signal from the brain's routing hub to the touched node, so every action visibly does something and the
+   * Live activity off: ambient signals travel a random inter-lobe edge every 900 ms.
+   * Live activity on: signals are ACTION-DRIVEN instead. Each read/write/spawn recorded by ActivityState fires
+   * one signal from the brain's routing hub to the touched node, so every action visibly does something and the
    * brain sits still when nothing is happening. Deterministic mode (the A/B harness) never spawns.
    */
-  protected spawnSignals(now: number, graph: BrainGraph, _interLobeEdges: BrainEdge[]): void {
-    if (!this.deterministic && this.activity) {
+  protected spawnSignals(now: number, graph: BrainGraph, interLobeEdges: BrainEdge[]): void {
+    if (!this.deterministic && !this.options.liveActivity && interLobeEdges.length && now - this.lastSpawn > 900) {
+      this.lastSpawn = now;
+      const edge = interLobeEdges[Math.floor(Math.random() * interLobeEdges.length)];
+      const forward = Math.random() < 0.5;
+      const A = graph.idx[forward ? edge.a : edge.b];
+      const B = graph.idx[forward ? edge.b : edge.a];
+      if (A && B) {
+        this.signals.push({
+          id: Math.random(),
+          a: A,
+          b: B,
+          born: now,
+          dur: 2400 + Math.random() * 1100,
+          colA: A.color,
+          colB: B.color
+        });
+      }
+    }
+    if (!this.deterministic && this.options.liveActivity && this.activity) {
       for (const ev of this.activity.drainFires()) {
         const target = graph.idx[ev.target];
         if (!target?._3dLobe) continue;
@@ -812,6 +835,6 @@ export abstract class RenderCore {
       id: "__stem__", name: "", title: "", kind: "index", kindLabel: "", status: "active",
       hub: false, degree: 0, color: graph.activePalette.hud, path: "", classificationSource: "default",
       _3dLobe: { ...Brain3D.LOBE_CENTERS.stem.c }, _lobeName: "stem"
-    } as BrainNode;
+    };
   }
 }

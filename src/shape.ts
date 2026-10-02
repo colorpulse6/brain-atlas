@@ -142,9 +142,10 @@ export function makeProjector(options: {
 
 /**
  * Place every node inside its lobe. `spread` (clustered < 1 < spread) fans notes out WITHIN their own region.
- * Two things keep the spread even and "relative to the section":
- *   - the per-node scatter scales by `spread` AND by the region's population (cube root, for constant density),
- *     so a 400-note region opens up proportionally more than a 5-note one instead of staying a tight ball;
+ * spread = 1 (the default) is the original layout, unchanged. Above 1, two things keep the spread even and
+ * "relative to the section":
+ *   - the per-node scatter scales by `spread` and blends in the region's population (cube root, for constant
+ *     density), so a 400-note region opens up proportionally more than a 5-note one instead of staying a tight ball;
  *   - the folder-cluster offset barely moves with `spread`, so clusters stay inside their lobe rather than
  *     flinging outward (which read as "spreading toward the camera" once perspective magnified the near ones).
  */
@@ -157,6 +158,7 @@ export function assignLobePositions(nodes: BrainNode[], spread = 1): void {
     counts[lobe] = (counts[lobe] ?? 0) + 1;
   }
   const clusterScale = 1 + (s - 1) * 0.35; // clusters stay in-section; spacing mostly opens up the scatter
+  const densityMix = Math.max(0, Math.min(1, (s - 1) / 0.5)); // 0 at spread <= 1, full by spread 1.5
   for (const node of nodes) {
     const h = stableHash(node.id);
     const r1 = (h & 0xffff) / 0xffff;
@@ -169,7 +171,7 @@ export function assignLobePositions(nodes: BrainNode[], spread = 1): void {
     const density = Math.max(0.7, Math.min(1.9, Math.cbrt((counts[lobe] ?? 1) / 36)));
     const u = r1 * Math.PI * 2;
     const v = Math.acos(2 * r2 - 1);
-    const radius = center.r * (node.hub ? 0.08 : 0.08 + r3 * 0.13) * s * density;
+    const radius = center.r * (node.hub ? 0.08 : 0.08 + r3 * 0.13) * s * (1 + (density - 1) * densityMix);
     const dx = radius * Math.sin(v) * Math.cos(u);
     const dy = radius * Math.sin(v) * Math.sin(u);
     const dz = radius * Math.cos(v);
@@ -228,7 +230,7 @@ export const LIVE_FACE = {
 // every candidate with the renderer's RESET framing (rotX -0.15, rotY 0.55, dist 3.4) at a deliberately small pane
 // (200 px/unit = a ~625px pane at zoom 1) and with a second, flatter framing (rotY 0.3, the brain turned toward
 // the front), and accepts a spot only when its drawn box is clear of every occupant's box in both. The camera is
-// canonical, not live, so placement stays deterministic: pinned spots and the timelapse never move because the
+// canonical, not live, so placement stays deterministic: pinned spots never move because the
 // user rotated or resized the view.
 export const LIVE_CANON = { rotX: -0.15, rotYs: [0.55, 0.3] as const, dist: 3.4, scale: 200 };
 const LABEL_CHAR_PX = 6.2;      // 10px JetBrains Mono advance per character

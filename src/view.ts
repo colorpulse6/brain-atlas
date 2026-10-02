@@ -7,7 +7,6 @@ import { RenderCore, type BrainRendererOptions, type LiveScreenNode } from "./re
 import { BrainGLRenderer } from "./gl/brain-gl-renderer.ts";
 import type { ActivityState, LiveEntry } from "./activity.ts";
 import { LOBE_CENTERS, placeLiveNode, liveSpotClear, type LiveOccupant } from "./shape.ts";
-import { DEFAULT_SETTINGS } from "./settings.ts";
 import type { BrainAtlasSettings, PinnedNodePosition } from "./settings.ts";
 import type { BrainGraph, BrainNode, LobeName } from "./types.ts";
 
@@ -16,7 +15,7 @@ export const BRAIN_ATLAS_VIEW_TYPE = "brain-atlas";
 export interface BrainAtlasPluginHost {
   app: App;
   settings: BrainAtlasSettings;
-  /** Shared live-activity state (null when the feature is off). */
+  /** Shared live-activity state; empty while the feature is off. */
   activity?: ActivityState | null;
   saveSettings(): Promise<void>;
   refreshActiveBrainViews(): void;
@@ -34,38 +33,28 @@ export class BrainAtlasView extends ItemView {
   private focusEl: HTMLDivElement | null = null;
   private infoEl: HTMLDivElement | null = null;
   private emptyEl: HTMLDivElement | null = null;
-  private leftDockEl: HTMLDivElement | null = null;     // left column: Anatomical Regions + History cards
-  private rightDockEl: HTMLDivElement | null = null;    // right column: Layout & Display + Active + Shells cards
-  private controlsGroupsEl: HTMLDivElement | null = null; // the (collapsible) button groups inside the controls card
-  private configEl: HTMLDivElement | null = null;       // Layout & Display card BODY (the sliders)
-  private configCardEl: HTMLDivElement | null = null;   // the Layout & Display card
-  private legendCardEl: HTMLDivElement | null = null;   // the Anatomical Regions card (hidden when showLegendChip off)
-  private taskPanelEl: HTMLDivElement | null = null;    // Active card BODY: commands / terminals / agents
-  private taskCountEl: HTMLSpanElement | null = null;   // Active card header count
-  private historyEl: HTMLDivElement | null = null;      // History card BODY (scrollable rows)
-  private historyCountEl: HTMLSpanElement | null = null; // History card header count
-  private shellPanelEl: HTMLDivElement | null = null;   // Shells card BODY (scrollable rows)
-  private shellCountEl: HTMLSpanElement | null = null;  // Shells card header count
-  /** Keeps the right dock positioned just below the controls no matter how many rows they wrap to. */
+  /** Live activity only: right-hand column of collapsible cards (Active, Shells, History) under the controls. */
+  private liveDockEl: HTMLDivElement | null = null;
+  private taskPanelEl: HTMLDivElement | null = null;    // Active card body: commands / terminals / agents
+  private taskCountEl: HTMLSpanElement | null = null;
+  private shellPanelEl: HTMLDivElement | null = null;   // Shells card body
+  private shellCountEl: HTMLSpanElement | null = null;
+  private historyEl: HTMLDivElement | null = null;      // History card body
+  private historyCountEl: HTMLSpanElement | null = null;
+  /** Keeps the live dock just below the controls however many rows the region buttons wrap to. */
   private controlsResizeObserver: ResizeObserver | null = null;
-  /** Per-section collapsed state (view-local). Config starts collapsed to stay out of the way. */
-  private collapsed: Record<string, boolean> = { menu: false, regions: false, config: true, history: false, active: false, shells: false };
-  /** Signatures so we only rebuild each panel when its set/status changes. */
+  /** Per-card collapsed state (view-local). */
+  private collapsed: Record<string, boolean> = { active: false, shells: false, history: false };
+  /** Signatures so each card is rebuilt only when its content changes. */
   private taskPanelSig = "";
   private shellPanelSig = "";
   private historyRendered = -1;
-  /** View-local quick toggles (not persisted): dense node labels, and the task-manager panel. */
-  private showAllLabels = false;
-  private liveUiVisible = true;
   /** The vault-only graph (from buildGraph); live task/agent nodes are merged on top of it into this.graph. */
   private vaultGraph: BrainGraph | null = null;
   /** Signature of the live-node set currently merged into this.graph (re-merge only when it changes). */
   private mergedLiveSig = "";
   private infoButton: HTMLButtonElement | null = null;
   private labelButton: HTMLButtonElement | null = null;
-  private namesButton: HTMLButtonElement | null = null;
-  private spinButton: HTMLButtonElement | null = null;
-  private tasksButton: HTMLButtonElement | null = null;
   private allButton: HTMLButtonElement | null = null;
   private noneButton: HTMLButtonElement | null = null;
   private lobeButtons: Partial<Record<LobeName, HTMLButtonElement>> = {};
@@ -106,75 +95,31 @@ export class BrainAtlasView extends ItemView {
     this.canvas = root.createEl("canvas", { cls: "brain-atlas-canvas" });
     this.createHud(root);
     this.createControls(root);
+    this.legendEl = root.createDiv({ cls: "brain-atlas-legend" });
     this.infoEl = root.createDiv({ cls: "brain-atlas-info-panel" });
     this.tooltipEl = root.createDiv({ cls: "brain-atlas-tooltip" });
     this.focusEl = root.createDiv({ cls: "brain-atlas-focus-card" });
-
-    // LEFT column: Anatomical Regions (the legend) over a long, scrollable History feed. Both collapsible.
-    this.leftDockEl = root.createDiv({ cls: "brain-atlas-left-dock" });
-    const regions = this.makeCard(this.leftDockEl, "regions", "Anatomical Regions");
-    this.legendCardEl = regions.card;
-    this.legendEl = regions.body;
-    const hist = this.makeCard(this.leftDockEl, "history", "History");
-    this.historyEl = hist.body;
-    this.historyCountEl = hist.count;
-    hist.card.addClass("brain-atlas-card-grow"); // History is the big, scrollable feed
-
-    // RIGHT column (under the View controls): Layout & Display, then Active over Shells.
-    this.rightDockEl = root.createDiv({ cls: "brain-atlas-right-dock" });
-    const cfg = this.makeCard(this.rightDockEl, "config", "Layout & Display");
-    this.configCardEl = cfg.card;
-    this.configEl = cfg.body;
-    const active = this.makeCard(this.rightDockEl, "active", "Active");
-    this.taskPanelEl = active.body;
-    this.taskCountEl = active.count;
-    const shells = this.makeCard(this.rightDockEl, "shells", "Shells");
-    this.shellPanelEl = shells.body;
-    this.shellCountEl = shells.count;
-
     this.emptyEl = root.createDiv({ cls: "brain-atlas-empty" });
     this.emptyEl.setText("Your brain is empty. Add notes with #project, #person, or #source tags to start mapping.");
 
-    this.buildConfigPanel();
-    // Keep the right dock docked just below the controls, however many rows the region buttons wrap to.
-    this.positionRightDock();
+    // Live activity cards. Hidden unless the feature is on (syncLiveDock).
+    this.liveDockEl = root.createDiv({ cls: "brain-atlas-live-dock" });
+    const active = this.makeCard(this.liveDockEl, "active", "Active");
+    this.taskPanelEl = active.body;
+    this.taskCountEl = active.count;
+    const shells = this.makeCard(this.liveDockEl, "shells", "Shells");
+    this.shellPanelEl = shells.body;
+    this.shellCountEl = shells.count;
+    const history = this.makeCard(this.liveDockEl, "history", "History");
+    this.historyEl = history.body;
+    this.historyCountEl = history.count;
     if (typeof ResizeObserver === "function" && this.controlsEl) {
-      this.controlsResizeObserver = new ResizeObserver(() => this.positionRightDock());
+      this.controlsResizeObserver = new ResizeObserver(() => this.positionLiveDock());
       this.controlsResizeObserver.observe(this.controlsEl);
     }
 
     this.canvas.addEventListener("click", this.onCanvasClick);
     this.rebuild();
-  }
-
-  /** Position the right dock's top edge just under the controls block so the two never overlap. */
-  private positionRightDock(): void {
-    if (!this.rightDockEl || !this.controlsEl) return;
-    const top = this.controlsEl.offsetTop + this.controlsEl.offsetHeight + 8;
-    this.rightDockEl.style.top = `${Math.max(44, top)}px`;
-  }
-
-  /** A collapsible card in the right dock: a clickable header (chevron + title + count) over a body the sync
-   *  methods fill. Clicking the header folds/unfolds the card; the state is view-local (survives data refreshes). */
-  private makeCard(parent: HTMLElement, key: string, title: string): { card: HTMLDivElement; count: HTMLSpanElement; body: HTMLDivElement } {
-    const card = parent.createDiv({ cls: "brain-atlas-card" });
-    card.setAttr("data-card", key);
-    card.toggleClass("is-collapsed", !!this.collapsed[key]);
-    const header = card.createDiv({ cls: "brain-atlas-card-header" });
-    header.createSpan({ cls: "brain-atlas-card-chevron", text: "▾" }); // ▾
-    header.createSpan({ cls: "brain-atlas-card-title", text: title });
-    const count = header.createSpan({ cls: "brain-atlas-card-count" });
-    header.addEventListener("click", () => this.toggleCard(key, card));
-    const body = card.createDiv({ cls: "brain-atlas-card-body" });
-    return { card, count, body };
-  }
-
-  /** Fold/unfold a card and remember it. */
-  private toggleCard(key: string, card: HTMLElement): void {
-    const next = !card.hasClass("is-collapsed");
-    card.toggleClass("is-collapsed", next);
-    this.collapsed[key] = next;
-    this.positionRightDock();
   }
 
   async onClose(): Promise<void> {
@@ -183,26 +128,21 @@ export class BrainAtlasView extends ItemView {
     this.controlsResizeObserver = null;
     this.renderer.stop();
     this.rendererStarted = false;
-    this.taskPanelEl = null;
-    this.taskCountEl = null;
-    this.leftDockEl = null;
-    this.rightDockEl = null;
-    this.controlsGroupsEl = null;
-    this.configEl = null;
-    this.configCardEl = null;
-    this.legendCardEl = null;
-    this.historyEl = null;
-    this.historyCountEl = null;
-    this.shellPanelEl = null;
-    this.shellCountEl = null;
-    this.taskPanelSig = "";
-    this.shellPanelSig = "";
-    this.historyRendered = -1;
     this.rootEl = null;
     this.canvas = null;
     this.canvasContextKind = null;
     this.graph = null;
     this.vaultGraph = null;
+    this.liveDockEl = null;
+    this.taskPanelEl = null;
+    this.taskCountEl = null;
+    this.shellPanelEl = null;
+    this.shellCountEl = null;
+    this.historyEl = null;
+    this.historyCountEl = null;
+    this.taskPanelSig = "";
+    this.shellPanelSig = "";
+    this.historyRendered = -1;
   }
 
   onShow(): void {
@@ -221,8 +161,7 @@ export class BrainAtlasView extends ItemView {
   poke(): void {
     if (!this.rendererStarted) return;
     const live = this.plugin.activity?.liveNodes() ?? [];
-    const sig = live.map((e) => `${e.id}:${e.active ? 1 : 0}:${e.kind}`).join("|");
-    if (sig !== this.mergedLiveSig) this.composeGraph();
+    if (liveSignature(live) !== this.mergedLiveSig) this.composeGraph();
     // Reads/writes don't create live nodes, so refresh the history here too (change-gated internally).
     this.syncHistory();
     this.renderer.requestFrame();
@@ -230,7 +169,7 @@ export class BrainAtlasView extends ItemView {
 
   rebuild(): void {
     this.vaultGraph = buildGraph(this.plugin.app, this.plugin.settings);
-    // Merge the live task/agent nodes on top so they render as REAL graph nodes; feeds activity.setGraph too.
+    // Merge the live task/agent nodes on top so they render as real graph nodes; feeds activity.setGraph too.
     this.composeGraph();
     this.syncPaletteClass();
     const wantsGL = this.plugin.settings.rendererMode === "webgl2" ||
@@ -250,7 +189,7 @@ export class BrainAtlasView extends ItemView {
     return {
       idleAutoRotate: this.plugin.settings.idleAutoRotate,
       showLobeLabels: this.plugin.settings.showLobeLabels,
-      showAllLabels: this.showAllLabels,
+      liveActivity: this.plugin.settings.activityEnabled,
       nodeSizeScale: this.plugin.settings.nodeSizeScale,
       linkThickness: this.plugin.settings.linkThickness,
       enabledLobes: this.plugin.settings.enabledLobes,
@@ -264,80 +203,74 @@ export class BrainAtlasView extends ItemView {
   }
 
   /**
-   * The renderer hands us the current live nodes (what Claude is doing right now) each frame. The nodes
-   * themselves render as REAL graph nodes (merged into the graph, see composeGraph); here we only (1) re-merge
-   * when the set changes and (2) refresh the bottom-left task manager. No per-frame DOM work otherwise.
+   * The renderer hands us the current live nodes (what Claude is doing right now) each frame while any
+   * exist. The nodes themselves render as real graph nodes (see composeGraph); here we only re-merge when
+   * the set changes and refresh the Active and Shells cards.
    */
   private syncLiveNodes(nodes: LiveScreenNode[]): void {
-    const sig = nodes.map((n) => `${n.id}:${n.active ? 1 : 0}:${n.kind}`).join("|");
-    if (sig !== this.mergedLiveSig) {
+    if (liveSignature(nodes) !== this.mergedLiveSig) {
       this.composeGraph();
       this.renderer.requestFrame();
     }
-    if (this.liveUiVisible) {
-      this.syncTaskPanel(nodes.filter((n) => n.kind !== "shell")); // bottom-left: commands / terminals / agents
-      this.syncShellPanel(nodes.filter((n) => n.kind === "shell")); // bottom-right: background shells
-    } else {
-      this.clearLiveUi();
-    }
-    this.syncHistory(); // the history column stays under the buttons regardless of the Tasks toggle
-  }
-
-  /** The background-shell task manager card body (scrollable). */
-  private syncShellPanel(shells: LiveScreenNode[]): void {
-    const panel = this.shellPanelEl;
-    if (!panel) return;
-    const running = shells.filter((n) => n.active).length;
-    if (this.shellCountEl) this.shellCountEl.setText(shells.length ? `${running} active` : "");
-    const sig = shells.map((n) => `${n.id}:${n.active ? 1 : 0}`).join("|");
-    if (sig === this.shellPanelSig) return;
-    this.shellPanelSig = sig;
-    panel.empty();
-    if (shells.length === 0) {
-      panel.createDiv({ cls: "brain-atlas-history-empty", text: "no background shells" });
-      return;
-    }
-    for (const node of shells) {
-      const row = panel.createDiv({ cls: "brain-atlas-task-row" });
-      row.toggleClass("is-ending", !node.active);
-      row.setAttr("data-kind", "shell");
-      row.style.setProperty("--live-color", node.color);
-      row.createSpan({ cls: "brain-atlas-task-dot" });
-      const body = row.createDiv({ cls: "brain-atlas-task-body" });
-      body.createSpan({ cls: "brain-atlas-task-name", text: node.label });
-      if (node.detail && node.detail !== node.label) body.createSpan({ cls: "brain-atlas-task-detail", text: node.detail });
-      row.createSpan({ cls: "brain-atlas-task-status", text: node.active ? "running" : "done" });
-    }
-  }
-
-  /** The action-history card body: a scrollable log of every action (reads/writes/spawns/ends), newest first. */
-  private syncHistory(): void {
-    const el = this.historyEl;
-    const activity = this.plugin.activity;
-    if (!el || !activity) return;
-    const count = activity.historyCount();
-    if (this.historyCountEl) this.historyCountEl.setText(String(count));
-    if (count === this.historyRendered) return;
-    this.historyRendered = count;
-    el.empty();
-    const rows = activity.recentHistory(200);
-    if (rows.length === 0) {
-      el.createDiv({ cls: "brain-atlas-history-empty", text: "no activity yet" });
-      return;
-    }
-    for (const h of rows) {
-      const row = el.createDiv({ cls: "brain-atlas-history-row" });
-      row.setAttr("data-event", h.event);
-      row.style.setProperty("--live-color", h.color);
-      row.createSpan({ cls: "brain-atlas-history-verb", text: HISTORY_VERB[h.event] ?? h.event });
-      row.createSpan({ cls: "brain-atlas-history-label", text: h.label });
-    }
+    this.syncTaskPanel(nodes.filter((n) => n.kind !== "shell"));
+    this.syncShellPanel(nodes.filter((n) => n.kind === "shell"));
+    this.syncHistory();
   }
 
   /**
-   * A live task/agent as a real BrainNode, grid-placed on a temporal side: RIGHT for foreground commands +
-   * terminals, LEFT for background shells + deployed agents. The on-node name is short (the program/type);
-   * the full command lives in entry.detail (shown in the task manager, not on the map).
+   * Merge the current live task/agent nodes on top of the vault graph so they render as real nodes (glow,
+   * depth, hover), placed so their labels do not overlap on screen. A NEW graph object is produced so the
+   * WebGL renderer rebuilds its buffers; live glow then animates per frame via the activity state.
+   */
+  private composeGraph(): void {
+    const vault = this.vaultGraph;
+    if (!vault) return;
+    const live = this.plugin.activity?.liveNodes() ?? [];
+    this.mergedLiveSig = liveSignature(live);
+    if (live.length === 0) {
+      this.graph = vault;
+      this.plugin.activity?.setGraph(Object.keys(vault.idx), vault.adj);
+      return;
+    }
+    const bySide: Record<"left" | "right", LiveEntry[]> = { left: [], right: [] };
+    for (const e of live) bySide[liveSideForKind(e.kind)].push(e);
+    const liveNodes: BrainNode[] = [];
+    for (const side of ["left", "right"] as const) {
+      // Already-placed nodes keep their spots; each new node, oldest first, takes the nearest free spot whose
+      // label overlaps none of them. A task that ended and fully faded is gone from bySide, so its spot frees.
+      const occupants: LiveOccupant[] = [];
+      const pos = new Map<string, { x: number; y: number; z: number }>();
+      const ordered = [...bySide[side]].sort((a, b) => a.seq - b.seq);
+      for (const e of ordered) {
+        if (e.x === undefined || e.y === undefined || e.z === undefined) continue;
+        const p = { x: e.x, y: e.y, z: e.z };
+        // A pinned spot is kept only while it still reads clear of the older nodes accepted so far.
+        if (!liveSpotClear(e.label, p, occupants)) continue;
+        pos.set(e.id, p);
+        occupants.push({ label: e.label, x: p.x, y: p.y, z: p.z });
+      }
+      for (const e of ordered) {
+        if (pos.has(e.id)) continue;
+        const p = placeLiveNode(side, e.label, occupants);
+        this.plugin.activity?.setLivePos(e.id, p.x, p.y, p.z);
+        pos.set(e.id, p);
+        occupants.push({ label: e.label, x: p.x, y: p.y, z: p.z });
+      }
+      for (const entry of ordered) {
+        const p = pos.get(entry.id);
+        if (p) liveNodes.push(this.makeLiveNode(entry, p));
+      }
+    }
+    const idx: Record<string, BrainNode> = { ...vault.idx };
+    for (const node of liveNodes) idx[node.id] = node;
+    this.graph = { ...vault, nodes: [...vault.nodes, ...liveNodes], idx, adj: vault.adj };
+    this.plugin.activity?.setGraph(Object.keys(idx), vault.adj);
+  }
+
+  /**
+   * A live task/agent as a real BrainNode on a temporal face: RIGHT for foreground commands and terminals,
+   * LEFT for background shells and agents. The on-node name is short; the full command is in entry.detail
+   * (shown in the Active card, not on the map).
    */
   private makeLiveNode(entry: LiveEntry, pos: { x: number; y: number; z: number }): BrainNode {
     const kindLabel = entry.kind === "shell" ? "background shell"
@@ -360,53 +293,35 @@ export class BrainAtlasView extends ItemView {
     };
   }
 
-  /**
-   * Merge the current live task/agent nodes on top of the vault graph so they render as real nodes (glow,
-   * depth, hover), placed so their labels do not overlap on screen. A NEW graph object is produced so the WebGL renderer
-   * rebuilds its buffers; live glow then animates per-frame via the activity system with no further rebuild.
-   */
-  private composeGraph(): void {
-    const vault = this.vaultGraph;
-    if (!vault) return;
-    const live = this.plugin.activity?.liveNodes() ?? [];
-    this.mergedLiveSig = live.map((e) => `${e.id}:${e.active ? 1 : 0}:${e.kind}`).join("|");
-    if (live.length === 0) {
-      this.graph = vault;
-      this.plugin.activity?.setGraph(Object.keys(vault.idx), vault.adj);
-      return;
-    }
-    const bySide: Record<"left" | "right", LiveEntry[]> = { left: [], right: [] };
-    for (const e of live) bySide[liveSideForKind(e.kind)].push(e);
-    const liveNodes: BrainNode[] = [];
-    for (const side of ["left", "right"] as const) {
-      // Already-placed nodes (pinned on first placement, or pinned by a timelapse replay) occupy their spots;
-      // each new node, oldest first, takes the nearest free spot whose label overlaps none of them. A task that
-      // ended and fully faded is no longer in bySide, so its spot is free for the next arrival.
-      const occupants: LiveOccupant[] = [];
-      const pos = new Map<string, { x: number; y: number; z: number }>();
-      const ordered = [...bySide[side]].sort((a, b) => a.seq - b.seq);
-      for (const e of ordered) {
-        if (e.x === undefined) continue;
-        const p = { x: e.x, y: e.y as number, z: e.z as number };
-        // A pinned spot is kept only while it still reads clear of the (older) nodes accepted so far: a spot
-        // replayed by the timelapse onto a busy face, or one placed by an older model, is re-placed below.
-        if (!liveSpotClear(e.label, p, occupants)) continue;
-        pos.set(e.id, p);
-        occupants.push({ label: e.label, x: p.x, y: p.y, z: p.z });
-      }
-      for (const e of ordered) {
-        if (pos.has(e.id)) continue;
-        const p = placeLiveNode(side, e.label, occupants);
-        this.plugin.activity?.setLivePos(e.id, p.x, p.y, p.z); // pin it + record xyz for the timelapse
-        pos.set(e.id, p);
-        occupants.push({ label: e.label, x: p.x, y: p.y, z: p.z });
-      }
-      for (const entry of bySide[side]) liveNodes.push(this.makeLiveNode(entry, pos.get(entry.id)!));
-    }
-    const idx: Record<string, BrainNode> = { ...vault.idx };
-    for (const node of liveNodes) idx[node.id] = node;
-    this.graph = { ...vault, nodes: [...vault.nodes, ...liveNodes], idx, adj: vault.adj };
-    this.plugin.activity?.setGraph(Object.keys(idx), vault.adj);
+  /** A collapsible card: a clickable header (chevron + title + count) over a body the sync methods fill. */
+  private makeCard(parent: HTMLElement, key: string, title: string): { card: HTMLDivElement; count: HTMLSpanElement; body: HTMLDivElement } {
+    const card = parent.createDiv({ cls: "brain-atlas-card" });
+    card.setAttr("data-card", key);
+    card.toggleClass("is-collapsed", !!this.collapsed[key]);
+    const header = card.createDiv({ cls: "brain-atlas-card-header" });
+    header.createSpan({ cls: "brain-atlas-card-chevron", text: "\u25BE" });
+    header.createSpan({ cls: "brain-atlas-card-title", text: title });
+    const count = header.createSpan({ cls: "brain-atlas-card-count" });
+    header.addEventListener("click", () => {
+      const next = !card.hasClass("is-collapsed");
+      card.toggleClass("is-collapsed", next);
+      this.collapsed[key] = next;
+    });
+    const body = card.createDiv({ cls: "brain-atlas-card-body" });
+    return { card, count, body };
+  }
+
+  /** Show the live cards only while the feature is on, docked below the controls (and the Info panel). */
+  private syncLiveDock(): void {
+    this.liveDockEl?.toggleClass("is-hidden", !this.plugin.settings.activityEnabled);
+    this.positionLiveDock();
+  }
+
+  private positionLiveDock(): void {
+    if (!this.liveDockEl || !this.controlsEl) return;
+    let top = this.controlsEl.offsetTop + this.controlsEl.offsetHeight + 8;
+    if (this.showInfo && this.infoEl) top = Math.max(top, this.infoEl.offsetTop + this.infoEl.offsetHeight + 8);
+    this.liveDockEl.style.top = `${top}px`;
   }
 
   /** The Active card body: every live task (commands / terminals / agents) grouped by kind. */
@@ -414,8 +329,8 @@ export class BrainAtlasView extends ItemView {
     const panel = this.taskPanelEl;
     if (!panel) return;
     const running = nodes.filter((n) => n.active).length;
-    if (this.taskCountEl) this.taskCountEl.setText(nodes.length ? `${running} running` : "");
-    const sig = nodes.map((n) => `${n.id}:${n.active ? 1 : 0}:${n.kind}`).join("|");
+    this.taskCountEl?.setText(nodes.length ? `${running} running` : "");
+    const sig = liveSignature(nodes);
     if (sig === this.taskPanelSig) return;
     this.taskPanelSig = sig;
     panel.empty();
@@ -423,7 +338,6 @@ export class BrainAtlasView extends ItemView {
       panel.createDiv({ cls: "brain-atlas-history-empty", text: "nothing running" });
       return;
     }
-
     const groups: Array<{ kind: string; title: string }> = [
       { kind: "command", title: "Commands" },
       { kind: "terminal", title: "Terminals" },
@@ -433,104 +347,62 @@ export class BrainAtlasView extends ItemView {
       const rows = nodes.filter((n) => n.kind === group.kind);
       if (rows.length === 0) continue;
       const section = panel.createDiv({ cls: "brain-atlas-task-group" });
-      section.createDiv({ cls: "brain-atlas-task-group-title", text: `${group.title} — ${rows.length}` });
-      for (const node of rows) {
-        const row = section.createDiv({ cls: "brain-atlas-task-row" });
-        row.toggleClass("is-ending", !node.active);
-        row.setAttr("data-kind", node.kind);
-        row.style.setProperty("--live-color", node.color);
-        row.createSpan({ cls: "brain-atlas-task-dot" });
-        const body = row.createDiv({ cls: "brain-atlas-task-body" });
-        body.createSpan({ cls: "brain-atlas-task-name", text: node.label });
-        if (node.detail && node.detail !== node.label) {
-          body.createSpan({ cls: "brain-atlas-task-detail", text: node.detail });
-        }
-        row.createSpan({ cls: "brain-atlas-task-status", text: node.active ? "running" : "done" });
-      }
+      section.createDiv({ cls: "brain-atlas-task-group-title", text: `${group.title} - ${rows.length}` });
+      for (const node of rows) this.createTaskRow(section, node);
     }
   }
 
-  /** Build the in-view Layout & Display config panel (the graph-view-style spacing/size controls). */
-  private buildConfigPanel(): void {
-    const el = this.configEl;
-    if (!el) return;
+  /** The Shells card body: background shells (they end on their TTL, not on an end event). */
+  private syncShellPanel(shells: LiveScreenNode[]): void {
+    const panel = this.shellPanelEl;
+    if (!panel) return;
+    const running = shells.filter((n) => n.active).length;
+    this.shellCountEl?.setText(shells.length ? `${running} active` : "");
+    const sig = liveSignature(shells);
+    if (sig === this.shellPanelSig) return;
+    this.shellPanelSig = sig;
+    panel.empty();
+    if (shells.length === 0) {
+      panel.createDiv({ cls: "brain-atlas-history-empty", text: "no background shells" });
+      return;
+    }
+    for (const node of shells) this.createTaskRow(panel, node);
+  }
+
+  private createTaskRow(parent: HTMLElement, node: LiveScreenNode): void {
+    const row = parent.createDiv({ cls: "brain-atlas-task-row" });
+    row.toggleClass("is-ending", !node.active);
+    row.setAttr("data-kind", node.kind);
+    row.style.setProperty("--live-color", node.color);
+    row.createSpan({ cls: "brain-atlas-task-dot" });
+    const body = row.createDiv({ cls: "brain-atlas-task-body" });
+    body.createSpan({ cls: "brain-atlas-task-name", text: node.label });
+    if (node.detail && node.detail !== node.label) body.createSpan({ cls: "brain-atlas-task-detail", text: node.detail });
+    row.createSpan({ cls: "brain-atlas-task-status", text: node.active ? "running" : "done" });
+  }
+
+  /** The History card body: a scrollable log of every action (reads, writes, spawns, ends), newest first. */
+  private syncHistory(): void {
+    const el = this.historyEl;
+    const activity = this.plugin.activity;
+    if (!el || !activity) return;
+    const count = activity.historyCount();
+    this.historyCountEl?.setText(count ? String(count) : "");
+    if (count === this.historyRendered) return;
+    this.historyRendered = count;
     el.empty();
-    // Node size + Spacing change the layout, so apply on release (they rebuild the graph).
-    this.addConfigSlider(el, "Node size", 0.4, 3, 0.1, this.plugin.settings.nodeSizeScale, (v) => {
-      this.plugin.settings.nodeSizeScale = v;
-      void this.persistViewSettings();
-    });
-    this.addConfigSlider(el, "Spacing / density", 0.5, 2.5, 0.1, this.plugin.settings.layoutSpread, (v) => {
-      this.plugin.settings.layoutSpread = v;
-      void this.persistViewSettings();
-    }, { desc: "Low = clustered tight in each region; high = spread through the 3D volume." });
-    // Link thickness is cheap (a render option), so apply it live while dragging.
-    this.addConfigSlider(el, "Link thickness", 0.4, 3, 0.1, this.plugin.settings.linkThickness, (v) => {
-      this.plugin.settings.linkThickness = v;
-      this.renderer.setOptions({ linkThickness: v });
-      this.renderer.requestFrame();
-      void this.plugin.saveSettings();
-    }, { live: true });
-    // Reset to defaults.
-    const resetRow = el.createDiv({ cls: "brain-atlas-config-reset-row" });
-    const resetBtn = resetRow.createEl("button", { cls: "brain-atlas-control-button", text: "Reset to default" });
-    resetBtn.type = "button";
-    resetBtn.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      this.plugin.settings.nodeSizeScale = DEFAULT_SETTINGS.nodeSizeScale;
-      this.plugin.settings.layoutSpread = DEFAULT_SETTINGS.layoutSpread;
-      this.plugin.settings.linkThickness = DEFAULT_SETTINGS.linkThickness;
-      this.renderer.setOptions({ linkThickness: DEFAULT_SETTINGS.linkThickness });
-      this.buildConfigPanel();          // redraw the sliders at their defaults
-      void this.persistViewSettings();  // rebuild the layout + save
-    });
-    el.createDiv({
-      cls: "brain-atlas-config-note",
-      text: "The brain is anatomical, so graph-view forces (center / repel / link force) don't apply — Spacing controls how far notes fan out within each region."
-    });
-  }
-
-  /** One labelled slider row. `live` applies on every drag tick (cheap options); else on release (layout). */
-  private addConfigSlider(
-    parent: HTMLElement,
-    label: string,
-    min: number,
-    max: number,
-    step: number,
-    value: number,
-    apply: (v: number) => void,
-    opts: { live?: boolean; desc?: string } = {}
-  ): void {
-    const row = parent.createDiv({ cls: "brain-atlas-config-row" });
-    const head = row.createDiv({ cls: "brain-atlas-config-head" });
-    head.createSpan({ cls: "brain-atlas-config-label", text: label });
-    const val = head.createSpan({ cls: "brain-atlas-config-val", text: value.toFixed(1) });
-    const input = row.createEl("input", { cls: "brain-atlas-config-slider" });
-    input.type = "range";
-    input.min = String(min);
-    input.max = String(max);
-    input.step = String(step);
-    input.value = String(value);
-    input.addEventListener("input", () => val.setText(Number(input.value).toFixed(1)));
-    input.addEventListener(opts.live ? "input" : "change", () => apply(Number(input.value)));
-    if (opts.desc) row.createDiv({ cls: "brain-atlas-config-desc", text: opts.desc });
-  }
-
-  /** Empty the Active + Shells card bodies (the Tasks quick toggle is off). Live nodes + history stay. */
-  private clearLiveUi(): void {
-    if (this.taskPanelEl && this.taskPanelSig !== "") {
-      this.taskPanelEl.empty();
-      this.taskPanelEl.createDiv({ cls: "brain-atlas-history-empty", text: "tasks hidden (Tasks off)" });
+    const rows = activity.recentHistory(200);
+    if (rows.length === 0) {
+      el.createDiv({ cls: "brain-atlas-history-empty", text: "no activity yet" });
+      return;
     }
-    if (this.shellPanelEl && this.shellPanelSig !== "") {
-      this.shellPanelEl.empty();
-      this.shellPanelEl.createDiv({ cls: "brain-atlas-history-empty", text: "shells hidden (Tasks off)" });
+    for (const h of rows) {
+      const row = el.createDiv({ cls: "brain-atlas-history-row" });
+      row.setAttr("data-event", h.event);
+      row.style.setProperty("--live-color", h.color);
+      row.createSpan({ cls: "brain-atlas-history-verb", text: HISTORY_VERB[h.event] ?? h.event });
+      row.createSpan({ cls: "brain-atlas-history-label", text: h.label });
     }
-    this.taskCountEl?.setText("");
-    this.shellCountEl?.setText("");
-    this.taskPanelSig = "";
-    this.shellPanelSig = "";
   }
 
   /** Select the desired renderer kind based on rendererMode + mobile detection. */
@@ -697,30 +569,16 @@ export class BrainAtlasView extends ItemView {
   }
 
   private createControls(root: HTMLElement): void {
-    this.controlsEl = root.createDiv({ cls: "brain-atlas-controls brain-atlas-card" });
-    this.controlsEl.setAttr("data-card", "menu");
-    this.controlsEl.toggleClass("is-collapsed", !!this.collapsed.menu);
-    // Collapsible header (chevron + title), like the dock cards, so the whole button block folds away.
-    const header = this.controlsEl.createDiv({ cls: "brain-atlas-card-header" });
-    header.createSpan({ cls: "brain-atlas-card-chevron", text: "▾" });
-    header.createSpan({ cls: "brain-atlas-card-title", text: "View" });
-    header.addEventListener("click", () => this.toggleCard("menu", this.controlsEl as HTMLElement));
-
-    const groups = this.controlsEl.createDiv({ cls: "brain-atlas-controls-groups brain-atlas-card-body" });
-    this.controlsGroupsEl = groups;
-    const primary = groups.createDiv({ cls: "brain-atlas-control-group" });
+    this.controlsEl = root.createDiv({ cls: "brain-atlas-controls" });
+    const primary = this.controlsEl.createDiv({ cls: "brain-atlas-control-group" });
     this.infoButton = this.createControlButton(primary, "Info", () => this.toggleInfo());
-    this.labelButton = this.createControlButton(primary, "Sections", () => this.toggleLabels());
-    this.namesButton = this.createControlButton(primary, "Names", () => this.toggleNames());
-    this.spinButton = this.createControlButton(primary, "Spin", () => this.toggleSpin());
-    this.tasksButton = this.createControlButton(primary, "Tasks", () => this.toggleTasks());
-    this.createControlButton(primary, "Reset", () => this.renderer.resetView());
+    this.labelButton = this.createControlButton(primary, "Labels", () => this.toggleLabels());
+    this.allButton = this.createControlButton(primary, "All", () => this.setAllRegions(true));
+    this.noneButton = this.createControlButton(primary, "None", () => this.setAllRegions(false));
+    this.createControlButton(primary, "Reset", () => this.renderer.resetView())
+      .setAttr("aria-label", "Reset rotation, zoom and pan");
 
-    const regionsRow = groups.createDiv({ cls: "brain-atlas-control-group" });
-    this.allButton = this.createControlButton(regionsRow, "All", () => this.setAllRegions(true));
-    this.noneButton = this.createControlButton(regionsRow, "None", () => this.setAllRegions(false));
-
-    const lobes = groups.createDiv({ cls: "brain-atlas-control-group brain-atlas-region-controls" });
+    const lobes = this.controlsEl.createDiv({ cls: "brain-atlas-control-group brain-atlas-region-controls" });
     for (const lobe of LOBES) {
       this.lobeButtons[lobe] = this.createControlButton(lobes, shortLobeLabel(lobe), () => this.toggleLobe(lobe));
       this.lobeButtons[lobe]?.setAttr("aria-label", `${LOBE_CENTERS[lobe].label} region`);
@@ -744,6 +602,7 @@ export class BrainAtlasView extends ItemView {
     this.syncControls();
     this.syncLegend(graph);
     this.syncInfoPanel();
+    this.syncLiveDock();
     this.syncTooltip();
     this.syncFocusCard();
     this.emptyEl?.toggleClass("is-visible", graph.nodes.length === 0);
@@ -759,12 +618,6 @@ export class BrainAtlasView extends ItemView {
     this.infoButton?.setAttr("aria-pressed", String(this.showInfo));
     this.labelButton?.toggleClass("is-active", this.plugin.settings.showLobeLabels);
     this.labelButton?.setAttr("aria-pressed", String(this.plugin.settings.showLobeLabels));
-    this.namesButton?.toggleClass("is-active", this.showAllLabels);
-    this.namesButton?.setAttr("aria-pressed", String(this.showAllLabels));
-    this.spinButton?.toggleClass("is-active", this.plugin.settings.idleAutoRotate);
-    this.spinButton?.setAttr("aria-pressed", String(this.plugin.settings.idleAutoRotate));
-    this.tasksButton?.toggleClass("is-active", this.liveUiVisible);
-    this.tasksButton?.setAttr("aria-pressed", String(this.liveUiVisible));
     const enabledCount = LOBES.filter((lobe) => enabled[lobe]).length;
     this.allButton?.toggleClass("is-active", enabledCount === LOBES.length);
     this.noneButton?.toggleClass("is-active", enabledCount === 0);
@@ -778,9 +631,9 @@ export class BrainAtlasView extends ItemView {
 
   private syncLegend(graph: BrainGraph): void {
     if (!this.legendEl) return;
-    // The Anatomical Regions card carries the title; showLegendChip hides the whole card.
-    this.legendCardEl?.toggleClass("is-hidden", !this.plugin.settings.showLegendChip);
     this.legendEl.empty();
+    this.legendEl.toggleClass("is-hidden", !this.plugin.settings.showLegendChip);
+    this.legendEl.createDiv({ cls: "brain-atlas-legend-title", text: "Anatomical regions" });
     const stats = this.renderer.getLobeStats();
     for (const lobe of Object.keys(LOBE_CENTERS) as LobeName[]) {
       const center = LOBE_CENTERS[lobe];
@@ -887,10 +740,10 @@ export class BrainAtlasView extends ItemView {
   }
 
   private pinNode(node: BrainNode, position: PinnedNodePosition): void {
-    const act = this.plugin.activity;
-    if (node.kind === "workThread" && act && act.liveNodes().some((e) => e.id === node.id)) {
-      // a dragged live node is pinned in the activity state (and the timelapse), never in the vault settings
-      act.setLivePos(node.id, position.x, position.y, position.z);
+    const activity = this.plugin.activity;
+    if (activity && activity.liveNodes().some((e) => e.id === node.id)) {
+      // A dragged live node keeps its spot in the activity state, never in the vault settings.
+      activity.setLivePos(node.id, position.x, position.y, position.z);
       return;
     }
     this.plugin.settings = {
@@ -915,29 +768,6 @@ export class BrainAtlasView extends ItemView {
     this.syncOverlays();
   }
 
-  /** Node-label density: minimal (in-use/hover/focus) vs all (dense hub labels). View-local. */
-  private toggleNames(): void {
-    this.showAllLabels = !this.showAllLabels;
-    this.renderer.setOptions({ showAllLabels: this.showAllLabels });
-    this.syncOverlays();
-  }
-
-  /** Idle auto-rotation on/off (persisted). */
-  private toggleSpin(): void {
-    this.plugin.settings.idleAutoRotate = !this.plugin.settings.idleAutoRotate;
-    this.renderer.setOptions({ idleAutoRotate: this.plugin.settings.idleAutoRotate });
-    this.syncOverlays();
-    void this.persistViewSettings();
-  }
-
-  /** Show/hide the live task UI (reticle stack + bottom-left task manager). View-local. */
-  private toggleTasks(): void {
-    this.liveUiVisible = !this.liveUiVisible;
-    if (!this.liveUiVisible) this.clearLiveUi();
-    this.syncOverlays();
-    this.renderer.requestFrame();
-  }
-
   private toggleLobe(lobe: LobeName): void {
     const current = this.plugin.settings.enabledLobes[lobe];
     this.plugin.settings.enabledLobes = setLobeEnabled(this.plugin.settings.enabledLobes, lobe, !current);
@@ -959,7 +789,12 @@ export class BrainAtlasView extends ItemView {
   }
 }
 
-/** Which temporal side a live kind sits on: foreground work (commands/terminals) right, background (shells) + agents left. */
+/** Change signature of a live-node list: which nodes exist, and whether each is still running. */
+function liveSignature(nodes: Array<{ id: string; active: boolean; kind: string }>): string {
+  return nodes.map((n) => `${n.id}:${n.active ? 1 : 0}:${n.kind}`).join("|");
+}
+
+/** Which temporal side a live kind sits on: foreground work (commands, terminals) right; shells and agents left. */
 function liveSideForKind(kind: string): "left" | "right" {
   return kind === "command" || kind === "terminal" ? "right" : "left";
 }

@@ -48,18 +48,32 @@ This release focuses on making Brain Atlas work with real vault taxonomies inste
 - Click a node to open the backing note.
 - Drag a node to pin its position in the atlas.
 - Local-only rendering. Brain Atlas does not send vault data to a server.
-- Live activity: a loopback listener lights the node of every note an external tool (Claude Code hooks) reads or writes, with a cascade to linked notes and a fade. See "Live activity (Claude Code)" below.
+- Optional live activity (off by default): watch Claude Code work in your vault. Notes light up as they are read or written, and running commands and agents appear as temporary nodes. See "Live activity (Claude Code)" below.
 
 ## Live activity (Claude Code)
 
-Brain Atlas can light up nodes as something else works in the vault. On desktop it runs a loopback HTTP listener (127.0.0.1 only, default port `8766`, `Live activity` settings) and accepts the payload Claude Code passes to its hooks:
+Off by default. Turn it on in `Settings -> Brain Atlas -> Live activity`. Desktop only.
+
+When it is on, Brain Atlas starts a small HTTP listener on `127.0.0.1` (this computer only, default port `8766`) and lights up notes as an external tool works in the vault. The brain then holds still: the background signals and twinkle stop, and each event fires a signal to the note it touched. Three cards appear under the controls: `Active` (running commands, terminals and agents), `Shells` (background shells) and `History` (the last 200 events, kept in memory only).
+
+Note reads and writes use the payload Claude Code passes to its hooks:
 
 ```
 POST http://127.0.0.1:8766/read
 { "tool_name": "Read", "tool_input": { "file_path": "folder/note.md" } }
 ```
 
-`tool_name` `Read` (or `Skill`) glows green, `Edit` / `Write` / `MultiEdit` / `NotebookEdit` glow red. `file_path` is the vault-relative path (an absolute path inside the vault is accepted too). The lit node swells and its linked neighbours light at the `Cascade` level; everything holds for `Hold` seconds and then fades over `Decay`. `GET /status` returns the listener state. Unknown paths are ignored. The contract is the same one the [Neural Vault](https://github.com/williansaez/obsidian-neural-vault) plugin uses for Obsidian's built-in graph, so one hook can feed both.
+`tool_name` `Read` (or `Skill`) glows green, `Edit` / `Write` / `MultiEdit` / `NotebookEdit` glow red, and other tools are ignored. `file_path` is the vault-relative path (an absolute path inside the vault is accepted too). The lit node swells and its linked neighbours light at the `Cascade` level; everything holds for `Hold` seconds and then fades over `Decay`. `GET /status` returns the listener state. Unknown paths are ignored. The contract is the same one the [Neural Vault](https://github.com/williansaez/obsidian-neural-vault) plugin uses for Obsidian's built-in graph, so one hook can feed both.
+
+Running work (a command, a terminal, a background shell or a subagent) can be shown as a temporary node:
+
+```
+POST http://127.0.0.1:8766/live
+{ "op": "spawn", "id": "toolu_123", "kind": "command", "label": "npm", "detail": "npm test" }
+{ "op": "end", "id": "toolu_123" }
+```
+
+`kind` is `command`, `terminal`, `shell` or `agent`. The node appears on the temporal lobe (commands and terminals on the right, shells and agents on the left), pulses while it runs and fades after `end`. If the `end` never arrives it fades after 3 minutes (15 minutes for background shells).
 
 A minimal Claude Code hook (`.claude/settings.json` in the vault):
 
@@ -74,7 +88,7 @@ A minimal Claude Code hook (`.claude/settings.json` in the vault):
 }
 ```
 
-Nothing is sent anywhere but the local listener; turning the toggle off stops it.
+The listener answers local tools only. It sends no CORS headers, refuses any request that carries an `Origin` header (a browser adds one when a web page sends a request), and refuses any `Host` other than `127.0.0.1:<port>` or `localhost:<port>`. Bodies over 1 MiB are ignored. Nothing is sent anywhere, nothing is written to the vault, and turning the toggle off stops the listener and clears the activity.
 
 ## Install
 
@@ -127,7 +141,8 @@ Controls:
 - Drag empty space to rotate.
 - Drag a node to pin it in place.
 - Scroll to zoom.
-- Right-click to reset the camera.
+- Shift-drag, Alt-drag or middle-drag to pan.
+- `Reset` (or right-click) resets rotation, zoom and pan.
 - `Labels` toggles all canvas labels.
 - `All` restores every region.
 - `None` dims every region.
@@ -141,6 +156,8 @@ Settings:
 - `Classification report` explains how notes were grouped and suggests mappings for unknown frontmatter values.
 - `Frontmatter value mappings` let existing vault metadata drive categories without renaming fields or values.
 - `Folder region mappings` help folder-heavy vaults spread notes across anatomical regions.
+- `Node size`, `Layout spread` and `Link thickness` adjust the drawing. All three default to 1, the standard look.
+- `Live activity` (off by default) lights up notes as Claude Code reads and writes them. See "Live activity (Claude Code)".
 
 ## How Notes Are Classified
 
@@ -215,6 +232,8 @@ Default lobe mapping:
 ## Privacy
 
 Brain Atlas reads Obsidian's local vault metadata and renders it in a local canvas view. It enumerates Markdown files in the vault with Obsidian's vault API, then uses each note's path, basename, frontmatter, tags, links, and embeds from Obsidian's metadata cache to build the graph. It does not read full note contents, make network requests, upload vault data, or require an account. The WebGL2 renderer executes entirely on the local GPU; no vault data or render output leaves the device.
+
+The optional `Live activity` feature is off by default. When you turn it on, it opens a listener on `127.0.0.1` that only local tools can reach. It receives file paths and command labels from those tools, keeps a short history in memory, and never sends anything off the device.
 
 Because note names and paths appear visually in the graph when labels are enabled, use the `Labels` toggle before screensharing if your vault contains private note titles.
 

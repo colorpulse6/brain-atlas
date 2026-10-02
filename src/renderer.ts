@@ -77,9 +77,14 @@ export class BrainRenderer extends RenderCore {
     // Pass: haze (lobe glow gradients, additive).
     if (this.passEnabled("haze")) this.drawLobeHaze(ctx, project, scale, graph, lobeMul);
 
-    // No idle animation: the cloud twinkle is frozen to a constant so the brain is still at rest.
-    // (Only activity -- reads/writes/live tasks -- animates now.)
-    const cloudProj = this.cloud.map((p) => ({ p, pr: project(p), tw: 0.85 }));
+    // Live activity freezes the twinkle clock at 0 so the brain is still at rest (the WebGL cloud
+    // shader gets the same frozen clock); otherwise the cloud twinkles as before.
+    const twinkleClock = this.options.liveActivity ? 0 : now;
+    const cloudProj = this.cloud.map((p) => ({
+      p,
+      pr: project(p),
+      tw: 0.65 + 0.35 * Math.sin(twinkleClock * 0.0005 * (p.twFreq ?? 1) + (p.twPhase ?? 0))
+    }));
     const nodeProjs = graph.nodes
       .filter((node) => node._3dLobe)
       .map((node) => ({ node, ...project(node._3dLobe as Vec3) }));
@@ -134,11 +139,11 @@ export class BrainRenderer extends RenderCore {
     // Pass: signals (additive particle trails).
     if (this.passEnabled("signals")) this.drawSignals(ctx, now, project, lobeMul);
 
-    // Pass: labels. Section (lobe) labels follow showLobeLabels; node labels are ALWAYS drawn but minimal
-    // (only in-use / hovered / focused nodes) unless showAllLabels turns the dense mode back on.
+    // Pass: labels. The label setting gates both lobe labels and node labels; with live activity on,
+    // glowing notes and live nodes are labelled even when the automatic labels are off.
     if (this.passEnabled("labels")) {
       if (this.options.showLobeLabels) this.drawLobeLabels(ctx, project, graph, lobeStats, lobeMul);
-      this.drawNodeLabels(ctx, nodeProjs, graph, lobeMul);
+      if (this.options.showLobeLabels || this.options.liveActivity) this.drawNodeLabels(ctx, nodeProjs, graph, lobeMul);
     }
 
     // Pass: compass (orientation gizmo).
@@ -281,7 +286,10 @@ export class BrainRenderer extends RenderCore {
     const radius = nodeRadius(node) * (this.options.nodeSizeScale || 1) * Math.max(0.55, projected.scale) * (isHover ? 1.18 : isFocus ? 1.25 : 1) * swell;
     const fade = Math.max(0.32, 1 - projected.depth * 0.75);
     const dim = node.status === "archived" ? 0.30 : node.status === "dormantRelevant" ? 0.55 : 1;
-    const alpha = Math.min(1, fade * dim * lobeMul(node._lobeName) + level * 0.5);
+    const lobeM = lobeMul(node._lobeName);
+    // The glow boost is scaled by the region multiplier too, so a hidden or dimmed region stays dim
+    // (as in WebGL, where uLobeMul scales the whole node alpha).
+    const alpha = act ? Math.min(1, lobeM * (fade * dim + level * 0.5)) : fade * dim * lobeM;
     if (alpha < 0.05) return;
 
     const haloRadius = radius * 3.6 * graph.CHAOS.halo;
@@ -387,8 +395,8 @@ export class BrainRenderer extends RenderCore {
       zoom: this.zoom,
       width: this.width,
       mobile: this.effectivePerformancePreset() === "mobile",
-      activeIds: this.activeNoteIds(),
-      showAll: this.options.showAllLabels
+      activeIds: this.options.liveActivity ? this.activeNoteIds() : undefined,
+      showAll: this.options.showLobeLabels
     });
   }
 

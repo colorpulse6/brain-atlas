@@ -11,8 +11,15 @@
  *          "tool_input": { "file_path": "knowledge/architecture/framework-overview.md" } }
  *        file_path is vault-relative POSIX; an absolute path is tolerated (vault base stripped,
  *        backslashes converted). notebook_path and a top-level file_path are accepted too.
- *        Always answers 200 "ok". Unknown paths are counted in `missed` and ignored.
- *   GET  /status  -> { port, enabled, active, lastPath, lastKind, nodeCount, missed, events }
+ *        Always answers 200 "ok". Unknown paths are counted in `missed` and ignored; a tool
+ *        name that is present but not listed above is ignored.
+ *   POST http://127.0.0.1:<port>/live   body = { "op": "spawn" | "end", "id", "kind", "label", "detail" }
+ *        A transient live node (command / shell / terminal / agent) appears and later fades.
+ *   GET  /status  -> { port, enabled, active, lastPath, lastKind, nodeCount, missed, events, live, lastLive }
+ *
+ * Only local tools may talk to the listener. It sends no CORS headers, refuses any request
+ * that carries an Origin header (browsers add one to cross-site requests), and refuses a
+ * Host other than 127.0.0.1:<port> or localhost:<port> (DNS rebinding).
  *
  * Semantics: an event sets the node's activation to 1 (kind read = Read/Skill, write = the edit tools);
  * linked neighbours get max(existing, cascade). A level holds for holdSeconds, then decays as
@@ -50,8 +57,8 @@ export interface LiveEntry {
   endAt: number | null;
   /** Current glow level in [0, 1], recomputed by tick(). */
   level: number;
-  /** Resolved 3D position: recorded by the view once it grid-places the node, or supplied at spawn during
-   *  timelapse playback so the node reappears exactly where it was. Undefined until placed. */
+  /** Resolved 3D position, recorded by the view once it places the node (or the user drags it), so the
+   *  node keeps its spot while it lives. Undefined until placed. */
   x?: number;
   y?: number;
   z?: number;
@@ -75,9 +82,9 @@ export interface FireEvent {
   kind: ActivityKind | "spawn";
 }
 
-/** One line in the action history / timelapse: what happened, to what, when. */
+/** One line in the action history: what happened, to what, when. */
 export interface HistoryEntry {
-  /** Monotonic id (also the timelapse ordering). */
+  /** Monotonic id. */
   seq: number;
   /** tick-clock timestamp (ms). */
   at: number;
@@ -91,11 +98,6 @@ export interface HistoryEntry {
   label: string;
   /** color to tint the row (kind/agent color, or read/write color). */
   color: string;
-  /** The node's 3D position when the event happened (recorded once the view places it) -- so playback can
-   *  reproduce WHERE each node was, especially the transient temporal-lobe live nodes that no longer exist. */
-  x?: number;
-  y?: number;
-  z?: number;
 }
 
 export interface ActivityOptions {
@@ -148,6 +150,8 @@ export interface ActivityStatus {
 }
 
 const MIN_LEVEL = 0.01;
+/** Fire events waiting for a frame. A hidden view draws nothing, so the queue keeps only the newest. */
+const MAX_PENDING_FIRES = 64;
 
 const READ_TOOLS = new Set(["read", "skill"]);
 const WRITE_TOOLS = new Set(["edit", "write", "multiedit", "notebookedit"]);
@@ -200,8 +204,10 @@ export function parseEventBody(body: string, vaultBase?: string | null): ParsedE
     : {};
   const rawPath = input.file_path ?? input.notebook_path ?? payload.file_path;
   const path = normalizePath(rawPath, vaultBase);
-  const kind = kindForTool(payload.tool_name) ?? "read";
-  if (!path) return null;
+  // No tool name = a bare {file_path} post, treated as a read. A tool that is named but not a
+  // note read/write (Bash, Grep, ...) is ignored even if its payload carries a file_path.
+  const kind = payload.tool_name === undefined ? "read" : kindForTool(payload.tool_name);
+  if (!path || !kind) return null;
   return { path, kind };
 }
 
@@ -309,7 +315,7 @@ export class ActivityState {
   private liveSeq = 0;
   /** Actions (reads/writes/spawns) waiting for the renderer to fire a signal along the brain. */
   private fires: FireEvent[] = [];
-  /** Rolling log of every action, newest last (the top-right history column + the timelapse recorder read this). */
+  /** Rolling log of every action, newest last (the History card reads this). In memory only. */
   private historyLog: HistoryEntry[] = [];
   private historyCap = 1000;
   private historySeq = 0;
@@ -349,7 +355,7 @@ export class ActivityState {
       return false;
     }
     this.entries.set(id, { peak: 1, level: 1, kind, at: now });
-    this.fires.push({ target: id, kind }); // the renderer fires a signal to this node (a visible action)
+    this.pushFire({ target: id, kind }); // the renderer fires a signal to this node (a visible action)
     this.pushHistory(now, kind, "", id, id, kind === "write" ? this.options.writeColor : this.options.readColor);
     const cascade = Math.max(0, Math.min(1, this.options.cascade));
     if (cascade > 0) {
@@ -411,7 +417,7 @@ export class ActivityState {
    * Spawn or refresh a transient live node (a command Claude is running, a launched terminal, a subagent).
    * `region` is a LobeName string the renderer floats the node in. `now` is tick's clock.
    */
-  spawnLive(id: string, label: string, kind: LiveKind, region: string, now: number, detail = "", pos?: { x: number; y: number; z: number }): void {
+  spawnLive(id: string, label: string, kind: LiveKind, region: string, now: number, detail = ""): void {
     if (!id) return;
     this.lastLive = label || id;
     const existing = this.liveEntries.get(id);
@@ -426,30 +432,26 @@ export class ActivityState {
       seq: existing?.seq ?? (this.liveSeq += 1),
       endAt: null,
       level: 1,
-      // A pos supplied here (timelapse playback) pins the node; otherwise the view records it once it places it.
-      x: pos?.x ?? existing?.x,
-      y: pos?.y ?? existing?.y,
-      z: pos?.z ?? existing?.z
+      // The view records the position once it places the node.
+      x: existing?.x,
+      y: existing?.y,
+      z: existing?.z
     });
     if (!existing) {
-      this.fires.push({ target: id, kind: "spawn" }); // fire a signal when a new task appears
-      this.pushHistory(now, "spawn", kind, id, label || id, this.liveColorFor({ kind, label: label || id }), pos);
+      this.pushFire({ target: id, kind: "spawn" }); // fire a signal when a new task appears
+      this.pushHistory(now, "spawn", kind, id, label || id, this.liveColorFor({ kind, label: label || id }));
     }
   }
 
-  /** Record the resolved 3D position of a live node (the view calls this after grid-placing it) and backfill
-   *  the node's spawn history row so the timelapse captures WHERE each node was. */
+  /** Record the resolved 3D position of a live node (the view calls this after placing it, or after a drag). */
   setLivePos(id: string, x: number, y: number, z: number): void {
     const entry = this.liveEntries.get(id);
     if (entry) { entry.x = x; entry.y = y; entry.z = z; }
-    // Backfill the most recent spawn row for this id that has no position yet (cheap; happens once per node).
-    for (let i = this.historyLog.length - 1; i >= 0; i -= 1) {
-      const h = this.historyLog[i];
-      if (h.id === id && h.event === "spawn") {
-        if (h.x === undefined) { h.x = x; h.y = y; h.z = z; }
-        break;
-      }
-    }
+  }
+
+  private pushFire(fire: FireEvent): void {
+    this.fires.push(fire);
+    if (this.fires.length > MAX_PENDING_FIRES) this.fires.splice(0, this.fires.length - MAX_PENDING_FIRES);
   }
 
   /** Drain the pending fire events (the renderer turns each into a signal along the brain). */
@@ -461,29 +463,16 @@ export class ActivityState {
   }
 
   /** Append one action to the rolling history log (capped). */
-  private pushHistory(at: number, event: string, kind: string, id: string, label: string, color: string, pos?: { x: number; y: number; z: number }): void {
+  private pushHistory(at: number, event: string, kind: string, id: string, label: string, color: string): void {
     this.historySeq += 1;
-    const row: HistoryEntry = { seq: this.historySeq, at, event, kind, id, label: label || id, color };
-    if (pos) { row.x = pos.x; row.y = pos.y; row.z = pos.z; }
-    this.historyLog.push(row);
+    this.historyLog.push({ seq: this.historySeq, at, event, kind, id, label: label || id, color });
     if (this.historyLog.length > this.historyCap) this.historyLog.splice(0, this.historyLog.length - this.historyCap);
   }
 
-  /** The last `n` history entries, newest first (the top-right history column reads this). */
+  /** The last `n` history entries, newest first (the History card reads this). */
   recentHistory(n = 200): HistoryEntry[] {
     const start = Math.max(0, this.historyLog.length - n);
     return this.historyLog.slice(start).reverse();
-  }
-
-  /** The whole history log, oldest first (the timelapse recorder/playback reads this). */
-  fullHistory(): HistoryEntry[] {
-    return this.historyLog.slice();
-  }
-
-  /** History entries with seq > `afterSeq`, oldest first (the recorder flushes only what's new). */
-  historySince(afterSeq: number): HistoryEntry[] {
-    if (afterSeq <= 0) return this.historyLog.slice();
-    return this.historyLog.filter((h) => h.seq > afterSeq);
   }
 
   /** Monotonic count of history events (cheap change-detection for the view). */
@@ -497,8 +486,7 @@ export class ActivityState {
     if (!entry || !entry.active) return;
     entry.active = false;
     entry.endAt = now;
-    const pos = entry.x !== undefined ? { x: entry.x, y: entry.y as number, z: entry.z as number } : undefined;
-    this.pushHistory(now, "end", entry.kind, id, entry.label, this.liveColorFor(entry), pos);
+    this.pushHistory(now, "end", entry.kind, id, entry.label, this.liveColorFor(entry));
   }
 
   /** Live nodes currently worth drawing (level >= 0.01), newest first (stable by spawn order). */
@@ -606,6 +594,8 @@ export interface HttpLike {
 export interface HttpRequestLike {
   method?: string;
   url?: string;
+  /** Lower-cased header names, as Node's IncomingMessage provides them. */
+  headers?: Record<string, string | string[] | undefined>;
   on(event: "data", listener: (chunk: unknown) => void): unknown;
   on(event: "end", listener: () => void): unknown;
   on(event: "error", listener: (error: unknown) => void): unknown;
@@ -630,7 +620,7 @@ export interface ActivityListenerOptions {
   onLive?: (event: LiveEvent) => void;
   status: () => ActivityStatus;
   vaultBase?: string | null;
-  /** Bodies longer than this are truncated before parsing (default 1 MiB). */
+  /** Bodies longer than this are ignored (default 1 MiB). */
   maxBodyBytes?: number;
 }
 
@@ -686,19 +676,15 @@ export class ActivityListener {
   }
 
   private handle(req: HttpRequestLike, res: HttpResponseLike): void {
+    if (!this.isLocalClient(req)) {
+      this.reply(res, 403, "forbidden");
+      return;
+    }
     const method = (req.method || "GET").toUpperCase();
     const url = (req.url || "/").split("?")[0];
     if (method === "POST" && url === "/read") {
-      const limit = this.opts.maxBodyBytes ?? 1024 * 1024;
-      let body = "";
-      let truncated = false;
-      req.on("data", (chunk) => {
-        if (body.length < limit) body += String(chunk);
-        else truncated = true;
-      });
-      req.on("error", () => this.reply(res, 200, "ok"));
-      req.on("end", () => {
-        const event = parseEventBody(truncated ? body.slice(0, 65536) : body, this.opts.vaultBase);
+      this.readBody(req, (body) => {
+        const event = body === null ? null : parseEventBody(body, this.opts.vaultBase);
         if (event) {
           try {
             this.opts.onEvent(event);
@@ -711,16 +697,8 @@ export class ActivityListener {
       return;
     }
     if (method === "POST" && url === "/live") {
-      const limit = this.opts.maxBodyBytes ?? 1024 * 1024;
-      let body = "";
-      let truncated = false;
-      req.on("data", (chunk) => {
-        if (body.length < limit) body += String(chunk);
-        else truncated = true;
-      });
-      req.on("error", () => this.reply(res, 200, "ok"));
-      req.on("end", () => {
-        const event = parseLiveBody(truncated ? body.slice(0, 65536) : body);
+      this.readBody(req, (body) => {
+        const event = body === null ? null : parseLiveBody(body);
         if (event && this.opts.onLive) {
           try {
             this.opts.onLive(event);
@@ -740,9 +718,60 @@ export class ActivityListener {
     this.reply(res, 404, "not found");
   }
 
+  /**
+   * A browser adds an Origin header to every cross-site POST and fetch, so a request with one came
+   * from a web page, not from a hook. The Host check stops DNS rebinding: a page on another name
+   * that resolves to 127.0.0.1 still sends its own name as the Host.
+   */
+  private isLocalClient(req: HttpRequestLike): boolean {
+    const headers = req.headers ?? {};
+    if (headers.origin !== undefined) return false;
+    const host = typeof headers.host === "string" ? headers.host.toLowerCase() : "";
+    return host === `127.0.0.1:${this.port}` || host === `localhost:${this.port}`;
+  }
+
+  /** Collect the body as bytes and decode it once (a UTF-8 character can span two chunks). null = too large or failed. */
+  private readBody(req: HttpRequestLike, done: (body: string | null) => void): void {
+    const limit = this.opts.maxBodyBytes ?? 1024 * 1024;
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    let tooLarge = false;
+    let finished = false;
+    const finish = (body: string | null): void => {
+      if (finished) return;
+      finished = true;
+      done(body);
+    };
+    req.on("data", (chunk) => {
+      if (tooLarge) return;
+      const bytes = chunk instanceof Uint8Array ? chunk : new TextEncoder().encode(String(chunk));
+      size += bytes.byteLength;
+      if (size > limit) {
+        tooLarge = true;
+        chunks.length = 0;
+        return;
+      }
+      chunks.push(bytes);
+    });
+    req.on("error", () => finish(null));
+    req.on("end", () => {
+      if (tooLarge) {
+        finish(null);
+        return;
+      }
+      const all = new Uint8Array(size);
+      let offset = 0;
+      for (const bytes of chunks) {
+        all.set(bytes, offset);
+        offset += bytes.byteLength;
+      }
+      finish(new TextDecoder("utf-8").decode(all));
+    });
+  }
+
   private reply(res: HttpResponseLike, status: number, body: string, type = "text/plain"): void {
     try {
-      res.writeHead(status, { "Content-Type": type, "Access-Control-Allow-Origin": "*" });
+      res.writeHead(status, { "Content-Type": type });
       res.end(body);
     } catch {
       // the client went away

@@ -245,11 +245,16 @@ export class BrainGLRenderer extends RenderCore {
   /** Reusable scratch for uploading one node's 6-vertex interleaved block (drag update). */
   private nodeUploadScratch = new Float32Array(NODE_VERTS_PER_NODE * NODE_FLOATS_PER_VERT);
   /**
-   * Node-buffer indices whose radius/color were overwritten by the live-activity glow.
+   * Node-buffer indices whose radius/color were overwritten by the live-activity glow,
+   * mapped to the glow signature last uploaded (so an unchanged glow is not re-uploaded).
    * Restored to their base values (np.buf) the frame after the glow fades. Cleared
    * whenever the node program is rebuilt (new graph or restored context).
    */
-  private activityPatched = new Set<number>();
+  private activityPatched = new Map<number, number>();
+  /** Scratch set of the buffer indices glowing this frame (reused to avoid per-frame allocation). */
+  private activitySeen = new Set<number>();
+  /** Node id -> node-buffer index for nodeGraph, built with the node VBO. */
+  private nodeIndexById = new Map<string, number>();
 
   // ---- Context-loss state ----
   /** True between webglcontextlost and webglcontextrestored (or permanent loss). */
@@ -580,9 +585,9 @@ export class BrainGLRenderer extends RenderCore {
     // ---- Pass: signals (additive particle trails) ----
     if (this.passEnabled("signals")) this.drawSignals(gl, proj, now);
 
-    // ---- Pass: labels (overlay 2D). Section labels follow showLobeLabels; node labels are ALWAYS drawn but
-    // minimal (in-use / hovered / focused) unless showAllLabels turns the dense mode back on. ----
-    if (this.passEnabled("labels") && this.overlayCtx) {
+    // ---- Pass: labels (overlay 2D). The label setting gates both lobe and node labels; with live
+    // activity on, glowing notes and live nodes are labelled even when the automatic labels are off. ----
+    if (this.passEnabled("labels") && this.overlayCtx && (this.options.showLobeLabels || this.options.liveActivity)) {
       const overlayCtx = this.overlayCtx;
       // Build the scene projector as a (point)=>ProjectedPoint closure (same params
       // as Canvas2D drawScene uses for lobe labels).
@@ -601,8 +606,8 @@ export class BrainGLRenderer extends RenderCore {
         zoom: this.zoom,
         width: this.width,
         mobile: this.effectivePerformancePreset() === "mobile",
-        activeIds: this.activeNoteIds(),
-        showAll: this.options.showAllLabels
+        activeIds: this.options.liveActivity ? this.activeNoteIds() : undefined,
+        showAll: this.options.showLobeLabels
       });
     }
 
@@ -920,7 +925,8 @@ export class BrainGLRenderer extends RenderCore {
     gl.uniform1f(cp.uniforms.uCx, proj.cx);
     gl.uniform1f(cp.uniforms.uCy, proj.cy);
     gl.uniform1f(cp.uniforms.uDist, proj.dist);
-    gl.uniform1f(cp.uniforms.uTime, 0); // frozen: no idle cloud twinkle (only actions animate)
+    // Live activity freezes the twinkle clock at 0 (a still brain), the same as Canvas2D.
+    gl.uniform1f(cp.uniforms.uTime, this.options.liveActivity ? 0 : now);
     gl.uniform1f(cp.uniforms.uHemisphere, hemisphere);
     gl.uniform1fv(cp.uniforms["uLobeMul[0]"], lobeMul);
     gl.uniform3fv(cp.uniforms["uLobeColors[0]"], lobeColors);
@@ -976,9 +982,10 @@ export class BrainGLRenderer extends RenderCore {
       np.buf.positions[bufIdx * 3 + 1] = pos.y;
       np.buf.positions[bufIdx * 3 + 2] = pos.z;
 
-      // Rewrite the node's 6-vertex block from buf (position changed; a glowing node
-      // keeps its current activity radius/color because applyActivity re-patches it).
+      // Rewrite the node's 6-vertex block from buf (position changed). Forget its glow
+      // patch so applyActivity re-applies the activity radius/color next frame.
       this.uploadNodeBlock(gl, np, bufIdx);
+      this.activityPatched.delete(bufIdx);
     }
 
     // ---- Edge VBO: rewrite each INCIDENT edge's 26-vertex block ----
@@ -1417,37 +1424,40 @@ export class BrainGLRenderer extends RenderCore {
    * Live activity for the WebGL path. The node VBO is static, so each glowing node
    * gets its block re-uploaded with radius * (1 + swell * level) and its color lerped
    * toward the read/write color; a node whose glow faded is restored from np.buf once.
-   * Runs before the node passes; costs one bufferSubData per glowing node per frame.
+   * Runs before the node passes. A glow that has not changed since the last upload
+   * (the hold window) is skipped, so a steady glow costs no bufferSubData.
    */
   private applyActivity(gl: WebGL2RenderingContext, graph: BrainGraph): void {
     const np = this.nodeProgram;
     if (!np || this.nodeGraph !== graph) return;
     const activity = this.activity;
-    const wanted = new Map<number, { level: number; kind: "read" | "write"; live: boolean }>();
+    const seen = this.activitySeen;
+    seen.clear();
     if (activity) {
+      const { swell, readColor, writeColor } = activity.options;
       for (const [id, entry] of activity.active()) {
-        const bufIdx = this.nodeBufferIndexOf(graph, id);
-        if (bufIdx >= 0 && bufIdx < np.nodeCount) wanted.set(bufIdx, { level: entry.level, kind: entry.kind, live: !!entry.live });
+        const bufIdx = this.nodeIndexById.get(id);
+        if (bufIdx === undefined || bufIdx >= np.nodeCount) continue;
+        seen.add(bufIdx);
+        // What is uploaded: the level in [0, 1], plus 2 for a write and 4 for a live node.
+        const signature = entry.level + (entry.kind === "write" ? 2 : 0) + (entry.live ? 4 : 0);
+        if (this.activityPatched.get(bufIdx) === signature) continue;
+        const base: [number, number, number] = [
+          np.buf.color[bufIdx * 3 + 0],
+          np.buf.color[bufIdx * 3 + 1],
+          np.buf.color[bufIdx * 3 + 2]
+        ];
+        // A live task node keeps its own color (just swells/pulses); a read/write glow lerps toward green/red.
+        const color = entry.live ? base : lerpRgb01(base, entry.kind === "write" ? writeColor : readColor, entry.level);
+        const radius = np.buf.radius[bufIdx] * (1 + swell * entry.level);
+        this.uploadNodeBlock(gl, np, bufIdx, radius, color);
+        this.activityPatched.set(bufIdx, signature);
       }
     }
-    for (const bufIdx of [...this.activityPatched]) {
-      if (wanted.has(bufIdx)) continue;
+    for (const bufIdx of this.activityPatched.keys()) {
+      if (seen.has(bufIdx)) continue;
       this.uploadNodeBlock(gl, np, bufIdx);
       this.activityPatched.delete(bufIdx);
-    }
-    if (!activity || wanted.size === 0) return;
-    const { swell, readColor, writeColor } = activity.options;
-    for (const [bufIdx, entry] of wanted) {
-      const base: [number, number, number] = [
-        np.buf.color[bufIdx * 3 + 0],
-        np.buf.color[bufIdx * 3 + 1],
-        np.buf.color[bufIdx * 3 + 2]
-      ];
-      // A live task node keeps its own color (just swells/pulses); a read/write glow lerps toward green/red.
-      const color = entry.live ? base : lerpRgb01(base, entry.kind === "write" ? writeColor : readColor, entry.level);
-      const radius = np.buf.radius[bufIdx] * (1 + swell * entry.level);
-      this.uploadNodeBlock(gl, np, bufIdx, radius, color);
-      this.activityPatched.add(bufIdx);
     }
   }
 
@@ -1479,6 +1489,11 @@ export class BrainGLRenderer extends RenderCore {
     const buf = buildNodeBuffer(graph.nodes, this.options.nodeSizeScale || 1);
     const nodeCount = buf.count;
     this.activityPatched.clear(); // fresh VBO: nothing is patched yet
+    // Same order as buildNodeBuffer (nodes with a _3dLobe), so the map matches nodeBufferIndexOf.
+    this.nodeIndexById.clear();
+    for (const node of graph.nodes) {
+      if (node._3dLobe) this.nodeIndexById.set(node.id, this.nodeIndexById.size);
+    }
 
     // Interleaved layout (floats per vertex):
     //   pos(3) radiusBase(1) hub(1) status(1) lobeIndex(1)

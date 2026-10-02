@@ -94,10 +94,19 @@ test("normalizeSettings clamps node size and layout spread into range", () => {
   assert.equal(normalizeSettings({ linkThickness: 2 }).linkThickness, 2);
   assert.equal(normalizeSettings({ linkThickness: 99 }).linkThickness, 3);      // upper clamp
   assert.equal(normalizeSettings({ linkThickness: 0 }).linkThickness, 0.4);     // lower clamp
-  // node size neutral 1; spread defaults a little spread-out; link thickness neutral 1
+  // all three are neutral by default, so the atlas looks the same until the user changes them
   assert.equal(DEFAULT_SETTINGS.nodeSizeScale, 1);
-  assert.equal(DEFAULT_SETTINGS.layoutSpread, 1.4);
+  assert.equal(DEFAULT_SETTINGS.layoutSpread, 1);
   assert.equal(DEFAULT_SETTINGS.linkThickness, 1);
+});
+
+test("live activity is opt-in and the classic defaults are unchanged", () => {
+  assert.equal(DEFAULT_SETTINGS.activityEnabled, false, "no listener until the user turns it on");
+  assert.equal(normalizeSettings(null).activityEnabled, false);
+  assert.equal(normalizeSettings({ activityEnabled: true }).activityEnabled, true);
+  assert.equal(DEFAULT_SETTINGS.idleAutoRotate, true);
+  assert.equal(normalizeSettings({ activityPort: 80 }).activityPort, DEFAULT_SETTINGS.activityPort, "privileged port rejected");
+  assert.equal(normalizeSettings({ activityReadColor: "green" }).activityReadColor, DEFAULT_SETTINGS.activityReadColor);
 });
 
 test("normalizeSettings validates frontmatter value and folder region mappings", () => {

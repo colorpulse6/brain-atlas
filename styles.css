@@ -86,22 +86,20 @@
   position: absolute;
   top: 36px;
   right: 14px;
-  z-index: 6;
-  width: min(330px, calc(100% - 28px));
+  z-index: 3;
+  display: flex;
+  max-width: min(330px, calc(100% - 28px));
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
   pointer-events: auto;
   font-family: var(--font-monospace);
-}
-/* The controls card body holds the button groups (collapsible with the header). */
-.brain-atlas-controls-groups {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
 }
 
 .brain-atlas-control-group {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-start;
+  justify-content: flex-end;
   gap: 4px;
 }
 
@@ -495,91 +493,51 @@
   }
 }
 
-/* --- Live activity: reticle stack (temporal side) + bottom-left task manager --- */
-.brain-atlas-live-layer {
+/* --- Live activity (shown only while the feature is on): Active / Shells / History cards --- */
+.brain-atlas-live-dock {
   position: absolute;
-  inset: 0;
-  pointer-events: none;
-  overflow: hidden;
-  z-index: 6;
-}
-
-/* A "target marker" reticle: a ring with a crosshair, plus a label to the right. */
-.brain-atlas-live-reticle {
-  position: absolute;
-  transform: translate(-50%, -50%);
+  top: 122px;            /* corrected at runtime to sit just below the controls (positionLiveDock) */
+  right: 14px;
+  bottom: 14px;          /* the cards shrink to fit; empty space clicks through */
+  z-index: 3;
+  width: min(330px, calc(100% - 28px));
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
-  white-space: nowrap;
-  transition: opacity 200ms ease-out, left 220ms ease-out, top 220ms ease-out;
-}
-.brain-atlas-reticle-ring {
-  position: relative;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  border: 1.5px solid var(--live-color, #ffb02e);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--live-color, #ffb02e) 70%, transparent),
-              inset 0 0 5px color-mix(in srgb, var(--live-color, #ffb02e) 45%, transparent);
-}
-/* crosshair ticks */
-.brain-atlas-reticle-ring::before,
-.brain-atlas-reticle-ring::after {
-  content: "";
-  position: absolute;
-  background: var(--live-color, #ffb02e);
-  box-shadow: 0 0 4px var(--live-color, #ffb02e);
-}
-.brain-atlas-reticle-ring::before { left: 50%; top: -5px; width: 1.5px; height: 26px; transform: translateX(-50%); }
-.brain-atlas-reticle-ring::after  { top: 50%; left: -5px; height: 1.5px; width: 26px; transform: translateY(-50%); }
-.brain-atlas-live-reticle[data-kind="agent"] .brain-atlas-reticle-ring { border-radius: 3px; }
-.brain-atlas-live-reticle[data-kind="shell"] .brain-atlas-reticle-ring { border-style: dashed; }
-.brain-atlas-reticle-label {
-  font: 600 10px 'JetBrains Mono', monospace;
-  letter-spacing: 0.02em;
-  color: var(--live-color, #ffb02e);
-  text-shadow: 0 0 6px color-mix(in srgb, var(--live-color, #ffb02e) 55%, transparent), 0 1px 2px rgba(0,0,0,0.8);
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.brain-atlas-live-reticle.is-active .brain-atlas-reticle-ring {
-  animation: brain-atlas-reticle-pulse 1.15s ease-in-out infinite;
-}
-.brain-atlas-live-reticle.is-ending { filter: saturate(0.55); }
-@keyframes brain-atlas-reticle-pulse {
-  0%, 100% { box-shadow: 0 0 6px color-mix(in srgb, var(--live-color, #ffb02e) 55%, transparent), inset 0 0 4px color-mix(in srgb, var(--live-color, #ffb02e) 40%, transparent); }
-  50%      { box-shadow: 0 0 15px color-mix(in srgb, var(--live-color, #ffb02e) 95%, transparent), inset 0 0 8px color-mix(in srgb, var(--live-color, #ffb02e) 65%, transparent); }
+  pointer-events: none;  /* only the cards catch events, so gaps click through to the brain */
+  font-family: var(--font-monospace);
 }
 
-/* Bottom-left task manager: everything Claude is running right now. */
-.brain-atlas-task-panel {
-  position: absolute;
-  left: 14px;
-  bottom: 14px;
-  z-index: 8;
-  max-width: 340px;
-  max-height: 45%;
-  overflow-y: auto;
-  padding: 8px 10px 10px;
+.brain-atlas-live-dock.is-hidden {
+  display: none;
+}
+
+.brain-atlas-card {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  min-height: 0;
   border-radius: 8px;
   background: rgba(10, 10, 14, 0.82);
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
   backdrop-filter: blur(6px);
+  overflow: hidden;
   pointer-events: auto;
-  font-family: 'JetBrains Mono', monospace;
 }
-.brain-atlas-task-header {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 6px;
+.brain-atlas-card-header {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px; cursor: pointer; user-select: none; flex: 0 0 auto;
 }
-.brain-atlas-task-title { font-size: 11px; font-weight: 700; letter-spacing: 0.14em; color: #e8e6e0; }
-.brain-atlas-task-count { font-size: 10px; color: #9aa0a6; }
+.brain-atlas-card-header:hover { background: rgba(255, 255, 255, 0.05); }
+.brain-atlas-card-chevron { flex: 0 0 auto; width: 8px; font-size: 8px; color: #9aa0a6; transition: transform 120ms ease; }
+.brain-atlas-card.is-collapsed .brain-atlas-card-chevron { transform: rotate(-90deg); }
+.brain-atlas-card-title { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: #c9b896; font-weight: 700; }
+.brain-atlas-card-count { margin-left: auto; font-size: 9px; color: #8a9099; font-variant-numeric: tabular-nums; }
+.brain-atlas-card-body { padding: 4px 10px 10px; overflow-y: auto; min-height: 0; max-height: 30vh; }
+.brain-atlas-card.is-collapsed .brain-atlas-card-body { display: none; }
+.brain-atlas-card[data-card="shells"] { border-color: rgba(56, 189, 248, 0.22); }
+
 .brain-atlas-task-group { margin-top: 6px; }
 .brain-atlas-task-group-title {
   font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase;
@@ -589,7 +547,7 @@
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 2px 2px;
+  padding: 2px;
   animation: brain-atlas-task-in 220ms ease-out;
 }
 .brain-atlas-task-row.is-ending { opacity: 0.5; }
@@ -609,83 +567,13 @@
 }
 .brain-atlas-task-status { font-size: 9px; color: #6f757c; flex: 0 0 auto; }
 @keyframes brain-atlas-task-in { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
-@keyframes brain-atlas-task-blink { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
-
-.brain-atlas-root.is-light-palette .brain-atlas-task-panel { background: rgba(250, 250, 252, 0.9); border-color: rgba(0,0,0,0.1); }
-.brain-atlas-root.is-light-palette .brain-atlas-task-title { color: #1a1a1f; }
-
-/* Right column under the controls: collapsible cards (Layout & Display, Active, Shells). */
-.brain-atlas-right-dock {
-  position: absolute;
-  top: 122px;            /* corrected at runtime to sit just below the controls (positionRightDock) */
-  right: 14px;
-  bottom: 14px;
-  z-index: 6;
-  width: min(330px, calc(100% - 28px));
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  pointer-events: none;  /* only the cards catch events, so gaps click through to the brain */
-  font-family: 'JetBrains Mono', monospace;
-}
-/* Left column: Anatomical Regions over a long, scrollable History feed. */
-.brain-atlas-left-dock {
-  position: absolute;
-  top: 44px;
-  left: 14px;
-  bottom: 14px;
-  z-index: 6;
-  width: min(320px, calc(100% - 28px));
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  pointer-events: none;
-  font-family: 'JetBrains Mono', monospace;
-}
-.brain-atlas-left-dock .brain-atlas-card.is-hidden { display: none; }
-.brain-atlas-card[data-card="regions"] .brain-atlas-card-body { max-height: 40vh; }
-
-/* Collapsible card (shared by the controls "View" card and the dock cards). */
-.brain-atlas-card {
-  display: flex;
-  flex-direction: column;
-  flex: 0 0 auto;
-  min-height: 0;
-  border-radius: 8px;
-  background: rgba(10, 10, 14, 0.82);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(6px);
-  overflow: hidden;
-  pointer-events: auto;
-}
-.brain-atlas-card-grow { flex: 1 1 auto; }   /* History fills the remaining height */
-.brain-atlas-card-header {
-  display: flex; align-items: center; gap: 6px;
-  padding: 6px 10px; cursor: pointer; user-select: none; flex: 0 0 auto;
-}
-.brain-atlas-card-header:hover { background: rgba(255, 255, 255, 0.05); }
-.brain-atlas-card-chevron { flex: 0 0 auto; width: 8px; font-size: 8px; color: #9aa0a6; transition: transform 120ms ease; }
-.brain-atlas-card.is-collapsed .brain-atlas-card-chevron { transform: rotate(-90deg); }
-.brain-atlas-card-title { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: #c9b896; font-weight: 700; }
-.brain-atlas-card-count { margin-left: auto; font-size: 9px; color: #8a9099; font-variant-numeric: tabular-nums; }
-.brain-atlas-card-body { padding: 4px 10px 10px; overflow-y: auto; min-height: 0; }
-.brain-atlas-card.is-collapsed .brain-atlas-card-body { display: none; }
-.brain-atlas-card-grow .brain-atlas-card-body { flex: 1 1 auto; }
-.brain-atlas-card[data-card="config"] .brain-atlas-card-body { max-height: 42vh; }
-.brain-atlas-card[data-card="active"] .brain-atlas-card-body { max-height: 30vh; }
-.brain-atlas-card[data-card="shells"] .brain-atlas-card-body { max-height: 26vh; }
-.brain-atlas-card[data-card="shells"] { border-color: rgba(56, 189, 248, 0.22); }  /* shell-blue edge */
-/* The controls card is absolutely positioned (top-right) but shares the card chrome. */
-.brain-atlas-controls.brain-atlas-card { overflow: visible; }
-.brain-atlas-controls .brain-atlas-card-body { overflow: visible; max-height: none; }
+@keyframes brain-atlas-task-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 
 .brain-atlas-history-empty { font-size: 10px; color: #6f757c; padding: 4px 0; }
 .brain-atlas-history-row {
   display: flex; align-items: baseline; gap: 7px;
-  padding: 2px 0;
+  padding: 2px 0 2px 7px;
   border-left: 2px solid var(--live-color, #ffb02e);
-  padding-left: 7px;
   margin-bottom: 1px;
 }
 .brain-atlas-history-verb {
@@ -700,25 +588,10 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-.brain-atlas-root.is-light-palette .brain-atlas-card { background: rgba(250, 250, 252, 0.92); border-color: rgba(0,0,0,0.12); }
-.brain-atlas-root.is-light-palette .brain-atlas-card-header:hover { background: rgba(0,0,0,0.05); }
+.brain-atlas-root.is-light-palette .brain-atlas-card { background: rgba(250, 250, 252, 0.92); border-color: rgba(0, 0, 0, 0.12); }
+.brain-atlas-root.is-light-palette .brain-atlas-card-header:hover { background: rgba(0, 0, 0, 0.05); }
 .brain-atlas-root.is-light-palette .brain-atlas-history-label { color: #1a1a1f; }
 
-/* Config (Layout & Display) card body: the graph-view-style spacing/size sliders. */
-.brain-atlas-config-row { margin-bottom: 10px; }
-.brain-atlas-config-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 3px; }
-.brain-atlas-config-label { font-size: 10px; color: #e8e6e0; }
-.brain-atlas-config-val { font-size: 10px; color: #c9b896; font-variant-numeric: tabular-nums; }
-.brain-atlas-config-slider { width: 100%; margin: 0; accent-color: #c9b896; cursor: pointer; }
-.brain-atlas-config-desc { font-size: 8.5px; color: #8a9099; margin-top: 3px; line-height: 1.3; }
-.brain-atlas-config-reset-row { display: flex; justify-content: flex-end; margin: 2px 0 6px; }
-.brain-atlas-config-note {
-  font-size: 8.5px; color: #6f757c; line-height: 1.35; margin-top: 4px;
-  border-top: 1px solid rgba(255,255,255,0.08); padding-top: 6px;
-}
-.brain-atlas-root.is-light-palette .brain-atlas-config-label { color: #1a1a1f; }
-
 @media (max-width: 700px) {
-  .brain-atlas-right-dock,
-  .brain-atlas-left-dock { display: none; }   /* too cramped to be useful on a phone-width leaf */
+  .brain-atlas-live-dock { display: none; }   /* too cramped to be useful on a phone-width leaf */
 }

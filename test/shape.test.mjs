@@ -34,6 +34,20 @@ test("lobe assignment creates folder sub-clusters inside dense regions", () => {
   assert.ok(wikiDistance < crossDistance);
 });
 
+test("layout spread 1 keeps the original layout: a note's spot does not depend on how full its region is", () => {
+  const place = (count, spread) => {
+    const nodes = [node("Wiki/Target.md")];
+    for (let i = 0; i < count; i += 1) nodes.push(node(`Wiki/Filler ${i}.md`));
+    assignLobePositions(nodes, spread);
+    return nodes[0]._3dLobe;
+  };
+  // spread 1 (the default): the density factor is off, as in the layout before the spread setting existed
+  assert.deepEqual(place(3, 1), place(300, 1));
+  assert.deepEqual(place(3, undefined), place(3, 1));
+  // above 1 a crowded region fans out further
+  assert.notDeepEqual(place(3, 1.5), place(300, 1.5));
+});
+
 test("live placement puts the two sides on opposite temporal faces", () => {
   const left = placeLiveNode("left", "git status", []);
   const right = placeLiveNode("right", "git status", []);

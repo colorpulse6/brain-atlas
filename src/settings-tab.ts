@@ -1,12 +1,15 @@
-import { PluginSettingTab, Setting } from "obsidian";
+import { Notice, PluginSettingTab, Setting, type TextComponent } from "obsidian";
 import type BrainAtlasPlugin from "../main.ts";
 import { normalizeKind } from "./classify.ts";
 import { buildClassificationReport } from "./diagnostics.ts";
 import { LOBES, setLobeEnabled } from "./lobe-visibility.ts";
 import { PALETTES } from "./palette.ts";
 import {
+  DEFAULT_SETTINGS,
   normalizeFrontmatterValueKey,
+  normalizeHexColor,
   normalizeLobeValue,
+  normalizePort,
   type BrainAtlasSettings,
   type PaletteName,
   type PerformancePreset,
@@ -25,55 +28,45 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
 
   /**
    * Live activity (Claude Code): a loopback listener lights the node of every note an
-   * external tool reads (green) or writes (red). Settings are applied immediately
-   * (listener restarted) so no reload is needed.
+   * external tool reads (green) or writes (red). Only the toggle and the port restart the
+   * listener; the other controls just update the glow.
    */
   private renderActivitySection(containerEl: HTMLElement): void {
-    const apply = async (): Promise<void> => {
-      await this.plugin.saveSettings();
-      this.plugin.applyActivitySettings();
-    };
     new Setting(containerEl).setName("Live activity").setHeading();
     new Setting(containerEl)
       .setName("Light up notes as Claude Code reads and writes them")
-      .setDesc("Runs a loopback HTTP listener (127.0.0.1 only, desktop only). A Claude Code PostToolUse hook posts each Read/Edit/Write to it and the note's node glows: green on read, red on write, fading over the hold and decay times below. Same contract as the Neural Vault plugin, so one hook can feed both.")
+      .setDesc("Off by default. Turning it on starts a local HTTP listener on 127.0.0.1 at the port below (this computer only, desktop only). A Claude Code hook posts each Read, Edit and Write to it and the note glows: green on read, red on write. Commands and subagents posted to /live appear as temporary nodes. Nothing leaves this computer and nothing is written to your vault.")
       .addToggle((toggle) => toggle
         .setValue(this.plugin.settings.activityEnabled)
         .onChange(async (value) => {
           this.plugin.settings.activityEnabled = value;
-          await apply();
+          await this.plugin.saveSettings();
+          this.plugin.restartActivityListener();
+          this.plugin.refreshActiveBrainViews();
         }));
     new Setting(containerEl)
       .setName("Listener port")
-      .setDesc("The hook posts to http://127.0.0.1:<port>/read (default 8766; Neural Vault uses 8765). Status: GET /status.")
-      .addText((text) => text
-        .setPlaceholder("8766")
-        .setValue(String(this.plugin.settings.activityPort))
-        .onChange(async (value) => {
-          const port = Number(value);
-          if (!Number.isInteger(port) || port < 1024 || port > 65535) return;
+      .setDesc("The hook posts to http://127.0.0.1:<port>/read (default 8766; Neural Vault uses 8765). 1024 to 65535.")
+      .addText((text) => {
+        text.setPlaceholder("8766").setValue(String(this.plugin.settings.activityPort));
+        // Validate when the field is committed (blur or Enter), not on every keystroke.
+        text.inputEl.addEventListener("change", () => {
+          const port = normalizePort(text.getValue().trim());
+          if (port === null) {
+            new Notice("Brain Atlas: the port must be a whole number from 1024 to 65535.");
+            text.setValue(String(this.plugin.settings.activityPort));
+            return;
+          }
+          if (port === this.plugin.settings.activityPort) return;
           this.plugin.settings.activityPort = port;
-          await apply();
-        }));
+          void this.plugin.saveSettings().then(() => this.plugin.restartActivityListener());
+        });
+      });
     new Setting(containerEl)
       .setName("Read and write colors")
-      .setDesc("Hex colors the node lerps toward while it glows (read, then write).")
-      .addText((text) => text
-        .setPlaceholder("#00ff00")
-        .setValue(this.plugin.settings.activityReadColor)
-        .onChange(async (value) => {
-          if (!/^#[0-9a-fA-F]{6}$/.test(value.trim())) return;
-          this.plugin.settings.activityReadColor = value.trim().toLowerCase();
-          await apply();
-        }))
-      .addText((text) => text
-        .setPlaceholder("#ff0000")
-        .setValue(this.plugin.settings.activityWriteColor)
-        .onChange(async (value) => {
-          if (!/^#[0-9a-fA-F]{6}$/.test(value.trim())) return;
-          this.plugin.settings.activityWriteColor = value.trim().toLowerCase();
-          await apply();
-        }));
+      .setDesc("Hex colors the node shifts toward while it glows (read, then write).")
+      .addText((text) => this.addColorField(text, "activityReadColor"))
+      .addText((text) => this.addColorField(text, "activityWriteColor"));
     new Setting(containerEl)
       .setName("Hold (seconds)")
       .setDesc("How long a lit node stays at full glow before it starts to fade.")
@@ -81,10 +74,7 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         .setLimits(0, 10, 0.5)
         .setValue(this.plugin.settings.activityHoldSeconds)
         .setDynamicTooltip()
-        .onChange(async (value) => {
-          this.plugin.settings.activityHoldSeconds = value;
-          await apply();
-        }));
+        .onChange((value) => this.updateActivityOptions({ activityHoldSeconds: value })));
     new Setting(containerEl)
       .setName("Decay (seconds)")
       .setDesc("Time constant of the exponential fade after the hold.")
@@ -92,10 +82,7 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         .setLimits(0.1, 5, 0.1)
         .setValue(this.plugin.settings.activityDecaySeconds)
         .setDynamicTooltip()
-        .onChange(async (value) => {
-          this.plugin.settings.activityDecaySeconds = value;
-          await apply();
-        }));
+        .onChange((value) => this.updateActivityOptions({ activityDecaySeconds: value })));
     new Setting(containerEl)
       .setName("Cascade")
       .setDesc("Glow level passed to the linked neighbours of a lit node (0 = none, 1 = same as the node).")
@@ -103,10 +90,7 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         .setLimits(0, 1, 0.05)
         .setValue(this.plugin.settings.activityCascade)
         .setDynamicTooltip()
-        .onChange(async (value) => {
-          this.plugin.settings.activityCascade = value;
-          await apply();
-        }));
+        .onChange((value) => this.updateActivityOptions({ activityCascade: value })));
     new Setting(containerEl)
       .setName("Swell")
       .setDesc("Radius multiplier at full glow is 1 + swell.")
@@ -114,17 +98,33 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         .setLimits(0, 6, 0.25)
         .setValue(this.plugin.settings.activitySwell)
         .setDynamicTooltip()
-        .onChange(async (value) => {
-          this.plugin.settings.activitySwell = value;
-          await apply();
-        }));
+        .onChange((value) => this.updateActivityOptions({ activitySwell: value })));
+  }
+
+  /** A hex color field, validated when committed (blur or Enter). */
+  private addColorField(text: TextComponent, key: "activityReadColor" | "activityWriteColor"): void {
+    text.setPlaceholder(DEFAULT_SETTINGS[key]).setValue(this.plugin.settings[key]);
+    text.inputEl.addEventListener("change", () => {
+      const color = normalizeHexColor(text.getValue());
+      if (color === null) {
+        new Notice("Brain Atlas: colors must be hex values like #00ff00.");
+        text.setValue(this.plugin.settings[key]);
+        return;
+      }
+      void this.updateActivityOptions({ [key]: color });
+    });
+  }
+
+  /** Save glow settings and push them into the shared activity state. The listener keeps running. */
+  private async updateActivityOptions(patch: Partial<BrainAtlasSettings>): Promise<void> {
+    this.plugin.settings = { ...this.plugin.settings, ...patch };
+    await this.plugin.saveSettings();
+    this.plugin.applyActivityOptions();
   }
 
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-
-    this.renderActivitySection(containerEl);
 
     new Setting(containerEl)
       .setName("Theme palette")
@@ -185,7 +185,7 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Layout spread")
-      .setDesc("Clustered (tight lobes) at the low end, spread (fills the 3D volume) at the high end. Also on the in-view Config button.")
+      .setDesc("Clustered (tight lobes) at the low end, spread (fills the 3D volume) at the high end. 1 is the default layout.")
       .addSlider((slider) => slider
         .setLimits(0.5, 2.5, 0.1)
         .setValue(this.plugin.settings.layoutSpread)
@@ -252,6 +252,8 @@ export class BrainAtlasSettingTab extends PluginSettingTab {
         .addOption("hover-preview", "Hover preview")
         .setValue(this.plugin.settings.clickAction)
         .onChange((value) => this.update({ clickAction: value as BrainAtlasSettings["clickAction"] })));
+
+    this.renderActivitySection(containerEl);
 
     new Setting(containerEl)
       .setName("Categorization")
