@@ -148,6 +148,7 @@ Controls:
 - `All` restores every region.
 - `None` dims every region.
 - `FRO`, `PAR`, `TEM`, `OCC`, `CER`, and `STM` toggle individual brain regions.
+- `Layout & Display`, the card under the controls, has the `Node size`, `Layout spread` and `Link thickness` sliders and a `Reset to default` button. It starts collapsed and remembers whether you left it open.
 
 Settings:
 

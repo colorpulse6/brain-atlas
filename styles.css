@@ -493,10 +493,10 @@
   }
 }
 
-/* --- Live activity (shown only while the feature is on): Active / Shells / History cards --- */
-.brain-atlas-live-dock {
+/* --- Dock under the controls: Layout & Display, plus Active / Shells / History while live activity is on --- */
+.brain-atlas-dock {
   position: absolute;
-  top: 122px;            /* corrected at runtime to sit just below the controls (positionLiveDock) */
+  top: 122px;            /* corrected at runtime to sit just below the controls (positionDock) */
   right: 14px;
   bottom: 14px;          /* the cards shrink to fit; empty space clicks through */
   z-index: 3;
@@ -508,7 +508,7 @@
   font-family: var(--font-monospace);
 }
 
-.brain-atlas-live-dock.is-hidden {
+.brain-atlas-card.is-hidden {
   display: none;
 }
 
@@ -592,6 +592,15 @@
 .brain-atlas-root.is-light-palette .brain-atlas-card-header:hover { background: rgba(0, 0, 0, 0.05); }
 .brain-atlas-root.is-light-palette .brain-atlas-history-label { color: #1a1a1f; }
 
+/* Layout & Display card: the node size, layout spread and link thickness sliders. */
+.brain-atlas-config-row { margin-bottom: 10px; }
+.brain-atlas-config-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 3px; }
+.brain-atlas-config-label { font-size: 10px; color: #e8e6e0; }
+.brain-atlas-config-val { font-size: 10px; color: #c9b896; font-variant-numeric: tabular-nums; }
+.brain-atlas-config-slider { width: 100%; margin: 0; accent-color: #c9b896; cursor: pointer; }
+.brain-atlas-config-reset-row { display: flex; justify-content: flex-end; margin: 2px 0 2px; }
+.brain-atlas-root.is-light-palette .brain-atlas-config-label { color: #1a1a1f; }
+
 @media (max-width: 700px) {
-  .brain-atlas-live-dock { display: none; }   /* too cramped to be useful on a phone-width leaf */
+  .brain-atlas-dock { display: none; }   /* too cramped to be useful on a phone-width leaf */
 }

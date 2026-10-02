@@ -7,7 +7,7 @@ import { RenderCore, type BrainRendererOptions, type LiveScreenNode } from "./re
 import { BrainGLRenderer } from "./gl/brain-gl-renderer.ts";
 import type { ActivityState, LiveEntry } from "./activity.ts";
 import { LOBE_CENTERS, placeLiveNode, liveSpotClear, type LiveOccupant } from "./shape.ts";
-import type { BrainAtlasSettings, PinnedNodePosition } from "./settings.ts";
+import { DEFAULT_SETTINGS, type BrainAtlasSettings, type PinnedNodePosition } from "./settings.ts";
 import type { BrainGraph, BrainNode, LobeName } from "./types.ts";
 
 export const BRAIN_ATLAS_VIEW_TYPE = "brain-atlas";
@@ -33,15 +33,21 @@ export class BrainAtlasView extends ItemView {
   private focusEl: HTMLDivElement | null = null;
   private infoEl: HTMLDivElement | null = null;
   private emptyEl: HTMLDivElement | null = null;
-  /** Live activity only: right-hand column of collapsible cards (Active, Shells, History) under the controls. */
-  private liveDockEl: HTMLDivElement | null = null;
+  /**
+   * Right-hand column of collapsible cards under the controls: Layout & Display always; Active, Shells
+   * and History only while live activity is on.
+   */
+  private dockEl: HTMLDivElement | null = null;
+  private liveCardEls: HTMLDivElement[] = [];
+  /** Layout & Display sliders, kept in step with the settings (they can also change in Settings). */
+  private configSliders: Array<{ key: ConfigSliderKey; input: HTMLInputElement; val: HTMLSpanElement }> = [];
   private taskPanelEl: HTMLDivElement | null = null;    // Active card body: commands / terminals / agents
   private taskCountEl: HTMLSpanElement | null = null;
   private shellPanelEl: HTMLDivElement | null = null;   // Shells card body
   private shellCountEl: HTMLSpanElement | null = null;
   private historyEl: HTMLDivElement | null = null;      // History card body
   private historyCountEl: HTMLSpanElement | null = null;
-  /** Keeps the live dock just below the controls however many rows the region buttons wrap to. */
+  /** Keeps the dock just below the controls however many rows the region buttons wrap to. */
   private controlsResizeObserver: ResizeObserver | null = null;
   /** Per-card collapsed state (view-local). */
   private collapsed: Record<string, boolean> = { active: false, shells: false, history: false };
@@ -103,19 +109,23 @@ export class BrainAtlasView extends ItemView {
     this.emptyEl = root.createDiv({ cls: "brain-atlas-empty" });
     this.emptyEl.setText("Your brain is empty. Add notes with #project, #person, or #source tags to start mapping.");
 
-    // Live activity cards. Hidden unless the feature is on (syncLiveDock).
-    this.liveDockEl = root.createDiv({ cls: "brain-atlas-live-dock" });
-    const active = this.makeCard(this.liveDockEl, "active", "Active");
+    // Cards under the controls: Layout & Display, then the live activity cards (hidden unless the
+    // feature is on, see syncDock).
+    this.dockEl = root.createDiv({ cls: "brain-atlas-dock" });
+    const config = this.makeCard(this.dockEl, "config", "Layout & Display", !this.plugin.settings.layoutPanelOpen);
+    this.buildConfigPanel(config.body);
+    const active = this.makeCard(this.dockEl, "active", "Active");
     this.taskPanelEl = active.body;
     this.taskCountEl = active.count;
-    const shells = this.makeCard(this.liveDockEl, "shells", "Shells");
+    const shells = this.makeCard(this.dockEl, "shells", "Shells");
     this.shellPanelEl = shells.body;
     this.shellCountEl = shells.count;
-    const history = this.makeCard(this.liveDockEl, "history", "History");
+    const history = this.makeCard(this.dockEl, "history", "History");
     this.historyEl = history.body;
     this.historyCountEl = history.count;
+    this.liveCardEls = [active.card, shells.card, history.card];
     if (typeof ResizeObserver === "function" && this.controlsEl) {
-      this.controlsResizeObserver = new ResizeObserver(() => this.positionLiveDock());
+      this.controlsResizeObserver = new ResizeObserver(() => this.positionDock());
       this.controlsResizeObserver.observe(this.controlsEl);
     }
 
@@ -134,7 +144,9 @@ export class BrainAtlasView extends ItemView {
     this.canvasContextKind = null;
     this.graph = null;
     this.vaultGraph = null;
-    this.liveDockEl = null;
+    this.dockEl = null;
+    this.liveCardEls = [];
+    this.configSliders = [];
     this.taskPanelEl = null;
     this.taskCountEl = null;
     this.shellPanelEl = null;
@@ -296,10 +308,16 @@ export class BrainAtlasView extends ItemView {
   }
 
   /** A collapsible card: a clickable header (chevron + title + count) over a body the sync methods fill. */
-  private makeCard(parent: HTMLElement, key: string, title: string): { card: HTMLDivElement; count: HTMLSpanElement; body: HTMLDivElement } {
+  private makeCard(
+    parent: HTMLElement,
+    key: string,
+    title: string,
+    collapsed = !!this.collapsed[key]
+  ): { card: HTMLDivElement; count: HTMLSpanElement; body: HTMLDivElement } {
+    this.collapsed[key] = collapsed;
     const card = parent.createDiv({ cls: "brain-atlas-card" });
     card.setAttr("data-card", key);
-    card.toggleClass("is-collapsed", !!this.collapsed[key]);
+    card.toggleClass("is-collapsed", collapsed);
     const header = card.createDiv({ cls: "brain-atlas-card-header" });
     header.createSpan({ cls: "brain-atlas-card-chevron", text: "\u25BE" });
     header.createSpan({ cls: "brain-atlas-card-title", text: title });
@@ -308,22 +326,99 @@ export class BrainAtlasView extends ItemView {
       const next = !card.hasClass("is-collapsed");
       card.toggleClass("is-collapsed", next);
       this.collapsed[key] = next;
+      if (key === "config") {
+        // The only card whose open state is remembered between sessions.
+        this.plugin.settings.layoutPanelOpen = !next;
+        void this.plugin.saveSettings();
+      }
     });
     const body = card.createDiv({ cls: "brain-atlas-card-body" });
     return { card, count, body };
   }
 
-  /** Show the live cards only while the feature is on, docked below the controls (and the Info panel). */
-  private syncLiveDock(): void {
-    this.liveDockEl?.toggleClass("is-hidden", !this.plugin.settings.activityEnabled);
-    this.positionLiveDock();
+  /** Show the live cards only while the feature is on; keep the dock below the controls (and the Info panel). */
+  private syncDock(): void {
+    for (const card of this.liveCardEls) card.toggleClass("is-hidden", !this.plugin.settings.activityEnabled);
+    this.syncConfigPanel();
+    this.positionDock();
   }
 
-  private positionLiveDock(): void {
-    if (!this.liveDockEl || !this.controlsEl) return;
+  private positionDock(): void {
+    if (!this.dockEl || !this.controlsEl) return;
     let top = this.controlsEl.offsetTop + this.controlsEl.offsetHeight + 8;
     if (this.showInfo && this.infoEl) top = Math.max(top, this.infoEl.offsetTop + this.infoEl.offsetHeight + 8);
-    this.liveDockEl.style.top = `${top}px`;
+    this.dockEl.style.top = `${top}px`;
+  }
+
+  /**
+   * The Layout & Display card: the same node size, layout spread and link thickness as Settings.
+   * Size and spread change the layout, so they apply on release (a rebuild); link thickness is a
+   * render option, so it follows the slider and saves on release.
+   */
+  private buildConfigPanel(body: HTMLElement): void {
+    body.empty();
+    this.configSliders = [];
+    this.addConfigSlider(body, "nodeSizeScale", "Node size", (v) => {
+      this.plugin.settings.nodeSizeScale = v;
+      void this.persistViewSettings();
+    });
+    this.addConfigSlider(body, "layoutSpread", "Layout spread", (v) => {
+      this.plugin.settings.layoutSpread = v;
+      void this.persistViewSettings();
+    }, "Low keeps notes close in each region; high spreads them through the region");
+    this.addConfigSlider(body, "linkThickness", "Link thickness", (v) => {
+      this.plugin.settings.linkThickness = v;
+      void this.plugin.saveSettings();
+    }, undefined, (v) => this.renderer.setOptions({ linkThickness: v }));
+    const resetRow = body.createDiv({ cls: "brain-atlas-config-reset-row" });
+    this.createControlButton(resetRow, "Reset to default", () => {
+      this.plugin.settings.nodeSizeScale = DEFAULT_SETTINGS.nodeSizeScale;
+      this.plugin.settings.layoutSpread = DEFAULT_SETTINGS.layoutSpread;
+      this.plugin.settings.linkThickness = DEFAULT_SETTINGS.linkThickness;
+      void this.persistViewSettings();
+    });
+  }
+
+  /** One labelled slider. `commit` runs on release; `preview` (optional) runs on every tick while dragging. */
+  private addConfigSlider(
+    parent: HTMLElement,
+    key: ConfigSliderKey,
+    label: string,
+    commit: (value: number) => void,
+    tooltip?: string,
+    preview?: (value: number) => void
+  ): void {
+    const range = CONFIG_SLIDER_RANGE[key];
+    const value = this.plugin.settings[key];
+    const row = parent.createDiv({ cls: "brain-atlas-config-row" });
+    if (tooltip) row.setAttr("title", tooltip);
+    const head = row.createDiv({ cls: "brain-atlas-config-head" });
+    head.createSpan({ cls: "brain-atlas-config-label", text: label });
+    const val = head.createSpan({ cls: "brain-atlas-config-val", text: value.toFixed(1) });
+    const input = row.createEl("input", { cls: "brain-atlas-config-slider" });
+    input.type = "range";
+    input.min = String(range.min);
+    input.max = String(range.max);
+    input.step = "0.1";
+    input.value = String(value);
+    input.setAttr("aria-label", label);
+    input.addEventListener("input", () => {
+      val.setText(Number(input.value).toFixed(1));
+      preview?.(Number(input.value));
+    });
+    input.addEventListener("change", () => commit(Number(input.value)));
+    this.configSliders.push({ key, input, val });
+  }
+
+  /** Follow changes made in Settings or by Reset; leave a slider alone while the user is dragging it. */
+  private syncConfigPanel(): void {
+    for (const { key, input, val } of this.configSliders) {
+      if (input.ownerDocument.activeElement === input) continue;
+      const value = this.plugin.settings[key];
+      if (Number(input.value) === value) continue;
+      input.value = String(value);
+      val.setText(value.toFixed(1));
+    }
   }
 
   /** The Active card body: every live task (commands / terminals / agents) grouped by kind. */
@@ -606,7 +701,7 @@ export class BrainAtlasView extends ItemView {
     this.syncControls();
     this.syncLegend(graph);
     this.syncInfoPanel();
-    this.syncLiveDock();
+    this.syncDock();
     this.syncTooltip();
     this.syncFocusCard();
     this.emptyEl?.toggleClass("is-visible", graph.nodes.length === 0);
@@ -801,6 +896,15 @@ export class BrainAtlasView extends ItemView {
     this.plugin.refreshActiveBrainViews();
   }
 }
+
+type ConfigSliderKey = "nodeSizeScale" | "layoutSpread" | "linkThickness";
+
+/** Slider limits; the same as the Settings sliders and normalizeSettings. */
+const CONFIG_SLIDER_RANGE: Record<ConfigSliderKey, { min: number; max: number }> = {
+  nodeSizeScale: { min: 0.4, max: 3 },
+  layoutSpread: { min: 0.5, max: 2.5 },
+  linkThickness: { min: 0.4, max: 3 }
+};
 
 /** Change signature of a live-node list: which nodes exist, and whether each is still running. */
 function liveSignature(nodes: Array<{ id: string; active: boolean; kind: string }>): string {

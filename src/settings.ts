@@ -35,6 +35,8 @@ export interface BrainAtlasSettings {
   idleAutoRotate: boolean;
   /** Cloud twinkle and ambient signals between regions. */
   ambientAnimation: boolean;
+  /** Whether the in-view Layout & Display card is expanded. */
+  layoutPanelOpen: boolean;
   showLobeLabels: boolean;
   showLegendChip: boolean;
   enabledLobes: LobeVisibility;
@@ -112,6 +114,7 @@ export const DEFAULT_SETTINGS: BrainAtlasSettings = {
   edgeCap: 4000,
   idleAutoRotate: true,
   ambientAnimation: true,
+  layoutPanelOpen: false,
   showLobeLabels: true,
   showLegendChip: true,
   enabledLobes: allLobesEnabled(),
@@ -168,6 +171,7 @@ export function normalizeSettings(input: Partial<BrainAtlasSettings> | null | un
     layoutSpread: normalizeNumber(input?.layoutSpread, 0.5, 2.5) ?? DEFAULT_SETTINGS.layoutSpread,
     linkThickness: normalizeNumber(input?.linkThickness, 0.4, 3) ?? DEFAULT_SETTINGS.linkThickness,
     ambientAnimation: typeof input?.ambientAnimation === "boolean" ? input.ambientAnimation : DEFAULT_SETTINGS.ambientAnimation,
+    layoutPanelOpen: typeof input?.layoutPanelOpen === "boolean" ? input.layoutPanelOpen : DEFAULT_SETTINGS.layoutPanelOpen,
     activityEnabled: typeof input?.activityEnabled === "boolean" ? input.activityEnabled : DEFAULT_SETTINGS.activityEnabled,
     activityPort: normalizePort(input?.activityPort) ?? DEFAULT_SETTINGS.activityPort,
     activityReadColor: normalizeHexColor(input?.activityReadColor) ?? DEFAULT_SETTINGS.activityReadColor,
